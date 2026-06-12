@@ -14,6 +14,8 @@ package hostkey
 
 import (
 	"crypto/ecdh"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -41,6 +43,41 @@ func Generate() (*KeyPair, error) {
 		return nil, fmt.Errorf("hostkey: generate P256 key: %w", err)
 	}
 	return &KeyPair{priv: priv}, nil
+}
+
+// Load reads a host private key from a Nebula P256 PEM file.
+func Load(path string) (*KeyPair, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("hostkey: read %s: %w", path, err)
+	}
+	b, _, curve, err := cert.UnmarshalPrivateKeyFromPEM(raw)
+	if err != nil {
+		return nil, fmt.Errorf("hostkey: parse private key: %w", err)
+	}
+	if curve != cert.Curve_P256 {
+		return nil, fmt.Errorf("hostkey: key curve is %s, want P256", curve)
+	}
+	priv, err := ecdh.P256().NewPrivateKey(b)
+	if err != nil {
+		return nil, fmt.Errorf("hostkey: load private key: %w", err)
+	}
+	return &KeyPair{priv: priv}, nil
+}
+
+// PublicKeyBytes returns the uncompressed P256 point (65 bytes) — the form used
+// in the enrollment CSR and for the pubkey hash.
+func (k *KeyPair) PublicKeyBytes() []byte { return k.priv.PublicKey().Bytes() }
+
+// SignDigest signs a digest with the host key (ECDSA P256, ASN.1 DER) — the
+// proof-of-possession signature for enrollment. The private key stays in-process
+// (P1); it is reconstructed as an ECDSA key from the same scalar.
+func (k *KeyPair) SignDigest(digest []byte) ([]byte, error) {
+	ek, err := ecdsa.ParseRawPrivateKey(elliptic.P256(), k.priv.Bytes())
+	if err != nil {
+		return nil, fmt.Errorf("hostkey: derive signing key: %w", err)
+	}
+	return ecdsa.SignASN1(rand.Reader, ek, digest)
 }
 
 // PublicKeyPEM returns the public key in Nebula's "NEBULA P256 PUBLIC KEY" PEM
