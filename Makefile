@@ -3,6 +3,11 @@ M0 := spike/m0
 
 .PHONY: help
 help:
+	@echo "build targets:"
+	@echo "  build        build pilot + harbor into bin/"
+	@echo "  test         go test ./..."
+	@echo "  tidy         go mod tidy"
+	@echo
 	@echo "M0 spike targets:"
 	@echo "  m0-prereqs   check tooling + print install command"
 	@echo "  m0-build     build pkcs11-enabled nebula-cert into $(M0)/tools"
@@ -11,6 +16,23 @@ help:
 	@echo "  m0-test      ping + blocklist + group tests          [sudo]"
 	@echo "  m0-down      tear down netns + bridge + nebula       [sudo]"
 	@echo "  m0-hsm       SoftHSM P256 CA -> sign -> certs (the feasibility test)"
+
+VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+LDFLAGS := -X main.version=$(VERSION)
+
+.PHONY: build
+build:
+	@mkdir -p bin
+	go build -trimpath -ldflags "$(LDFLAGS)" -o bin/pilot ./cmd/pilot
+	go build -trimpath -ldflags "$(LDFLAGS)" -o bin/harbor ./cmd/harbor
+
+.PHONY: test
+test:
+	go test ./...
+
+.PHONY: tidy
+tidy:
+	go mod tidy
 
 .PHONY: m0-prereqs
 m0-prereqs:
