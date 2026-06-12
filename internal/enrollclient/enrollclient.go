@@ -136,6 +136,84 @@ func Enroll(ctx context.Context, p Params) (Result, error) {
 	return Result{Status: "issued", OverlayIP: b.Device.OverlayIP}, nil
 }
 
+// RenewParams configures a renewal run (M4.4).
+type RenewParams struct {
+	CoreURL         string // Core API base URL (reached over the mesh)
+	Layout          paths.Layout
+	PinnedConfigPub *ecdsa.PublicKey
+	HTTPClient      *http.Client
+	Now             func() time.Time
+}
+
+// Renew rotates to a fresh key and re-certifies the same identity over the mesh
+// (the tunnel authenticates us by our overlay IP). It atomically swaps in the
+// new key + cert; a supervised SIGHUP then hot-reloads nebula (same IP/curve).
+func Renew(ctx context.Context, p RenewParams) (Result, error) {
+	if p.HTTPClient == nil {
+		p.HTTPClient = &http.Client{Timeout: 10 * time.Second}
+	}
+	if p.Now == nil {
+		p.Now = time.Now
+	}
+	if p.PinnedConfigPub == nil {
+		return Result{}, fmt.Errorf("enrollclient: a pinned config-signing key is required")
+	}
+
+	newKP, err := hostkey.Generate()
+	if err != nil {
+		return Result{}, err
+	}
+	newPub := newKP.PublicKeyBytes()
+	req := wire.RenewRequest{
+		ProtocolVersion: wire.ProtocolVersion, Type: "renew",
+		IssuedAt: p.Now().UTC().Format(time.RFC3339),
+		CSR:      wire.CSR{Curve: "P256", PublicKey: base64.RawURLEncoding.EncodeToString(newPub)},
+	}
+	payload, _ := json.Marshal(req)
+	env, err := jws.SignBackendES256(newKP, jws.Header{Typ: wire.TypRenewRequest, Ver: 1, Kid: wire.PubkeyHash(newPub)}, payload)
+	if err != nil {
+		return Result{}, err
+	}
+	reqBody, _ := json.Marshal(env)
+
+	r, err := http.NewRequestWithContext(ctx, http.MethodPost, p.CoreURL+"/v1/certs/renew", bytes.NewReader(reqBody))
+	if err != nil {
+		return Result{}, err
+	}
+	r.Header.Set("Content-Type", "application/json")
+	code, respBody, err := (Params{HTTPClient: p.HTTPClient}).do(r)
+	if err != nil {
+		return Result{}, err
+	}
+	if code != http.StatusOK {
+		return Result{}, fmt.Errorf("enrollclient: renew -> %d: %s", code, respBody)
+	}
+	var rr wire.RenewResponse
+	if err := json.Unmarshal(respBody, &rr); err != nil {
+		return Result{}, err
+	}
+
+	b, err := bundle.Verify(rr.Bundle, p.PinnedConfigPub)
+	if err != nil {
+		return Result{}, fmt.Errorf("enrollclient: %w", err)
+	}
+	if err := verifyCert(b, newPub); err != nil {
+		return Result{}, err
+	}
+
+	// Atomically rotate in the new key, then the cert/config.
+	if err := newKP.WritePrivateKeyAtomic(p.Layout.HostKey()); err != nil {
+		return Result{}, err
+	}
+	if err := newKP.WritePublicKey(p.Layout.HostPub()); err != nil {
+		return Result{}, err
+	}
+	if err := (Params{Layout: p.Layout}).writeArtifacts(b); err != nil {
+		return Result{}, err
+	}
+	return Result{Status: "issued", OverlayIP: b.Device.OverlayIP}, nil
+}
+
 type ticket struct {
 	EnrollmentID    string `json:"enrollment_id"`
 	RetrievalSecret string `json:"retrieval_secret"`

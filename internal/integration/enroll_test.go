@@ -37,6 +37,8 @@ type enrollEnv struct {
 	d           *queue.Durable   // shared gateway↔Core store (queue + results)
 	pinned      *ecdsa.PublicKey // config-signing pubkey (Pilot pins this)
 	configKeyID string
+	sg          *signer.Signer
+	cfgB        signer.Backend
 }
 
 func setupEnroll(t *testing.T) enrollEnv {
@@ -92,7 +94,7 @@ func setupEnroll(t *testing.T) enrollEnv {
 		Lighthouses: []bundle.Lighthouse{{OverlayIP: "100.64.0.1", PublicAddrs: []string{"198.51.100.1:4242"}}},
 		Results:     d, ResultTTL: time.Hour,
 	})
-	return enrollEnv{cons: cons, store: s, ring: ring, caPEM: caPEM, pool: pool, d: d, pinned: pinned, configKeyID: configKeyID}
+	return enrollEnv{cons: cons, store: s, ring: ring, caPEM: caPEM, pool: pool, d: d, pinned: pinned, configKeyID: configKeyID, sg: sg, cfgB: cfgB}
 }
 
 // fresh generates a host key and a nonce bound to it.

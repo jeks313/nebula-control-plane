@@ -112,6 +112,20 @@ func (k *KeyPair) WritePrivateKey(path string) error {
 	return f.Sync()
 }
 
+// WritePrivateKeyAtomic writes (and replaces) the private key via a temp file +
+// rename — for key rotation at renewal, where deliberately replacing the live
+// key is correct (unlike WritePrivateKey's no-clobber initial write).
+func (k *KeyPair) WritePrivateKeyAtomic(path string) error {
+	tmp := path + ".new"
+	if err := os.WriteFile(tmp, k.privateKeyPEM(), 0600); err != nil {
+		return fmt.Errorf("hostkey: write temp private key: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("hostkey: replace private key: %w", err)
+	}
+	return nil
+}
+
 // WritePublicKey writes the public key PEM to path (0644 — it is not secret).
 func (k *KeyPair) WritePublicKey(path string) error {
 	if err := os.WriteFile(path, k.PublicKeyPEM(), 0644); err != nil {

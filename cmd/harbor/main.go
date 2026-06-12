@@ -16,7 +16,10 @@ import (
 	"syscall"
 	"time"
 
+	"net/http"
+
 	"github.com/jeks313/nebula-control-plane/internal/bundle"
+	"github.com/jeks313/nebula-control-plane/internal/coreapi"
 	"github.com/jeks313/nebula-control-plane/internal/enrollment"
 	"github.com/jeks313/nebula-control-plane/internal/genesis"
 	"github.com/jeks313/nebula-control-plane/internal/ipam"
@@ -50,6 +53,8 @@ func main() {
 		cmdJoinKey(os.Args[2:])
 	case "enroll":
 		cmdEnrollCore(os.Args[2:])
+	case "core-api":
+		cmdCoreAPI(os.Args[2:])
 	case "genesis":
 		cmdGenesis(os.Args[2:])
 	case "ca-init":
@@ -82,6 +87,7 @@ usage:
   harbor enroll worker     [core flags]      run the queue consumer (Core)
   harbor enroll pending    [db flags]        list enrollments awaiting approval
   harbor enroll approve    <id> -approver A  [core flags]  approve a pending host
+  harbor core-api          -addr ADDR [core flags]  mesh-only API (renew/heartbeat)
   harbor genesis           -out DIR -operator-a A -operator-b B -lighthouse-pub PEM [...]
   harbor ca-init           -ca-cert OUT [-backend software|pkcs11] [-ca-key OUT] [...]
   harbor issue-cert        -name DEVICE -in-pub HOST.pub -ca-cert CA [-groups a,b] [...]
@@ -553,6 +559,58 @@ func enrollApprove(args []string) {
 		fatalf("%v", err)
 	}
 	fmt.Printf("approved %s by %s — issued, overlay IP %s\n", id, *approver, res.OverlayIP)
+}
+
+func cmdCoreAPI(args []string) {
+	fs := flag.NewFlagSet("core-api", flag.ExitOnError)
+	cf := addCoreFlags(fs)
+	addr := fs.String("addr", ":8444", "listen address (bind to Core's overlay IP in production)")
+	_ = fs.Parse(args)
+	if *cf.caCert == "" {
+		fatalf("core-api: -ca-cert is required")
+	}
+	pool, err := netip.ParsePrefix(*cf.pool)
+	if err != nil {
+		fatalf("core-api: bad -pool: %v", err)
+	}
+	caPEM, err := os.ReadFile(*cf.caCert)
+	if err != nil {
+		fatalf("core-api: read -ca-cert: %v", err)
+	}
+	caB := cf.loadBackend(*cf.caKey, *cf.caLbl, "CA")
+	cfgB := cf.loadBackend(*cf.configKey, *cf.configLbl, "config-signing")
+	s := openStore(*cf.driver, *cf.dsn)
+	defer s.Close()
+	audit := func(c context.Context, a, ac, t, d string) error { _, e := s.AppendAudit(c, a, ac, t, d); return e }
+	sg, err := signer.New(signer.Config{
+		CACertPEM: caPEM, Backend: caB,
+		Policy: signer.Policy{AllowedNetwork: pool, MaxLifetime: *cf.certLifetime}, Audit: audit,
+	})
+	if err != nil {
+		fatalf("core-api: signer: %v", err)
+	}
+	cfgPub, _ := cfgB.PublicKey()
+	api := coreapi.New(coreapi.Config{
+		Store: s, Signer: sg, ConfigBackend: cfgB, ConfigKeyID: wire.PubkeyHash(cfgPub),
+		CABundlePEM: caPEM, Lighthouses: parseLighthouses(*cf.lighthouse), Pool: pool, CertLifetime: *cf.certLifetime,
+	})
+	srv := &http.Server{
+		Addr: *addr, Handler: api.Handler(),
+		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second,
+		WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 8 << 10,
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		sc, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(sc)
+	}()
+	fmt.Fprintf(os.Stderr, "harbor core-api listening on %s (mesh-only: bind to the overlay IP in prod)\n", *addr)
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		fatalf("core-api: %v", err)
+	}
 }
 
 func parseLighthouses(s string) []bundle.Lighthouse {
