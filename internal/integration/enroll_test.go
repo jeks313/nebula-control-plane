@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jeks313/nebula-control-plane/internal/bundle"
 	"github.com/jeks313/nebula-control-plane/internal/enrollment"
 	"github.com/jeks313/nebula-control-plane/internal/ipam"
 	"github.com/jeks313/nebula-control-plane/internal/joinkey"
@@ -28,11 +29,14 @@ import (
 )
 
 type enrollEnv struct {
-	cons  *enrollment.Consumer
-	store *store.Store
-	ring  *nonce.Keyring
-	caPEM []byte
-	pool  netip.Prefix
+	cons        *enrollment.Consumer
+	store       *store.Store
+	ring        *nonce.Keyring
+	caPEM       []byte
+	pool        netip.Prefix
+	d           *queue.Durable   // shared gateway↔Core store (queue + results)
+	pinned      *ecdsa.PublicKey // config-signing pubkey (Pilot pins this)
+	configKeyID string
 }
 
 func setupEnroll(t *testing.T) enrollEnv {
@@ -67,11 +71,28 @@ func setupEnroll(t *testing.T) enrollEnv {
 	}
 	alloc, _ := ipam.NewAllocator(s, ipam.Pool{Prefix: pool})
 	ring, _ := nonce.NewKeyring([][]byte{make([]byte, 32)}, 0, 0)
+
+	// Config-signing key (signs bundles) + the shared queue/result store.
+	cfgB, _ := signer.NewSoftwareBackend()
+	cfgPub, _ := cfgB.PublicKey()
+	pinned, _ := jws.ParseP256PublicPoint(cfgPub)
+	configKeyID := wire.PubkeyHash(cfgPub)
+	d, err := queue.OpenDurable(queue.DurableConfig{
+		DSN: filepath.Join(t.TempDir(), "q.db") + "?_pragma=busy_timeout(5000)", Key: make([]byte, 32),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+
 	cons := enrollment.New(enrollment.Config{
 		Store: s, Nonces: ring, Replay: replay.New(2 * time.Minute),
 		Signer: sg, Allocator: alloc, Pool: pool, CertLifetime: 24 * time.Hour,
+		ConfigBackend: cfgB, ConfigKeyID: configKeyID, CABundlePEM: caPEM,
+		Lighthouses: []bundle.Lighthouse{{OverlayIP: "100.64.0.1", PublicAddrs: []string{"198.51.100.1:4242"}}},
+		Results:     d, ResultTTL: time.Hour,
 	})
-	return enrollEnv{cons: cons, store: s, ring: ring, caPEM: caPEM, pool: pool}
+	return enrollEnv{cons: cons, store: s, ring: ring, caPEM: caPEM, pool: pool, d: d, pinned: pinned, configKeyID: configKeyID}
 }
 
 // fresh generates a host key and a nonce bound to it.

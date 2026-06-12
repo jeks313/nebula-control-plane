@@ -74,8 +74,19 @@ type NonceResponse struct {
 	ExpiresAt       string `json:"expires_at"`
 }
 
-// TypEnrollRequest is the JWS `typ` for an enrollment request (spec §3).
-const TypEnrollRequest = "ncp-request+jws"
+// JWS `typ` values (spec §3).
+const (
+	TypEnrollRequest = "ncp-request+jws"
+	TypBundle        = "ncp-bundle+jws"
+)
+
+// PollResponse is the GET /v1/enroll/{id} body (spec §5.3).
+type PollResponse struct {
+	Status      string          `json:"status"` // pending | issued | denied
+	PollAfterMs int             `json:"poll_after_ms,omitempty"`
+	Bundle      json.RawMessage `json:"bundle,omitempty"` // a bundle JWS, when issued
+	Reason      string          `json:"reason,omitempty"`
+}
 
 // Enrollment methods (spec §5.4).
 const (

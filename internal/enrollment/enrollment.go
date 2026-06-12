@@ -16,6 +16,7 @@ import (
 	"net/netip"
 	"time"
 
+	"github.com/jeks313/nebula-control-plane/internal/bundle"
 	"github.com/jeks313/nebula-control-plane/internal/ipam"
 	"github.com/jeks313/nebula-control-plane/internal/joinkey"
 	"github.com/jeks313/nebula-control-plane/internal/jws"
@@ -84,6 +85,16 @@ type Config struct {
 	Pool         netip.Prefix
 	CertLifetime time.Duration
 	Now          func() time.Time
+
+	// Bundle assembly + delivery (3.6/3.6a). Optional: if ConfigBackend/Results
+	// are nil, the enrollment is still recorded but no signed bundle/result is
+	// produced (used by lower-level tests).
+	ConfigBackend signer.Backend // config-signing key (signs bundles)
+	ConfigKeyID   string         // its kid (pinned by Pilot)
+	CABundlePEM   []byte         // CA cert PEM for the bundle's ca_bundle
+	Lighthouses   []bundle.Lighthouse
+	Results       *queue.Durable // result store (gateway↔Core shared store)
+	ResultTTL     time.Duration  // result/ticket validity (0 -> 1h)
 }
 
 // Consumer processes enrollment candidates.
@@ -155,6 +166,7 @@ func (c *Consumer) Process(ctx context.Context, cand queue.Candidate) (Result, e
 	jk, err := joinkey.ValidateAndConsume(ctx, c.cfg.Store, cred.Token, c.now())
 	if err != nil {
 		c.record(ctx, cand.EnrollmentID, req, pubBytes, 0, "[]", StatusDenied, nil, "")
+		c.writeResult(ctx, cand.EnrollmentID, cand.RetrievalSecretHash, nil, StatusDenied, err.Error())
 		_ = c.audit(ctx, "system", "enroll-denied", req.CSR.RequestedName, err.Error())
 		return Result{EnrollmentID: cand.EnrollmentID, Status: StatusDenied}, err
 	}
@@ -165,17 +177,23 @@ func (c *Consumer) Process(ctx context.Context, cand queue.Candidate) (Result, e
 	// Approval decision: bearer secrets are PENDING by default.
 	if !jk.AutoIssue {
 		c.record(ctx, cand.EnrollmentID, req, pubBytes, jk.ID, groups, StatusPending, nil, "")
+		c.writeResult(ctx, cand.EnrollmentID, cand.RetrievalSecretHash, nil, StatusPending, "")
 		_ = c.audit(ctx, "system", "enroll-pending", deviceName,
 			fmt.Sprintf(`{"join_key":%q,"reason":"manual approval required"}`, jk.Name))
 		return Result{EnrollmentID: cand.EnrollmentID, Status: StatusPending}, nil
 	}
 
 	// auto_issue: mint immediately.
-	ip, certPEM, err := c.issue(ctx, "enroll-auto", deviceName, pubBytes, jk.GroupList())
+	ip, certPEM, notAfter, err := c.issue(ctx, "enroll-auto", deviceName, pubBytes, jk.GroupList())
+	if err != nil {
+		return Result{}, err
+	}
+	bundleJWS, err := c.buildBundle(deviceName, ip.String(), jk.GroupList(), certPEM, notAfter)
 	if err != nil {
 		return Result{}, err
 	}
 	c.record(ctx, cand.EnrollmentID, req, pubBytes, jk.ID, groups, StatusIssued, certPEM, ip.String())
+	c.writeResult(ctx, cand.EnrollmentID, cand.RetrievalSecretHash, bundleJWS, StatusIssued, "")
 	return Result{EnrollmentID: cand.EnrollmentID, Status: StatusIssued, OverlayIP: ip.String(), CertPEM: certPEM}, nil
 }
 
@@ -196,7 +214,7 @@ func (c *Consumer) Approve(ctx context.Context, enrollmentID, approver string) (
 
 	var groups []string
 	_ = json.Unmarshal([]byte(e.Groups), &groups)
-	ip, certPEM, err := c.issue(ctx, approver, e.DeviceName, e.Pubkey, groups)
+	ip, certPEM, notAfter, err := c.issue(ctx, approver, e.DeviceName, e.Pubkey, groups)
 	if err != nil {
 		return Result{}, err
 	}
@@ -209,6 +227,12 @@ func (c *Consumer) Approve(ctx context.Context, enrollmentID, approver string) (
 		}).Error; err != nil {
 		return Result{}, err
 	}
+	// Flip the poll result to issued (secret hash preserved from the pending row).
+	bundleJWS, err := c.buildBundle(e.DeviceName, ip.String(), groups, certPEM, notAfter)
+	if err != nil {
+		return Result{}, err
+	}
+	c.writeResult(ctx, enrollmentID, nil, bundleJWS, StatusIssued, "")
 	_ = c.audit(ctx, approver, "enroll-approved", e.DeviceName, fmt.Sprintf(`{"overlay_ip":%q}`, ip))
 	return Result{EnrollmentID: enrollmentID, Status: StatusIssued, OverlayIP: ip.String(), CertPEM: certPEM}, nil
 }
@@ -265,26 +289,56 @@ func (c *Consumer) verify(ctx context.Context, cand queue.Candidate) (wire.Enrol
 	return req, pubBytes, nil
 }
 
-func (c *Consumer) issue(ctx context.Context, actor, deviceName string, pubBytes []byte, groups []string) (netip.Addr, []byte, error) {
-	ip, err := c.cfg.Allocator.Allocate(ctx, deviceName, "")
+func (c *Consumer) issue(ctx context.Context, actor, deviceName string, pubBytes []byte, groups []string) (ip netip.Addr, certPEM []byte, notAfter time.Time, err error) {
+	ip, err = c.cfg.Allocator.Allocate(ctx, deviceName, "")
 	if err != nil {
-		return netip.Addr{}, nil, fmt.Errorf("enrollment: allocate IP: %w", err)
+		return netip.Addr{}, nil, time.Time{}, fmt.Errorf("enrollment: allocate IP: %w", err)
 	}
 	nb := c.now().Add(-5 * time.Minute)
-	cert, certPEM, err := c.cfg.Signer.Issue(ctx, actor, signer.Template{
+	notAfter = nb.Add(c.cfg.CertLifetime)
+	_, certPEM, err = c.cfg.Signer.Issue(ctx, actor, signer.Template{
 		Name:      deviceName,
 		Networks:  []netip.Prefix{netip.PrefixFrom(ip, c.cfg.Pool.Bits())},
 		Groups:    groups,
 		NotBefore: nb,
-		NotAfter:  nb.Add(c.cfg.CertLifetime),
+		NotAfter:  notAfter,
 		PublicKey: pubBytes,
 	})
 	if err != nil {
 		_ = c.cfg.Allocator.Release(ctx, ip) // don't leak the IP on a failed sign
-		return netip.Addr{}, nil, fmt.Errorf("enrollment: sign: %w", err)
+		return netip.Addr{}, nil, time.Time{}, fmt.Errorf("enrollment: sign: %w", err)
 	}
-	_ = cert
-	return ip, certPEM, nil
+	return ip, certPEM, notAfter, nil
+}
+
+// buildBundle assembles + signs the config bundle (3.6). Returns nil if no
+// config-signing backend is configured.
+func (c *Consumer) buildBundle(deviceName, ip string, groups []string, certPEM []byte, notAfter time.Time) ([]byte, error) {
+	if c.cfg.ConfigBackend == nil {
+		return nil, nil
+	}
+	b := bundle.Bundle{
+		BundleVersion: 1,
+		IssuedAt:      c.now().UTC().Format(time.RFC3339),
+		Device:        bundle.Device{Name: deviceName, OverlayIP: ip, Groups: groups},
+		Certificate:   string(certPEM),
+		CABundle:      []string{string(c.cfg.CABundlePEM)},
+		Lighthouses:   c.cfg.Lighthouses,
+		NotAfter:      notAfter.UTC().Format(time.RFC3339),
+	}
+	return bundle.Sign(c.cfg.ConfigBackend, c.cfg.ConfigKeyID, b)
+}
+
+// writeResult records a poll result (3.6a). No-op if no result store is set.
+func (c *Consumer) writeResult(ctx context.Context, enrollmentID string, secretHash, bundleJWS []byte, status, reason string) {
+	if c.cfg.Results == nil {
+		return
+	}
+	ttl := c.cfg.ResultTTL
+	if ttl <= 0 {
+		ttl = time.Hour
+	}
+	_ = c.cfg.Results.PutResult(ctx, enrollmentID, status, secretHash, bundleJWS, reason, c.now().Add(ttl))
 }
 
 func (c *Consumer) record(ctx context.Context, enrollmentID string, req wire.EnrollRequest, pubBytes []byte, joinKeyID int64, groups, status string, certPEM []byte, ip string) {

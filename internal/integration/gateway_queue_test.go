@@ -5,74 +5,90 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/jeks313/nebula-control-plane/internal/enrollment"
+	"github.com/jeks313/nebula-control-plane/internal/bundle"
 	"github.com/jeks313/nebula-control-plane/internal/gateway"
 	"github.com/jeks313/nebula-control-plane/internal/joinkey"
-	"github.com/jeks313/nebula-control-plane/internal/queue"
 	"github.com/jeks313/nebula-control-plane/internal/wire"
+	"github.com/slackhq/nebula/cert"
 )
 
-func newDurableQueue(t *testing.T) *queue.Durable {
-	t.Helper()
-	d, err := queue.OpenDurable(queue.DurableConfig{
-		DSN: filepath.Join(t.TempDir(), "q.db") + "?_pragma=busy_timeout(5000)",
-		Key: make([]byte, 32),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { d.Close() })
-	return d
-}
-
-// TestGatewayToQueueToCore is the M3.3a end-to-end: the gateway publishes a
-// vetted candidate to the durable queue, Core drains it, and the enrollment is
-// processed — gateway and Core communicating only through the queue.
-func TestGatewayToQueueToCore(t *testing.T) {
+// TestEnrollEndToEndPollBundle is the M3.6/3.6a acceptance: a host enrolls via
+// the gateway, Core drains the queue and issues, and the host polls and gets a
+// bundle JWS that verifies against the pinned config-signing key — and the cert
+// inside verifies against the CA.
+func TestEnrollEndToEndPollBundle(t *testing.T) {
 	e := setupEnroll(t)
 	ctx := context.Background()
-	d := newDurableQueue(t)
 
-	gw := gateway.New(gateway.Config{Nonces: e.ring, Queue: d}).Handler()
+	// Gateway shares the durable store for both publish (queue) and poll (results).
+	gw := gateway.New(gateway.Config{Nonces: e.ring, Queue: e.d, Results: e.d}).Handler()
 	secret, _, _ := joinkey.Create(ctx, e.store, joinkey.Params{Name: "q", Groups: []string{"web"}, MaxUses: 0, AutoIssue: true}, time.Now())
 
-	// A host submits a signed enroll request to the gateway.
+	// Submit.
 	priv, _, n := e.fresh(t)
-	body := signBody(t, priv, n, secret, "host-q")
 	rec := httptest.NewRecorder()
-	gw.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/enroll", strings.NewReader(string(body))))
+	gw.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/enroll", strings.NewReader(string(signBody(t, priv, n, secret, "host-q")))))
 	if rec.Code != http.StatusAccepted {
-		t.Fatalf("enroll status = %d; body=%s", rec.Code, rec.Body)
+		t.Fatalf("enroll = %d; %s", rec.Code, rec.Body)
 	}
 	var acc wire.EnrollAccepted
-	if err := json.Unmarshal(rec.Body.Bytes(), &acc); err != nil {
+	json.Unmarshal(rec.Body.Bytes(), &acc)
+
+	// Before processing, polling shows... nothing yet recorded -> not_found.
+	if code := poll(t, gw, acc.EnrollmentID, acc.RetrievalSecret).Code; code != http.StatusNotFound {
+		t.Fatalf("pre-drain poll = %d, want 404", code)
+	}
+
+	// Core drains -> issues -> writes the bundle result.
+	if _, err := e.cons.Drain(ctx, e.d, 10, time.Minute); err != nil {
 		t.Fatal(err)
 	}
 
-	if depth, _ := d.Depth(ctx); depth != 1 {
-		t.Fatalf("queue depth = %d, want 1", depth)
+	// Poll returns the issued bundle.
+	pr := poll(t, gw, acc.EnrollmentID, acc.RetrievalSecret)
+	if pr.Code != http.StatusOK {
+		t.Fatalf("poll = %d; %s", pr.Code, pr.Body)
+	}
+	var resp wire.PollResponse
+	json.Unmarshal(pr.Body.Bytes(), &resp)
+	if resp.Status != "issued" || len(resp.Bundle) == 0 {
+		t.Fatalf("poll resp = %+v", resp)
 	}
 
-	// Core drains the queue and processes.
-	if processed, err := e.cons.Drain(ctx, d, 10, time.Minute); err != nil || processed != 1 {
-		t.Fatalf("drain = %d, %v", processed, err)
+	// The bundle JWS verifies against the PINNED config-signing key.
+	b, err := bundle.Verify(resp.Bundle, e.pinned)
+	if err != nil {
+		t.Fatalf("bundle verify: %v", err)
 	}
-	if depth, _ := d.Depth(ctx); depth != 0 {
-		t.Fatalf("queue depth after drain = %d, want 0 (acked)", depth)
+	if b.Device.Groups[0] != "web" || len(b.Lighthouses) != 1 {
+		t.Fatalf("bundle device/lighthouses wrong: %+v", b)
+	}
+	// And the cert inside verifies against the CA.
+	pool, _ := cert.NewCAPoolFromPEM([]byte(b.CABundle[0]))
+	c, _, _ := cert.UnmarshalCertificateFromPEM([]byte(b.Certificate))
+	if _, err := pool.VerifyCertificate(time.Now(), c); err != nil {
+		t.Fatalf("bundle cert does not verify: %v", err)
 	}
 
-	// The enrollment was recorded + issued (auto_issue key).
-	var en enrollment.Enrollment
-	if err := e.store.DB.Where("enrollment_id = ?", acc.EnrollmentID).First(&en).Error; err != nil {
-		t.Fatal(err)
+	// One-time read: a second poll of the issued bundle is gone.
+	if code := poll(t, gw, acc.EnrollmentID, acc.RetrievalSecret).Code; code != http.StatusGone {
+		t.Fatalf("second poll = %d, want 410 (one-time read)", code)
 	}
-	if en.Status != enrollment.StatusIssued || len(en.CertPEM) == 0 {
-		t.Fatalf("enrollment not issued: %+v", en.Status)
+	// Wrong secret never reveals anything.
+	if code := poll(t, gw, acc.EnrollmentID, "njk_wrong").Code; code != http.StatusNotFound {
+		t.Fatalf("wrong-secret poll = %d, want 404", code)
 	}
-	e.verifyCert(t, en.CertPEM)
+}
+
+func poll(t *testing.T, h http.Handler, id, secret string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/v1/enroll/"+id, nil)
+	req.Header.Set("Authorization", "Bearer "+secret)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
 }

@@ -54,11 +54,17 @@ func main() {
 		fatalf("%v", err)
 	}
 
-	gw := gateway.New(gateway.Config{
+	gwCfg := gateway.Config{
 		Nonces:  ring,
 		Queue:   q,
 		Limiter: ratelimit.New(*rps, *burst),
-	})
+	}
+	// The durable queue also serves poll results (read-own-result); the in-memory
+	// dev queue has none, so poll is unavailable there.
+	if rr, ok := q.(gateway.ResultReader); ok {
+		gwCfg.Results = rr
+	}
+	gw := gateway.New(gwCfg)
 
 	srv := &http.Server{
 		Addr:              *addr,
