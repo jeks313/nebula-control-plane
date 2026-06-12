@@ -196,9 +196,9 @@ Goal: AWS/Azure VMs enroll with no token. Introduces the immutable-fact group ma
 
 Goal: Harbor owns the firewall; hosts can't drift; the fleet can't sever itself.
 
-- **6.1** Policy **data model + group-based DSL** (`allow group:web → group:db tcp 5432`); default-deny baseline (§4.4). *Done when:* policy parses/validates; default is deny.
-- **6.2** **Compiler**: global policy → per-host firewall section (only rules touching the host's groups). *Done when:* compiled output matches hand-written expectation for sample fleets.
-- **6.3** **Compile-time invariants** (§P10): cannot publish a policy that removes reachability to `group:control-plane` or blocks lighthouse discovery. *Done when:* an invariant-violating policy is rejected at compile, regardless of approvals.
+- ✅ **6.1** Policy **data model + group-based DSL** (`allow group:web -> group:db tcp 5432`), allow-only with **implicit default-deny**. `internal/policy.Parse`/`Validate`; `harbor policy validate`. *Proven:* parses + validates (proto/port/group), rejects malformed lines; a host matching no rule gets no peer access.
+- ✅ **6.2** **Compiler**: `policy.CompileHost(policy, hostGroups)` → the host's per-host Nebula firewall (only rules touching its groups): a rule `web→db` becomes db's *inbound from web* and web's *outbound to db*. `harbor policy compile -groups …` previews it. *Proven:* sample-fleet compile matches expectation (db inbound 5432-from-web; web outbound to db; no spurious inbound).
+- ✅ **6.3** **Compile-time invariants** (§P10). A **mandatory baseline** is always injected and cannot be removed by any policy: every member keeps **outbound to `control-plane`** (renew/heartbeat), control-plane hosts always **accept the mesh**, and ICMP liveness both ways. `CheckInvariants` **rejects** any policy that references the reserved `control-plane`/`lighthouse` groups (their reachability is baseline-owned, not policy-shaped). *Proven:* a policy naming `control-plane` is rejected (exit 1); a clean one passes.
 - **6.4** **JWS-signed policy/config bundles** + Pilot verification before apply. *Done when:* an unsigned/tampered bundle is refused by Pilot.
 - **6.5** **Dual-control publish** workflow — *reusing the 2.11 primitive* — + audit. *Done when:* single-approver publish is blocked; two-approver succeeds and is chained in audit.
 - **6.6** **Staged canary rollout + auto-rollback** (§4.4): canary wave → watch heartbeats → missing-heartbeat threshold auto-reverts + freezes → widen in waves. *Done when:* an intentionally-bad canary auto-rolls-back without operator action.

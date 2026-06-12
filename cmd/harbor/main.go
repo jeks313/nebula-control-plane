@@ -25,7 +25,9 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/genesis"
 	"github.com/jeks313/nebula-control-plane/internal/ipam"
 	"github.com/jeks313/nebula-control-plane/internal/joinkey"
+	"github.com/jeks313/nebula-control-plane/internal/nebulaconfig"
 	"github.com/jeks313/nebula-control-plane/internal/nonce"
+	"github.com/jeks313/nebula-control-plane/internal/policy"
 	"github.com/jeks313/nebula-control-plane/internal/queue"
 	"github.com/jeks313/nebula-control-plane/internal/replay"
 	"github.com/jeks313/nebula-control-plane/internal/signer"
@@ -58,6 +60,8 @@ func main() {
 		cmdCoreAPI(os.Args[2:])
 	case "fleet":
 		cmdFleet(os.Args[2:])
+	case "policy":
+		cmdPolicy(os.Args[2:])
 	case "genesis":
 		cmdGenesis(os.Args[2:])
 	case "ca-init":
@@ -92,6 +96,8 @@ usage:
   harbor enroll approve    <id> -approver A  [core flags]  approve a pending host
   harbor core-api          -addr ADDR [core flags]  mesh-only API (renew/heartbeat)
   harbor fleet             [-expiry-within D] [-stale-after D] [-alert] [db flags]
+  harbor policy validate   <policy.txt>
+  harbor policy compile    -groups a,b <policy.txt>   preview a host's firewall
   harbor genesis           -out DIR -operator-a A -operator-b B -lighthouse-pub PEM [...]
   harbor ca-init           -ca-cert OUT [-backend software|pkcs11] [-ca-key OUT] [...]
   harbor issue-cert        -name DEVICE -in-pub HOST.pub -ca-cert CA [-groups a,b] [...]
@@ -563,6 +569,60 @@ func enrollApprove(args []string) {
 		fatalf("%v", err)
 	}
 	fmt.Printf("approved %s by %s — issued, overlay IP %s\n", id, *approver, res.OverlayIP)
+}
+
+func cmdPolicy(args []string) {
+	if len(args) < 1 {
+		fatalf("policy: want 'validate' or 'compile'")
+	}
+	switch args[0] {
+	case "validate":
+		if len(args) < 2 {
+			fatalf("policy validate: want a <policy.txt>")
+		}
+		p := loadPolicy(args[1])
+		fmt.Printf("policy: valid — %d rule(s), invariants pass\n", len(p.Rules))
+	case "compile":
+		fs := flag.NewFlagSet("policy compile", flag.ExitOnError)
+		groups := fs.String("groups", "", "comma-separated groups of the target host")
+		_ = fs.Parse(args[1:])
+		if fs.NArg() < 1 {
+			fatalf("policy compile: want a <policy.txt>")
+		}
+		p := loadPolicy(fs.Arg(0))
+		c := policy.CompileHost(p, parseCSV(*groups))
+		fmt.Printf("# firewall for a host in groups %v\ninbound:\n", parseCSV(*groups))
+		printRules(c.Inbound)
+		fmt.Println("outbound:")
+		printRules(c.Outbound)
+	default:
+		fatalf("policy: unknown subcommand %q", args[0])
+	}
+}
+
+func loadPolicy(path string) policy.Policy {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		fatalf("policy: read %s: %v", path, err)
+	}
+	p, err := policy.Parse(string(raw))
+	if err != nil {
+		fatalf("%v", err)
+	}
+	if err := policy.CheckInvariants(p); err != nil {
+		fatalf("%v", err)
+	}
+	return p
+}
+
+func printRules(rules []nebulaconfig.Rule) {
+	for _, r := range rules {
+		sel := "host:" + r.Host
+		if r.Group != "" {
+			sel = "group:" + r.Group
+		}
+		fmt.Printf("  - %-4s %-6s %s\n", r.Proto, r.Port, sel)
+	}
 }
 
 func cmdFleet(args []string) {
