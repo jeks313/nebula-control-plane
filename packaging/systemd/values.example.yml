@@ -1,0 +1,33 @@
+# Example Pilot values file. Copy to /etc/nebula-control-plane/values.yml before
+# running install.sh (or `pilot init -values ...`) to override config defaults.
+# These are a LOCAL stand-in for control-plane (Harbor) supplied policy (M6).
+# PKI paths are NOT set here — Pilot fills them from its own layout.
+
+am_lighthouse: false
+lighthouse_interval: 60
+
+lighthouses:
+  - overlay_ip: 100.64.0.1
+    public_addrs: ["198.51.100.1:4242"]
+
+listen_host: 0.0.0.0
+listen_port: 4242
+
+tun_dev: nebula1
+mtu: 1300
+
+log_level: info
+log_format: text
+
+# Default firewall is tight (outbound open, inbound ICMP-only). Override here:
+inbound:
+  - port: any
+    proto: icmp
+    host: any
+  # - port: 443
+  #   proto: tcp
+  #   groups: [web, prod]
+outbound:
+  - port: any
+    proto: any
+    host: any
