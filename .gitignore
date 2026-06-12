@@ -1,0 +1,17 @@
+# Go
+/bin/
+*.test
+*.out
+coverage*
+
+# M0 spike runtime artifacts (generated certs, keys, configs, logs, pids)
+spike/m0/run/
+# locally built tools (e.g. pkcs11-enabled nebula-cert)
+spike/m0/tools/
+
+*.log
+*.pid
+
+# editor / OS
+.DS_Store
+*.swp
