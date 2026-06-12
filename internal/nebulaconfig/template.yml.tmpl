@@ -1,0 +1,54 @@
+# Rendered by pilot (nebula-control-plane M1.7) — do not edit by hand; changes
+# are overwritten on the next render. Firewall and lighthouse policy here are a
+# local placeholder for control-plane (Harbor) supplied policy (design §6, M6).
+pki:
+  ca: {{ .CACertPath }}
+  cert: {{ .CertPath }}
+  key: {{ .KeyPath }}
+{{- if .Blocklist }}
+  blocklist:
+{{- range .Blocklist }}
+    - {{ . }}
+{{- end }}
+{{- end }}
+static_host_map:
+{{- range .Lighthouses }}
+  "{{ .OverlayIP }}": [{{ range $i, $a := .PublicAddrs }}{{ if $i }}, {{ end }}"{{ $a }}"{{ end }}]
+{{- end }}
+lighthouse:
+  am_lighthouse: {{ .AmLighthouse }}
+  interval: {{ .LighthouseInterval }}
+  hosts:{{ if not .Hosts }} []{{ end }}
+{{- range .Hosts }}
+    - "{{ . }}"
+{{- end }}
+listen:
+  host: {{ .ListenHost }}
+  port: {{ .ListenPort }}
+punchy:
+  punch: true
+  respond: true
+tun:
+  disabled: false
+  dev: {{ .TunDev }}
+  mtu: {{ .MTU }}
+logging:
+  level: {{ .LogLevel }}
+  format: {{ .LogFormat }}
+firewall:
+  conntrack:
+    tcp_timeout: 12m
+    udp_timeout: 3m
+    default_timeout: 10m
+  outbound:
+{{- range .Outbound }}
+    - port: {{ .Port }}
+      proto: {{ .Proto }}
+      {{ .SelectorYAML }}
+{{- end }}
+  inbound:
+{{- range .Inbound }}
+    - port: {{ .Port }}
+      proto: {{ .Proto }}
+      {{ .SelectorYAML }}
+{{- end }}

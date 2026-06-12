@@ -78,6 +78,16 @@ Goal: a real `pilot` binary that owns a Nebula process on one host. No Harbor ye
 
 > Demo: `pilot` runs as a **systemd service on Linux and a Windows Service on Windows**, supervises Nebula with hand-placed KMS-signed certs, joins the spike mesh, and survives child crashes on both.
 
+**M1 progress (2026-06-12).**
+- ✅ **1.1** — `pilot`/`harbor` split binaries, Makefile, `go build`/`go test` green (Linux + `GOOS=windows` cross-compile). (CI runner itself is 1.11.)
+- ✅ **1.5** — `internal/binverify` SHA-256 gate, wired into `pilot supervise -sha256`; exec refused + logged on mismatch.
+- ✅ **1.6** — `internal/supervisor`: start, monitor, exponential-backoff restart (resets after a stable run), clean SIGTERM→SIGKILL shutdown. Children run in their own **process group** so the whole tree dies on shutdown (fixed an orphaned-child hang). Unix/Windows split (`process_*.go`).
+- ✅ **1.3 (POSIX floor)** — `internal/paths` lays out the host dir; `pilot init` creates it `0700`, host key `0600`. **Windows DACL + DPAPI-at-rest (1.3 Windows / 1.3a) remain stubbed** with explicit TODOs in `secure_windows.go` — no confidentiality claim on Windows until there's a runner to assert it (1.11).
+- ✅ **1.4** — `internal/hostkey` generates the P256 key-agreement key in-process via `crypto/ecdh` (the exact primitive `nebula-cert` uses) and marshals it with Nebula's own PEM functions — byte-identical to `nebula-cert keygen -curve P256`, no bespoke crypto. Private scalar has **no exported accessor**; it only reaches an `O_EXCL` `0600` file and never clobbers a live key.
+- ✅ **1.7** — `internal/nebulaconfig` renders `config.yml` from an embedded template (shape mirrors the M0-proven config); PKI paths come from the layout, policy fields from an optional values file with tight defaults (outbound open, **inbound ICMP-only** until Harbor policy lands at M6).
+- **Acceptance proven end-to-end:** `pilot init` → P256 CA signs the pilot-generated pubkey → **`nebula -test` accepts the rendered config with that key+cert loaded**. Automated as `internal/integration` (skips if `nebula`/`nebula-cert` absent; `make m1-smoke`).
+- **Still open in M1:** 1.2/1.2a/1.2w (signed-release pipeline + key custody + Authenticode), 1.3 Windows DACL + 1.3a DPAPI, 1.8 (reload-vs-restart), 1.9 (systemd unit), 1.10 (Windows Service + MSI), 1.11 (Windows/macOS CI runners), 1.13 (clock/NTP sanity).
+
 ---
 
 ## Milestone 2 — Harbor Core skeleton + the signing spine
