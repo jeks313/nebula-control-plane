@@ -100,8 +100,45 @@ func New(cfg Config) *Consumer {
 	return &Consumer{cfg: cfg, now: cfg.Now}
 }
 
-// Process handles one queued candidate end to end.
+// Drain claims a batch from the durable queue, processes each, and acks
+// terminal outcomes (success or a recorded business decision) while nacking
+// transient/infra failures for redelivery (poison handling lives in the queue).
+func (c *Consumer) Drain(ctx context.Context, q *queue.Durable, batch int, lease time.Duration) (int, error) {
+	leased, err := q.Claim(ctx, batch, lease)
+	if err != nil {
+		return 0, err
+	}
+	for _, l := range leased {
+		_, perr := c.Process(ctx, l.Candidate)
+		if perr == nil || terminal(perr) {
+			_ = q.Ack(ctx, l.ID)
+		} else {
+			_ = q.Nack(ctx, l.ID)
+		}
+	}
+	return len(leased), nil
+}
+
+// terminal reports whether an error is a final business outcome (don't retry)
+// vs. a transient/infra failure (retry).
+func terminal(err error) bool {
+	for _, t := range []error{
+		ErrBadRequest, ErrSignature, ErrNonce, ErrReplay, ErrMethod,
+		joinkey.ErrNotFound, joinkey.ErrExpired, joinkey.ErrExhausted,
+	} {
+		if errors.Is(err, t) {
+			return true
+		}
+	}
+	return false
+}
+
+// Process handles one queued candidate end to end. It is idempotent: a redelivered
+// candidate (same enrollment_id) returns the recorded result without re-issuing.
 func (c *Consumer) Process(ctx context.Context, cand queue.Candidate) (Result, error) {
+	if r, ok := c.existing(ctx, cand.EnrollmentID); ok {
+		return r, nil
+	}
 	req, pubBytes, err := c.verify(ctx, cand)
 	if err != nil {
 		return Result{}, err
@@ -174,6 +211,15 @@ func (c *Consumer) Approve(ctx context.Context, enrollmentID, approver string) (
 	}
 	_ = c.audit(ctx, approver, "enroll-approved", e.DeviceName, fmt.Sprintf(`{"overlay_ip":%q}`, ip))
 	return Result{EnrollmentID: enrollmentID, Status: StatusIssued, OverlayIP: ip.String(), CertPEM: certPEM}, nil
+}
+
+// existing returns the recorded result for an enrollment_id, if already processed.
+func (c *Consumer) existing(ctx context.Context, enrollmentID string) (Result, bool) {
+	var e Enrollment
+	if err := c.cfg.Store.DB.WithContext(ctx).Where("enrollment_id = ?", enrollmentID).First(&e).Error; err == nil {
+		return Result{EnrollmentID: enrollmentID, Status: e.Status, OverlayIP: e.OverlayIP, CertPEM: e.CertPEM}, true
+	}
+	return Result{}, false
 }
 
 // Pending lists enrollments awaiting approval (feeds the admin queue, 3.9).

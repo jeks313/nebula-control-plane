@@ -74,18 +74,25 @@ func setupEnroll(t *testing.T) enrollEnv {
 	return enrollEnv{cons: cons, store: s, ring: ring, caPEM: caPEM, pool: pool}
 }
 
-// candidate builds a signed enrollment candidate as the gateway would have.
-func (e enrollEnv) candidate(t *testing.T, token, name string) queue.Candidate {
+// fresh generates a host key and a nonce bound to it.
+func (e enrollEnv) fresh(t *testing.T) (priv *ecdsa.PrivateKey, pkh, nonce string) {
 	t.Helper()
-	priv, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	priv, _ = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	ek, _ := priv.PublicKey.ECDH()
+	pkh = wire.PubkeyHash(ek.Bytes())
+	nonce, _ = e.ring.Mint([]byte(pkh))
+	return priv, pkh, nonce
+}
+
+// signBody builds and signs an enroll request body as the gateway would receive.
+func signBody(t *testing.T, priv *ecdsa.PrivateKey, nonce, token, name string) []byte {
+	t.Helper()
 	ek, _ := priv.PublicKey.ECDH()
 	pub := ek.Bytes()
 	pkh := wire.PubkeyHash(pub)
-	n, _ := e.ring.Mint([]byte(pkh))
-
 	req := wire.EnrollRequest{
 		ProtocolVersion: wire.ProtocolVersion, Type: "enroll",
-		IssuedAt: time.Now().UTC().Format(time.RFC3339), Nonce: n,
+		IssuedAt: time.Now().UTC().Format(time.RFC3339), Nonce: nonce,
 		Method: wire.MethodToken, Credential: json.RawMessage(`{"token":"` + token + `"}`),
 	}
 	req.CSR = wire.CSR{Curve: "P256", PublicKey: base64.RawURLEncoding.EncodeToString(pub), RequestedName: name}
@@ -95,7 +102,14 @@ func (e enrollEnv) candidate(t *testing.T, token, name string) queue.Candidate {
 		t.Fatal(err)
 	}
 	body, _ := json.Marshal(env)
-	return queue.Candidate{EnrollmentID: "eid-" + name, PubkeyHash: pkh, RequestJWS: body, ReceivedAt: time.Now()}
+	return body
+}
+
+// candidate builds a fresh signed enrollment candidate.
+func (e enrollEnv) candidate(t *testing.T, token, name string) queue.Candidate {
+	t.Helper()
+	priv, pkh, n := e.fresh(t)
+	return queue.Candidate{EnrollmentID: "eid-" + name, PubkeyHash: pkh, RequestJWS: signBody(t, priv, n, token, name), ReceivedAt: time.Now()}
 }
 
 func (e enrollEnv) verifyCert(t *testing.T, certPEM []byte) cert.Certificate {
@@ -167,15 +181,39 @@ func TestEnrollAutoIssue(t *testing.T) {
 	}
 }
 
-func TestEnrollReplayRejected(t *testing.T) {
+func TestEnrollIdempotentRedelivery(t *testing.T) {
+	// Same candidate (same enrollment_id) delivered twice (at-least-once) must
+	// not re-issue — the second returns the recorded result.
+	e := setupEnroll(t)
+	ctx := context.Background()
+	secret, _, _ := joinkey.Create(ctx, e.store, joinkey.Params{Name: "idem", MaxUses: 0, AutoIssue: true}, time.Now())
+	cand := e.candidate(t, secret, "host-idem")
+	r1, err := e.cons.Process(ctx, cand)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r2, err := e.cons.Process(ctx, cand)
+	if err != nil {
+		t.Fatalf("redelivery: %v", err)
+	}
+	if r1.OverlayIP != r2.OverlayIP || r2.Status != enrollment.StatusIssued {
+		t.Fatalf("redelivery not idempotent: %+v vs %+v", r1, r2)
+	}
+}
+
+func TestEnrollNonceReplayRejected(t *testing.T) {
+	// Two DIFFERENT enrollments reusing the same nonce: the second is a replay.
 	e := setupEnroll(t)
 	ctx := context.Background()
 	secret, _, _ := joinkey.Create(ctx, e.store, joinkey.Params{Name: "rk", MaxUses: 0, AutoIssue: true}, time.Now())
-	cand := e.candidate(t, secret, "host-replay")
-	if _, err := e.cons.Process(ctx, cand); err != nil {
-		t.Fatalf("first process: %v", err)
+	priv, pkh, n := e.fresh(t)
+
+	c1 := queue.Candidate{EnrollmentID: "eid-r1", PubkeyHash: pkh, RequestJWS: signBody(t, priv, n, secret, "host-r1"), ReceivedAt: time.Now()}
+	if _, err := e.cons.Process(ctx, c1); err != nil {
+		t.Fatalf("first: %v", err)
 	}
-	if _, err := e.cons.Process(ctx, cand); !errors.Is(err, enrollment.ErrReplay) {
+	c2 := queue.Candidate{EnrollmentID: "eid-r2", PubkeyHash: pkh, RequestJWS: signBody(t, priv, n, secret, "host-r2"), ReceivedAt: time.Now()}
+	if _, err := e.cons.Process(ctx, c2); !errors.Is(err, enrollment.ErrReplay) {
 		t.Fatalf("err = %v, want ErrReplay", err)
 	}
 }
