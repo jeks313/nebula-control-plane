@@ -7,6 +7,7 @@ help:
 	@echo "  build        build pilot + harbor + gateway into bin/"
 	@echo "  test         go test ./..."
 	@echo "  m1-smoke     run the M1 acceptance (needs nebula + nebula-cert)"
+	@echo "  m3-demo      run the M3 end-to-end enrollment harness (genesis->join)"
 	@echo "  systemd-verify  offline-validate packaging/systemd/pilot.service"
 	@echo "  tidy         go mod tidy"
 	@echo
@@ -40,6 +41,10 @@ m1-smoke:
 .PHONY: signer-softhsm
 signer-softhsm:
 	CGO_ENABLED=1 go test -tags pkcs11 -run TestPKCS11SoftHSMEndToEnd -v ./internal/signer
+
+.PHONY: m3-demo
+m3-demo:
+	@bash spike/m3/demo.sh
 
 .PHONY: systemd-verify
 systemd-verify:
