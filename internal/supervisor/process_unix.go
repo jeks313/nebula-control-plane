@@ -22,3 +22,9 @@ func terminate(cmd *exec.Cmd) error {
 func forceKill(cmd *exec.Cmd) error {
 	return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 }
+
+// signalReload sends SIGHUP to nebula itself (not the group) so it hot-reloads
+// its config in place. This is the M1.8 reload path on Unix.
+func signalReload(cmd *exec.Cmd) error {
+	return syscall.Kill(cmd.Process.Pid, syscall.SIGHUP)
+}
