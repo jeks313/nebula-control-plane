@@ -57,6 +57,24 @@ type Bundle struct {
 	NextRenewAfter  string          `json:"next_renew_after,omitempty"`
 }
 
+// RenderNebulaConfig renders a bundle into a nebula config.yml: lighthouses +
+// PKI paths, with the signed firewall (if present) overriding the local default.
+// Shared by the enroll/renew apply path and by drift re-assertion (M6.7) so both
+// produce byte-identical output.
+func RenderNebulaConfig(b Bundle, caPath, certPath, keyPath string) ([]byte, error) {
+	lhs := make([]nebulaconfig.Lighthouse, len(b.Lighthouses))
+	for i, l := range b.Lighthouses {
+		lhs[i] = nebulaconfig.Lighthouse{OverlayIP: l.OverlayIP, PublicAddrs: l.PublicAddrs}
+	}
+	v := nebulaconfig.Values{Lighthouses: lhs, CACertPath: caPath, CertPath: certPath, KeyPath: keyPath}
+	v.Defaults()
+	if b.Firewall != nil {
+		v.Inbound = b.Firewall.Inbound
+		v.Outbound = b.Firewall.Outbound
+	}
+	return nebulaconfig.Render(v)
+}
+
 // CompileFirewall compiles the central policy for a host's groups into the
 // bundle's signed firewall. nil policy -> nil firewall (Pilot keeps its default).
 func CompileFirewall(p *policy.Policy, groups []string) *Firewall {

@@ -47,6 +47,10 @@ func (l Layout) Config() string { return filepath.Join(l.Base, "config.yml") }
 // left PENDING (awaiting approval) can resume and fetch its bundle later.
 func (l Layout) EnrollTicket() string { return filepath.Join(l.Base, "enroll-ticket.json") }
 
+// Bundle is the last verified config bundle (JWS), retained so Pilot can detect
+// config drift and re-assert the signed version (M6.7).
+func (l Layout) Bundle() string { return filepath.Join(l.Base, "bundle.json") }
+
 // Ensure creates the base directory with owner-only protection appropriate to
 // the platform. It is idempotent.
 func (l Layout) Ensure() error {

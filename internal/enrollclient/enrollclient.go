@@ -23,7 +23,6 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/bundle"
 	"github.com/jeks313/nebula-control-plane/internal/hostkey"
 	"github.com/jeks313/nebula-control-plane/internal/jws"
-	"github.com/jeks313/nebula-control-plane/internal/nebulaconfig"
 	"github.com/jeks313/nebula-control-plane/internal/paths"
 	"github.com/jeks313/nebula-control-plane/internal/wire"
 	"github.com/slackhq/nebula/cert"
@@ -129,7 +128,7 @@ func Enroll(ctx context.Context, p Params) (Result, error) {
 	}
 
 	// 7. Write files + render config; the ticket is spent.
-	if err := p.writeArtifacts(b); err != nil {
+	if err := p.writeArtifacts(b, bundleJWS); err != nil {
 		return Result{}, err
 	}
 	_ = os.Remove(ticketPath)
@@ -208,7 +207,7 @@ func Renew(ctx context.Context, p RenewParams) (Result, error) {
 	if err := newKP.WritePublicKey(p.Layout.HostPub()); err != nil {
 		return Result{}, err
 	}
-	if err := (Params{Layout: p.Layout}).writeArtifacts(b); err != nil {
+	if err := (Params{Layout: p.Layout}).writeArtifacts(b, rr.Bundle); err != nil {
 		return Result{}, err
 	}
 	return Result{Status: "issued", OverlayIP: b.Device.OverlayIP}, nil
@@ -324,28 +323,18 @@ func verifyCert(b bundle.Bundle, pubBytes []byte) error {
 	return nil
 }
 
-func (p Params) writeArtifacts(b bundle.Bundle) error {
+func (p Params) writeArtifacts(b bundle.Bundle, rawBundleJWS []byte) error {
 	if err := os.WriteFile(p.Layout.CABundle(), []byte(strings.Join(b.CABundle, "\n")), 0o644); err != nil {
 		return err
 	}
 	if err := os.WriteFile(p.Layout.HostCert(), []byte(b.Certificate), 0o644); err != nil {
 		return err
 	}
-	lhs := make([]nebulaconfig.Lighthouse, len(b.Lighthouses))
-	for i, l := range b.Lighthouses {
-		lhs[i] = nebulaconfig.Lighthouse{OverlayIP: l.OverlayIP, PublicAddrs: l.PublicAddrs}
+	// Retain the signed bundle so drift detection (M6.7) can re-assert it.
+	if err := os.WriteFile(p.Layout.Bundle(), rawBundleJWS, 0o644); err != nil {
+		return err
 	}
-	v := nebulaconfig.Values{
-		Lighthouses: lhs,
-		CACertPath:  p.Layout.CABundle(), CertPath: p.Layout.HostCert(), KeyPath: p.Layout.HostKey(),
-	}
-	v.Defaults()
-	// A signed central-policy firewall (M6) overrides Pilot's local default.
-	if b.Firewall != nil {
-		v.Inbound = b.Firewall.Inbound
-		v.Outbound = b.Firewall.Outbound
-	}
-	cfg, err := nebulaconfig.Render(v)
+	cfg, err := bundle.RenderNebulaConfig(b, p.Layout.CABundle(), p.Layout.HostCert(), p.Layout.HostKey())
 	if err != nil {
 		return err
 	}
