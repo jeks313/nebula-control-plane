@@ -9,6 +9,7 @@ In-repo copies of the Nebula Control Plane planning docs, so the repo is self-co
 | `Nebula Control Plane - Implementation Plan.md` (v3) | Milestones **M0–M10**, PR-sized steps with "Done when". Source of truth for *order* & *scope*. |
 | `Nebula Control Plane - Protocol Spec.md` (v1) | The Pilot↔Harbor **wire protocol** (enrollment/attestation/bundle/lifecycle). M3–M5 implement against it; reviewed at 9.7. |
 | `Nebula Control Plane - Genesis Runbook.md` (v1) | The two-operator **genesis ceremony** (CA + config-signing roots + first lighthouse). Implements 3.1. |
+| `Nebula Control Plane - Chaos and Outage Runbook.md` (v1) | **Harbor outage (P3)**: what survives, the worst case (cert lifetime = outage budget), emergency response. Implements 4.9. |
 | `Nebula Control Plane - Infrastructure Plan (AWS).md` (v2) | Local-first → minimal AWS harness → full production (incl. k3s Tier 1+). |
 | `Nebula Control Plane - Admin UI Plan.md` | Harbor web console + site settings. |
 

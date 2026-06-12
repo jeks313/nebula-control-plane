@@ -8,6 +8,7 @@ help:
 	@echo "  test         go test ./..."
 	@echo "  m1-smoke     run the M1 acceptance (needs nebula + nebula-cert)"
 	@echo "  m3-demo      run the M3 end-to-end enrollment harness (genesis->join)"
+	@echo "  m4-chaos     run the M4.9 P3 chaos drill (Harbor down -> data plane up)"
 	@echo "  systemd-verify  offline-validate packaging/systemd/pilot.service"
 	@echo "  tidy         go mod tidy"
 	@echo
@@ -45,6 +46,10 @@ signer-softhsm:
 .PHONY: m3-demo
 m3-demo:
 	@bash spike/m3/demo.sh
+
+.PHONY: m4-chaos
+m4-chaos:
+	@bash spike/m4/chaos.sh
 
 .PHONY: systemd-verify
 systemd-verify:

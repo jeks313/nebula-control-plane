@@ -2,8 +2,11 @@ package heartbeat
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/jeks313/nebula-control-plane/internal/paths"
 	"github.com/jeks313/nebula-control-plane/internal/wire"
 )
 
@@ -36,6 +39,29 @@ func TestProcessRejectsUnknown(t *testing.T) {
 	}
 	if ran != 0 {
 		t.Fatal("no handler should run for an unknown command")
+	}
+}
+
+// TestReporterToleratesCoreDown is part of the M4.9 P3 chaos proof: when Core is
+// unreachable, heartbeats fail silently and NO command (renew/restart) is fired —
+// a control-plane outage never triggers a data-plane action.
+func TestReporterToleratesCoreDown(t *testing.T) {
+	var renews, restarts int32
+	rep := New(Config{
+		CoreURL:  "http://127.0.0.1:1", // nothing listening -> connection refused
+		Layout:   paths.New(t.TempDir()),
+		Interval: 10 * time.Millisecond,
+		Handlers: Handlers{
+			Renew:   func(context.Context) error { atomic.AddInt32(&renews, 1); return nil },
+			Restart: func() error { atomic.AddInt32(&restarts, 1); return nil },
+		},
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+	_ = rep.Run(ctx) // must not panic, must not fire commands
+
+	if atomic.LoadInt32(&renews) != 0 || atomic.LoadInt32(&restarts) != 0 {
+		t.Fatalf("a down Core must not trigger commands: renews=%d restarts=%d", renews, restarts)
 	}
 }
 

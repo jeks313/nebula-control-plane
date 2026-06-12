@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdh"
 	"crypto/rand"
+	"errors"
 	"math"
 	mrand "math/rand"
 	"net/netip"
@@ -120,5 +121,40 @@ func TestManagerRenewsOnSchedule(t *testing.T) {
 	<-done
 	if atomic.LoadInt32(&reloads) < 1 {
 		t.Fatal("reload was not triggered after renewal")
+	}
+}
+
+// TestRenewFailureNeverReloads is part of the M4.9 P3 chaos proof: when Harbor is
+// unreachable, renewal fails and is retried, but the data plane is NEVER touched
+// (no reload/restart) — a control-plane outage cannot perturb the data plane.
+func TestRenewFailureNeverReloads(t *testing.T) {
+	layout := paths.New(t.TempDir())
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	writeCert(t, layout, now.Add(-3*time.Hour), now.Add(30*time.Minute)) // past ⅔ -> wants to renew
+
+	var renews, reloads int32
+	mgr := New(Config{
+		Layout:     layout,
+		RetryDelay: 10 * time.Millisecond,
+		ReArmDelay: 10 * time.Millisecond,
+		Renew: func(context.Context) (enrollclient.Result, error) {
+			atomic.AddInt32(&renews, 1)
+			return enrollclient.Result{}, errors.New("core unreachable")
+		},
+		Reload: func() error { atomic.AddInt32(&reloads, 1); return nil },
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_ = mgr.Run(ctx)
+
+	if atomic.LoadInt32(&renews) < 2 {
+		t.Fatalf("renew should have been retried, got %d attempts", renews)
+	}
+	if atomic.LoadInt32(&reloads) != 0 {
+		t.Fatal("a failed renewal must NEVER reload — the data plane stays untouched")
 	}
 }
