@@ -19,6 +19,7 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/hostkey"
 	"github.com/jeks313/nebula-control-plane/internal/nebulaconfig"
 	"github.com/jeks313/nebula-control-plane/internal/paths"
+	"github.com/jeks313/nebula-control-plane/internal/renew"
 	"github.com/jeks313/nebula-control-plane/internal/supervisor"
 	"gopkg.in/yaml.v3"
 )
@@ -61,7 +62,7 @@ usage:
   pilot enroll -gateway <url> -join-key <secret> -config-pub <pem> [-dir <path>] [-name N] [-groups a,b]
   pilot renew -core <url> -config-pub <pem> [-dir <path>]
   pilot clock-check [-server <host>] [-max-skew <dur>] [-timeout <dur>]
-  pilot supervise -config <nebula.yml> [-nebula <path>] [-sha256 <hex>]
+  pilot supervise -config <nebula.yml> [-nebula <path>] [-sha256 <hex>] [-core <url> -config-pub <pem> -dir <path>]
   pilot version
 
 commands:
@@ -293,6 +294,11 @@ func cmdSupervise(args []string) {
 	nebulaPath := fs.String("nebula", "nebula", "path to the nebula binary")
 	configPath := fs.String("config", "", "path to nebula config.yml (required)")
 	sha := fs.String("sha256", "", "optional: expected hex sha256 of the nebula binary (verified before exec)")
+	// Proactive renewal (M4.4): if -core + -config-pub are set, supervise also
+	// auto-renews the cert at ~⅔ life (with jitter) and hot-reloads nebula.
+	dir := fs.String("dir", "", "host directory (for auto-renew; default: platform-specific)")
+	core := fs.String("core", "", "Core API base URL (enables proactive renewal)")
+	configPub := fs.String("config-pub", "", "pinned config-signing public key PEM (required with -core)")
 	_ = fs.Parse(args)
 
 	if *configPath == "" {
@@ -310,6 +316,26 @@ func cmdSupervise(args []string) {
 		ExpectedSHA256: *sha,
 	}
 	installReload(ctx, sup) // SIGHUP -> hot reload nebula (Unix); no-op on Windows
+
+	if *core != "" {
+		if *configPub == "" {
+			fatalf("supervise: -core requires -config-pub")
+		}
+		pubPEM, err := os.ReadFile(*configPub)
+		if err != nil {
+			fatalf("supervise: read -config-pub: %v", err)
+		}
+		pinned, err := enrollclient.ParsePinnedConfigPub(pubPEM)
+		if err != nil {
+			fatalf("supervise: %v", err)
+		}
+		mgr := renew.New(renew.Config{
+			Layout: paths.New(*dir), CoreURL: *core, PinnedConfigPub: pinned,
+			Reload: sup.Reload,
+		})
+		go func() { _ = mgr.Run(ctx) }()
+	}
+
 	if err := sup.Run(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "pilot: %v\n", err)
 		os.Exit(1)
