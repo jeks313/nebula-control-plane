@@ -179,12 +179,12 @@ Body is a **host-request JWS** (§3, role 1). Decoded `payload`:
 Core consumes the queued candidate and, idempotently:
 1. Re-verifies request JWS + nonce; checks the **replay cache** (§4.3).
 2. Authenticates the `method` credential (§5.4).
-3. Enforces **enrollment quotas** (3.10): per-cloud-account and per-instance caps, distinct from the signing circuit-breaker (2.5).
-4. Resolves **groups** from token class (3.5) or immutable facts (5.5) — never from `requested_groups` or mutable tags.
-5. Drives device state `pending → active` (2.12); on a conflicting existing active enrollment for the same instance/identity, routes to **PENDING for manual approval** (3.9/5.4), never silently re-issues.
-6. Allocates an overlay IP (2.6), assembles + signs the **leaf cert** (CA key, 2.3) and the **bundle** (config-signing key, §6), writes the bundle to the **result store** (3.6a).
+3. Enforces **enrollment quotas** (3.10): per-cloud-account, per-instance, and **per-join-key** caps, distinct from the signing circuit-breaker (2.5).
+4. Resolves **groups** from the **join key** (token method, 3.5) or immutable facts (attestation, 5.5) — never from `requested_groups` or mutable tags.
+5. **Approval decision (default-deny for bearer secrets):** a **join-key** (token-method) join goes to **PENDING manual approval (3.9)** unless that key explicitly sets `auto_issue` (a heavily-warned per-key opt-out). **Attestation methods** (aws-sigv4/azure-imds/oidc, and future TPM) may auto-issue. A conflicting existing active enrollment for the same instance/identity always routes to PENDING, never silent re-issue.
+6. Drives device state `pending → active` (2.12); on auto-issue or after approval: allocates an overlay IP (2.6), assembles + signs the **leaf cert** (CA key, 2.3) and the **bundle** (config-signing key, §6), writes the bundle to the **result store** (3.6a).
 
-Auto-issue vs. **pending approval**: a request may complete immediately (`issued`) or wait for a human (`pending` → later `issued`/`denied`). Both are delivered via the same poll endpoint.
+Auto-issue vs. **pending approval**: a request may complete immediately (`issued`) or wait for a human (`pending` → later `issued`/`denied`). Both are delivered via the same poll endpoint. **The default for join keys is `pending`** — a host joining on a bearer secret is only admitted to the network after a human approves it in the UI.
 
 ### 5.3 Poll — `GET /v1/enroll/{id}`
 
@@ -207,7 +207,7 @@ Responses:
 
 | `method` | `credential` payload | Verified by | Step |
 |---|---|---|---|
-| `token` | `{ "token": "<one-time secret>" }` | single-use + TTL token, bound `pubkey_hash` | 3.4 |
+| `token` | `{ "token": "<join-key secret>" }` | matched (by hash) to an active **join key** (§4.1c): not expired, `used_count < max_uses`, within quota. **Defaults to PENDING approval** unless the key sets `auto_issue`. Groups come from the key. | 3.4 |
 | `aws-sigv4` | `{ "presigned": { "method":"POST", "url":"https://sts.<region>.amazonaws.com/", "headers":{...}, "body":"Action=GetCallerIdentity&Version=2011-06-15" } }` — the SigV4 signature **MUST** cover headers `X-Harbor-Nonce: <nonce>` and `X-Harbor-Pubkey-Hash: <pubkey_hash>` | Core replays `GetCallerIdentity`; checks account/role-path allowlist + nonce/pubkey binding; secondary IID/DescribeInstances cross-check (5.3) | 5.1–5.3 |
 | `azure-imds` | `{ "attested_document": "<base64 PKCS7>" }` — IMDS attested data with the nonce embedded natively | chain to Azure CA, subscription/vmId allowlist | 5.6 |
 | `oidc` *(reserved, M9)* | `{ "id_token": "<JWT>" }` device-code flow | IdP JWKS, device↔human binding | 9.1 |
