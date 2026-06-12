@@ -128,25 +128,34 @@ func (m *Manager) Run(ctx context.Context) error {
 			return nil
 		}
 
-		res, err := m.cfg.Renew(ctx)
-		if err != nil {
+		if err := m.RenewNow(ctx); err != nil {
 			m.cfg.Logger.Warn("renew: failed; will retry", "err", err)
 			if !m.sleep(ctx, m.cfg.RetryDelay) {
 				return nil
 			}
 			continue
 		}
-		m.cfg.Logger.Info("renew: certificate renewed", "overlay_ip", res.OverlayIP)
-		if m.cfg.Reload != nil {
-			if err := m.cfg.Reload(); err != nil {
-				m.cfg.Logger.Warn("renew: reload after renewal failed", "err", err)
-			}
-		}
 		// Floor between cycles so a stub/clock edge can't hot-loop.
 		if !m.sleep(ctx, m.cfg.ReArmDelay) {
 			return nil
 		}
 	}
+}
+
+// RenewNow performs a single renewal + hot-reload immediately (used by the
+// scheduled loop and by a Core-issued `renew` command, 4.6).
+func (m *Manager) RenewNow(ctx context.Context) error {
+	res, err := m.cfg.Renew(ctx)
+	if err != nil {
+		return err
+	}
+	m.cfg.Logger.Info("renew: certificate renewed", "overlay_ip", res.OverlayIP)
+	if m.cfg.Reload != nil {
+		if err := m.cfg.Reload(); err != nil {
+			m.cfg.Logger.Warn("renew: reload after renewal failed", "err", err)
+		}
+	}
+	return nil
 }
 
 func (m *Manager) certWindow() (notBefore, notAfter time.Time, err error) {

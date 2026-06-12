@@ -16,6 +16,7 @@ import (
 
 	"github.com/jeks313/nebula-control-plane/internal/clock"
 	"github.com/jeks313/nebula-control-plane/internal/enrollclient"
+	"github.com/jeks313/nebula-control-plane/internal/heartbeat"
 	"github.com/jeks313/nebula-control-plane/internal/hostkey"
 	"github.com/jeks313/nebula-control-plane/internal/nebulaconfig"
 	"github.com/jeks313/nebula-control-plane/internal/paths"
@@ -329,11 +330,23 @@ func cmdSupervise(args []string) {
 		if err != nil {
 			fatalf("supervise: %v", err)
 		}
+		layout := paths.New(*dir)
 		mgr := renew.New(renew.Config{
-			Layout: paths.New(*dir), CoreURL: *core, PinnedConfigPub: pinned,
+			Layout: layout, CoreURL: *core, PinnedConfigPub: pinned,
 			Reload: sup.Reload,
 		})
 		go func() { _ = mgr.Run(ctx) }()
+
+		// Heartbeat + typed command channel (4.6): report state; act on the
+		// closed command set (Core-issued renew reuses the renewal path).
+		hb := heartbeat.New(heartbeat.Config{
+			CoreURL: *core, Layout: layout, PilotVersion: version,
+			Handlers: heartbeat.Handlers{
+				Renew:   mgr.RenewNow,
+				Restart: sup.Restart,
+			},
+		})
+		go func() { _ = hb.Run(ctx) }()
 	}
 
 	if err := sup.Run(ctx); err != nil {

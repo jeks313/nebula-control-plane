@@ -97,6 +97,39 @@ type RenewResponse struct {
 	Bundle          json.RawMessage `json:"bundle"`
 }
 
+// HeartbeatRequest is the POST /v1/heartbeat body (spec §8.2). Mesh-only,
+// attributed to the calling tunnel's overlay IP — no JWS needed.
+type HeartbeatRequest struct {
+	ProtocolVersion      int    `json:"protocol_version"`
+	Type                 string `json:"type"` // "heartbeat"
+	AppliedBundleVersion int    `json:"applied_bundle_version"`
+	CertNotAfter         string `json:"cert_not_after"` // RFC3339
+	PilotVersion         string `json:"pilot_version"`
+	NebulaVersion        string `json:"nebula_version"`
+	ClockOffsetMs        int    `json:"clock_offset_ms"`
+	Health               string `json:"health"`
+}
+
+// Command types — a CLOSED set (spec §8.2). Pilot executes only these and
+// rejects anything else; the command channel is never arbitrary execution.
+const (
+	CmdRenew       = "renew"
+	CmdApplyBundle = "apply_bundle"
+	CmdRestart     = "restart"
+)
+
+// Command is one typed instruction from Core to Pilot.
+type Command struct {
+	Type          string `json:"type"`
+	BundleVersion int    `json:"bundle_version,omitempty"`
+}
+
+// HeartbeatResponse carries the typed command channel back to Pilot.
+type HeartbeatResponse struct {
+	ProtocolVersion int       `json:"protocol_version"`
+	Commands        []Command `json:"commands"`
+}
+
 // PollResponse is the GET /v1/enroll/{id} body (spec §5.3).
 type PollResponse struct {
 	Status      string          `json:"status"` // pending | issued | denied
