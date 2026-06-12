@@ -27,6 +27,7 @@ var files embed.FS
 // shipped one.
 var migrations = []*gormigrate.Migration{
 	sqlMigration("000001_init"),
+	sqlMigration("000002_ipam"),
 }
 
 // Up applies all pending migrations.
@@ -65,8 +66,10 @@ func execSQL(tx *gorm.DB, id, dir string) error {
 	if err != nil {
 		return fmt.Errorf("no migration %s: %w", name, err)
 	}
-	for _, stmt := range strings.Split(string(b), ";") {
-		if isBlank(stmt) {
+	// Strip line comments first, so a semicolon inside a `-- comment` can't
+	// split a statement in two.
+	for _, stmt := range strings.Split(stripLineComments(string(b)), ";") {
+		if strings.TrimSpace(stmt) == "" {
 			continue
 		}
 		if err := tx.Exec(stmt).Error; err != nil {
@@ -76,13 +79,14 @@ func execSQL(tx *gorm.DB, id, dir string) error {
 	return nil
 }
 
-// isBlank reports whether a statement is only whitespace and/or -- comments.
-func isBlank(stmt string) bool {
-	for _, line := range strings.Split(stmt, "\n") {
-		t := strings.TrimSpace(line)
-		if t != "" && !strings.HasPrefix(t, "--") {
-			return false
+func stripLineComments(sql string) string {
+	var sb strings.Builder
+	for _, line := range strings.Split(sql, "\n") {
+		if i := strings.Index(line, "--"); i >= 0 {
+			line = line[:i]
 		}
+		sb.WriteString(line)
+		sb.WriteByte('\n')
 	}
-	return true
+	return sb.String()
 }

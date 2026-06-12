@@ -55,9 +55,20 @@ func Open(cfg Config) (*Store, error) {
 	db, err := gorm.Open(dialector, &gorm.Config{
 		Logger:                 logger.Default.LogMode(logger.Silent),
 		SkipDefaultTransaction: true,
+		TranslateError:         true, // surfaces gorm.ErrDuplicatedKey portably (IPAM relies on it)
 	})
 	if err != nil {
 		return nil, fmt.Errorf("store: open %s: %w", cfg.Driver, err)
+	}
+	if cfg.Driver == "sqlite" {
+		// SQLite is a single-writer engine; one connection avoids spurious
+		// "database is locked" under concurrent writers (the IPAM allocator
+		// still exercises real INSERT contention via the UNIQUE(ip) guard).
+		sqlDB, err := db.DB()
+		if err != nil {
+			return nil, err
+		}
+		sqlDB.SetMaxOpenConns(1)
 	}
 	return &Store{DB: db}, nil
 }
