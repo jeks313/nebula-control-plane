@@ -9,6 +9,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/asn1"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -62,6 +63,39 @@ func SignES256(priv *ecdsa.PrivateKey, h Header, payload []byte) (Flattened, err
 	sig := make([]byte, 64)
 	r.FillBytes(sig[:32])
 	s.FillBytes(sig[32:])
+	return Flattened{Protected: protected, Payload: pl, Signature: b64.EncodeToString(sig)}, nil
+}
+
+// DigestSigner signs a SHA-256 digest and returns an ASN.1 DER ECDSA signature
+// (the signer.Backend shape — KMS/HSM/software). jws does not import signer.
+type DigestSigner interface {
+	SignDigest(digest []byte) ([]byte, error)
+}
+
+// SignBackendES256 produces a flattened JWS using a DigestSigner (HSM/KMS/software
+// CA backend). The backend returns DER; JWS ES256 needs fixed-size R‖S, so we
+// convert. This is how the config-signing key signs bundles.
+func SignBackendES256(s DigestSigner, h Header, payload []byte) (Flattened, error) {
+	h.Alg = Alg
+	hb, err := json.Marshal(h)
+	if err != nil {
+		return Flattened{}, err
+	}
+	protected := b64.EncodeToString(hb)
+	pl := b64.EncodeToString(payload)
+	digest := sha256.Sum256([]byte(protected + "." + pl))
+
+	der, err := s.SignDigest(digest[:])
+	if err != nil {
+		return Flattened{}, err
+	}
+	var parsed struct{ R, S *big.Int }
+	if _, err := asn1.Unmarshal(der, &parsed); err != nil {
+		return Flattened{}, fmt.Errorf("jws: parse DER signature: %w", err)
+	}
+	sig := make([]byte, 64)
+	parsed.R.FillBytes(sig[:32])
+	parsed.S.FillBytes(sig[32:])
 	return Flattened{Protected: protected, Payload: pl, Signature: b64.EncodeToString(sig)}, nil
 }
 

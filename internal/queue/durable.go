@@ -11,6 +11,7 @@ import (
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	"gorm.io/gorm/logger"
 )
 
@@ -38,8 +39,10 @@ const (
 
 // Errors.
 var (
-	ErrDuplicate    = errors.New("queue: duplicate enrollment_id (idempotent no-op)")
-	ErrBackpressure = errors.New("queue: at capacity")
+	ErrDuplicate      = errors.New("queue: duplicate enrollment_id (idempotent no-op)")
+	ErrBackpressure   = errors.New("queue: at capacity")
+	ErrResultNotFound = errors.New("queue: no such result (or wrong retrieval secret)")
+	ErrResultGone     = errors.New("queue: result expired or already consumed")
 )
 
 type item struct {
@@ -56,6 +59,23 @@ type item struct {
 }
 
 func (item) TableName() string { return "queue_items" }
+
+// result is the enrollment result store (3.6a). Core writes here; the gateway
+// reads on poll, gated by the retrieval-secret hash. Stored in the shared
+// gateway↔Core store, so the gateway's only data privileges are publish (queue)
+// + read-own-result (this table).
+type result struct {
+	ID           int64  `gorm:"column:id;primaryKey"`
+	EnrollmentID string `gorm:"column:enrollment_id;uniqueIndex"`
+	Status       string `gorm:"column:status"` // pending | issued | denied
+	Bundle       []byte `gorm:"column:bundle"` // bundle JWS, when issued
+	SecretHash   []byte `gorm:"column:secret_hash"`
+	Reason       string `gorm:"column:reason"`
+	ExpiresAt    int64  `gorm:"column:expires_at"`
+	ReadCount    int    `gorm:"column:read_count"`
+}
+
+func (result) TableName() string { return "queue_results" }
 
 // DurableConfig tunes the queue.
 type DurableConfig struct {
@@ -83,7 +103,7 @@ func OpenDurable(cfg DurableConfig) (*Durable, error) {
 		return nil, err
 	}
 	sqlDB.SetMaxOpenConns(1)
-	if err := db.AutoMigrate(&item{}); err != nil {
+	if err := db.AutoMigrate(&item{}, &result{}); err != nil {
 		return nil, fmt.Errorf("queue: migrate: %w", err)
 	}
 	d := &Durable{db: db, key: cfg.Key, maxDepth: cfg.MaxDepth, maxAttempts: cfg.MaxAttempts, now: time.Now}
@@ -210,6 +230,59 @@ func (d *Durable) Depth(ctx context.Context) (int, error) {
 	var n int64
 	err := d.db.WithContext(ctx).Model(&item{}).Where("status IN ?", []string{statusReady, statusInflight}).Count(&n).Error
 	return int(n), err
+}
+
+// PutResult writes (or updates) an enrollment result. read_count + secret_hash
+// are preserved across updates (a pending result later flips to issued).
+func (d *Durable) PutResult(ctx context.Context, enrollmentID, status string, secretHash, bundle []byte, reason string, expiresAt time.Time) error {
+	r := result{
+		EnrollmentID: enrollmentID, Status: status, Bundle: bundle, SecretHash: secretHash,
+		Reason: reason, ExpiresAt: expiresAt.UnixNano(),
+	}
+	err := d.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "enrollment_id"}},
+		DoUpdates: clause.AssignmentColumns([]string{"status", "bundle", "reason", "expires_at"}),
+	}).Create(&r).Error
+	if err != nil {
+		return fmt.Errorf("queue: put result: %w", err)
+	}
+	return nil
+}
+
+// PollResult is what the gateway returns to a polling client.
+type PollResult struct {
+	Status string
+	Bundle []byte
+	Reason string
+}
+
+// GetResult returns the result for enrollmentID if the presented secret matches.
+// A wrong/unknown secret returns ErrResultNotFound (no oracle); an expired or
+// already-consumed issued bundle returns ErrResultGone (one-time read).
+func (d *Durable) GetResult(ctx context.Context, enrollmentID, secret string) (PollResult, error) {
+	var r result
+	err := d.db.WithContext(ctx).Where("enrollment_id = ?", enrollmentID).First(&r).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return PollResult{}, ErrResultNotFound
+	}
+	if err != nil {
+		return PollResult{}, fmt.Errorf("queue: get result: %w", err)
+	}
+	sum := sha256.Sum256([]byte(secret))
+	if !hmac.Equal(sum[:], r.SecretHash) {
+		return PollResult{}, ErrResultNotFound
+	}
+	if r.ExpiresAt != 0 && d.now().UnixNano() >= r.ExpiresAt {
+		return PollResult{}, ErrResultGone
+	}
+	if r.Status == "issued" {
+		if r.ReadCount > 0 {
+			return PollResult{}, ErrResultGone // one-time bundle read
+		}
+		d.db.WithContext(ctx).Model(&result{}).Where("id = ?", r.ID).
+			UpdateColumn("read_count", gorm.Expr("read_count + 1"))
+	}
+	return PollResult{Status: r.Status, Bundle: r.Bundle, Reason: r.Reason}, nil
 }
 
 func (d *Durable) mac(it item) []byte {

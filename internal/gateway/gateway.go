@@ -7,6 +7,7 @@
 package gateway
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -15,6 +16,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/jeks313/nebula-control-plane/internal/jws"
@@ -23,6 +25,12 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/ratelimit"
 	"github.com/jeks313/nebula-control-plane/internal/wire"
 )
+
+// ResultReader is the gateway's read-own-result capability (poll, 3.6a).
+// *queue.Durable satisfies it.
+type ResultReader interface {
+	GetResult(ctx context.Context, enrollmentID, secret string) (queue.PollResult, error)
+}
 
 const (
 	maxBindingLen      = 128
@@ -35,6 +43,7 @@ const (
 type Config struct {
 	Nonces       *nonce.Keyring
 	Queue        queue.Queue
+	Results      ResultReader       // nil = poll unavailable
 	Limiter      *ratelimit.Limiter // nil = no edge limit
 	MaxBodyBytes int64              // <=0 -> default
 	TicketTTL    time.Duration      // <=0 -> default
@@ -45,6 +54,7 @@ type Config struct {
 type Server struct {
 	nonces    *nonce.Keyring
 	queue     queue.Queue
+	results   ResultReader
 	limiter   *ratelimit.Limiter
 	maxBody   int64
 	ticketTTL time.Duration
@@ -56,6 +66,7 @@ func New(cfg Config) *Server {
 	s := &Server{
 		nonces:    cfg.Nonces,
 		queue:     cfg.Queue,
+		results:   cfg.Results,
 		limiter:   cfg.Limiter,
 		maxBody:   cfg.MaxBodyBytes,
 		ticketTTL: cfg.TicketTTL,
@@ -78,6 +89,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/nonce", s.handleNonce)
 	mux.HandleFunc("POST /v1/enroll", s.handleEnroll)
+	mux.HandleFunc("GET /v1/enroll/{id}", s.handlePoll)
 	return mux
 }
 
@@ -204,6 +216,43 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		PollAfterMs:     defaultPollAfterMs,
 		ExpiresAt:       s.now().Add(s.ticketTTL).UTC().Format(time.RFC3339),
 	})
+}
+
+// handlePoll implements GET /v1/enroll/{id} (spec §5.3): release the result only
+// to the holder of the retrieval secret; one-time read of an issued bundle.
+func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if s.results == nil {
+		wire.WriteError(w, wire.CodeNotFound, "no result store")
+		return
+	}
+	secret := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if secret == "" || secret == r.Header.Get("Authorization") {
+		wire.WriteError(w, wire.CodeInvalidRequest, "missing Bearer retrieval secret")
+		return
+	}
+
+	res, err := s.results.GetResult(r.Context(), r.PathValue("id"), secret)
+	switch {
+	case errors.Is(err, queue.ErrResultNotFound):
+		wire.WriteError(w, wire.CodeNotFound, "not found")
+		return
+	case errors.Is(err, queue.ErrResultGone):
+		wire.WriteError(w, wire.CodeGone, "expired or already consumed")
+		return
+	case err != nil:
+		wire.WriteError(w, wire.CodeInternal, "result lookup failed")
+		return
+	}
+
+	switch res.Status {
+	case "issued":
+		wire.WriteJSON(w, http.StatusOK, wire.PollResponse{Status: "issued", Bundle: json.RawMessage(res.Bundle)})
+	case "denied":
+		wire.WriteJSON(w, http.StatusOK, wire.PollResponse{Status: "denied", Reason: res.Reason})
+	default: // pending
+		wire.WriteJSON(w, http.StatusAccepted, wire.PollResponse{Status: "pending", PollAfterMs: defaultPollAfterMs})
+	}
 }
 
 func (s *Server) allow(key string) bool {
