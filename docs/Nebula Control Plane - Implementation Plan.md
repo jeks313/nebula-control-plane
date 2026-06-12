@@ -36,6 +36,13 @@ Companion to [[Nebula Control Plane - Design Plan]] (v3). This breaks the design
 
 Goal: prove the foundations work *before* committing to architecture. Code here is disposable; capture findings in the design doc's open-questions (§12).
 
+> **M0 results (2026-06-11) — feasibility PASSED.** ✅ 0.1, 0.2, **0.3 (HSM/PKCS#11 CA → tunnel — the make-or-break)**, 0.5, all on a `netns` lab with **SoftHSM standing in for KMS**. Findings:
+> - nebula **1.10.3 defaults to cert v2**; PKCS#11 CA signing requires **P256**.
+> - Build `nebula-cert` with **`-tags pkcs11` pinned to the *installed* nebula version** — master renamed `-ip`→`-networks`, so an unpinned build breaks flag/format compat.
+> - Correct HSM flow: **`keygen` the host key locally → `sign -pkcs11 <CA-uri> -in-pub <host.pub>`** (CA key stays in the module, host private key never leaves the host — validates **P1**). `sign -pkcs11` alone wrongly uses the HSM key as the *subject* key.
+> - The SoftHSM CA private key is `never extractable` — the exact KMS property; the AWS KMS path is the same shape, different backend.
+> - Still open: **0.4** reload semantics, **0.6** deny-path automation, **0.7** real NAT traversal. Harness: `spike/m0/`.
+
 - **0.1** Pin a Nebula version; create a **cert v2 / P256 CA** with `nebula-cert` (`-curve P256`). *Done when:* a P256 CA + one host cert verify with `nebula-cert print`.
 - **0.2** Stand up 2 nodes + 1 lighthouse by hand with those certs; confirm an encrypted tunnel + ping across the overlay. *Done when:* `nebula` on host A reaches host B's overlay IP.
 - **0.3** Replace the local CA with an **AWS KMS P256 key**; sign a host cert via [`nebula-cert-kms`](https://github.com/NebulaOSS/nebula-cert-kms) (or PKCS#11). *Done when:* a KMS-signed cert is accepted and a tunnel forms — **this is the single biggest feasibility risk; prove it first.**
