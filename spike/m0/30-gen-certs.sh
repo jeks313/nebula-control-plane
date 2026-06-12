@@ -15,6 +15,7 @@ fi
 
 sign() { # name overlay_ip/cidr groups
   local name="$1" ip="$2" groups="${3:-}"
+  if [[ -f "${RUN}/${name}.crt" ]]; then log "${name}.crt exists — skipping"; return; fi
   log "signing ${name} (${ip}${groups:+ groups=$groups})"
   "$NEBULA_CERT" sign \
     -ca-crt "${RUN}/ca.crt" -ca-key "${RUN}/ca.key" \
