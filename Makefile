@@ -7,6 +7,7 @@ help:
 	@echo "  build        build pilot + harbor into bin/"
 	@echo "  test         go test ./..."
 	@echo "  m1-smoke     run the M1 acceptance (needs nebula + nebula-cert)"
+	@echo "  systemd-verify  offline-validate packaging/systemd/pilot.service"
 	@echo "  tidy         go mod tidy"
 	@echo
 	@echo "M0 spike targets:"
@@ -34,6 +35,12 @@ test:
 .PHONY: m1-smoke
 m1-smoke:
 	go test -v -run TestPilotInitProducesConfigNebulaAccepts ./internal/integration
+
+.PHONY: systemd-verify
+systemd-verify:
+	systemd-analyze verify packaging/systemd/pilot.service
+	@echo "--- security profile (offline) ---"
+	@systemd-analyze security --offline=true packaging/systemd/pilot.service || true
 
 .PHONY: tidy
 tidy:
