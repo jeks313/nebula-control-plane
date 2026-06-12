@@ -15,6 +15,7 @@ import (
 
 	"github.com/jeks313/nebula-control-plane/internal/genesis"
 	"github.com/jeks313/nebula-control-plane/internal/ipam"
+	"github.com/jeks313/nebula-control-plane/internal/joinkey"
 	"github.com/jeks313/nebula-control-plane/internal/signer"
 	"github.com/jeks313/nebula-control-plane/internal/store"
 	"github.com/jeks313/nebula-control-plane/internal/store/migrate"
@@ -36,6 +37,8 @@ func main() {
 		cmdAudit(os.Args[2:])
 	case "ipam":
 		cmdIPAM(os.Args[2:])
+	case "joinkey":
+		cmdJoinKey(os.Args[2:])
 	case "genesis":
 		cmdGenesis(os.Args[2:])
 	case "ca-init":
@@ -62,6 +65,9 @@ usage:
   harbor audit verify      [db flags]
   harbor ipam allocate     -device NAME [-range R] [-pool CIDR] [-quarantine D] [db flags]
   harbor ipam release      -ip ADDR [-pool CIDR] [-quarantine D] [db flags]
+  harbor joinkey create    -name N [-groups a,b] [-max-uses K] [-ttl D] [-auto-issue] [db flags]
+  harbor joinkey list      [db flags]
+  harbor joinkey revoke    -name N [db flags]
   harbor genesis           -out DIR -operator-a A -operator-b B -lighthouse-pub PEM [...]
   harbor ca-init           -ca-cert OUT [-backend software|pkcs11] [-ca-key OUT] [...]
   harbor issue-cert        -name DEVICE -in-pub HOST.pub -ca-cert CA [-groups a,b] [...]
@@ -256,6 +262,75 @@ func (b *backendFlags) load() (signer.Backend, error) {
 		})
 	default:
 		return nil, fmt.Errorf("unknown backend %q (want software|pkcs11)", *b.kind)
+	}
+}
+
+func cmdJoinKey(args []string) {
+	if len(args) < 1 {
+		fatalf("joinkey: want 'create', 'list', or 'revoke'")
+	}
+	fs := flag.NewFlagSet("joinkey", flag.ExitOnError)
+	driver, dsn := dbFlags(fs)
+	name := fs.String("name", "", "join key name")
+	groups := fs.String("groups", "", "comma-separated groups granted by this key")
+	subRange := fs.String("sub-range", "", "restrict allocations to this pool sub-range")
+	maxUses := fs.Int("max-uses", 1, "max uses (0 = unlimited/reusable)")
+	ttl := fs.Duration("ttl", 0, "validity (0 = no expiry)")
+	autoIssue := fs.Bool("auto-issue", false, "skip manual approval (HEAVILY DISCOURAGED)")
+	ephemeral := fs.Bool("ephemeral", false, "nodes joined with this key are ephemeral")
+	_ = fs.Parse(args[1:])
+
+	s := openStore(*driver, *dsn)
+	defer s.Close()
+	ctx := context.Background()
+
+	switch args[0] {
+	case "create":
+		if *name == "" {
+			fatalf("joinkey create: -name is required")
+		}
+		if *autoIssue {
+			fmt.Fprintln(os.Stderr, "WARNING: -auto-issue makes this a bearer secret that joins the")
+			fmt.Fprintln(os.Stderr, "         network with NO human approval. Anyone holding it can join.")
+			fmt.Fprintln(os.Stderr, "         Pair with short -ttl, low -max-uses, and tight -groups.")
+		}
+		secret, jk, err := joinkey.Create(ctx, s, joinkey.Params{
+			Name: *name, Groups: parseCSV(*groups), SubRange: *subRange,
+			MaxUses: *maxUses, TTL: *ttl, AutoIssue: *autoIssue, Ephemeral: *ephemeral,
+		}, time.Now())
+		if err != nil {
+			fatalf("%v", err)
+		}
+		approval := "manual approval REQUIRED"
+		if jk.AutoIssue {
+			approval = "AUTO-ISSUE (no approval)"
+		}
+		fmt.Printf("join key %q created — %s\n", jk.Name, approval)
+		fmt.Printf("  groups: %v  max-uses: %d  ephemeral: %v\n", jk.GroupList(), jk.MaxUses, jk.Ephemeral)
+		fmt.Printf("\n  SECRET (shown once, store it now):\n  %s\n", secret)
+	case "list":
+		keys, err := joinkey.List(ctx, s)
+		if err != nil {
+			fatalf("%v", err)
+		}
+		fmt.Printf("%-20s %-10s %-8s %-10s %-7s %s\n", "NAME", "STATE", "USES", "AUTO", "EPHEM", "GROUPS")
+		for _, k := range keys {
+			uses := fmt.Sprintf("%d/%d", k.UsedCount, k.MaxUses)
+			if k.MaxUses == 0 {
+				uses = fmt.Sprintf("%d/∞", k.UsedCount)
+			}
+			fmt.Printf("%-20s %-10s %-8s %-10v %-7v %v\n", k.Name, k.State, uses, k.AutoIssue, k.Ephemeral, k.GroupList())
+		}
+	case "revoke":
+		if *name == "" {
+			fatalf("joinkey revoke: -name is required")
+		}
+		if err := joinkey.Revoke(ctx, s, *name); err != nil {
+			fatalf("%v", err)
+		}
+		fmt.Printf("join key %q revoked\n", *name)
+	default:
+		fatalf("joinkey: unknown subcommand %q", args[0])
 	}
 }
 

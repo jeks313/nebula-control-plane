@@ -69,8 +69,8 @@ Plus a persistent **global search** (device, overlay IP, cert fingerprint, insta
 - **Conflict inbox**: instance-id re-enrollment conflicts (§4.1 / 5.4) needing human review.
 
 ### 4.3 Enrollment & approvals
-- **Approval queue** (manual/PENDING path, impl 3.9): list with attestation evidence, requested groups, source account/subscription; approve/deny **with reason**; bulk approve (guarded).
-- **Enrollment tokens** (impl 3.4): generate one-time tokens (TTL, device-class, intended groups, max uses=1), list outstanding, revoke; clear "headless on-prem only" framing.
+- **Approval queue** (manual/PENDING path, impl 3.9): list with method + evidence, **pubkey fingerprint**, requested name, source, and **join-key id** for key-based joins; approve/deny **with reason**; bulk approve (guarded). **Join-key (non-attested) joins land here by default** — admitting a host that proved identity only with a bearer secret is a deliberate human action.
+- **Join keys** (§4.1c, impl 3.4/3.4a): create scoped, revocable keys — groups, network/sub-range, one-time/capped/reusable, expiry, ephemeral; secret shown **once** on creation; list outstanding with use counts; revoke. The **`auto_issue`** (skip manual approval) toggle is a **heavily-warned** control — surface the risk inline (bearer secret → self-service network join) and steer toward short expiry + usage cap + tight groups + quota. Default is approval-required.
 - **OIDC device-flow** status for laptops (impl 9.1): in-flight codes, who's enrolling.
 - **Enrollment activity / funnel**: submitted → attested → auto/pending → issued/denied, with failure reasons (great for debugging "why won't this host join").
 - **Quota status** (impl 3.10): per-account/subscription and per-instance-id usage vs limits; adjust quotas (privileged).

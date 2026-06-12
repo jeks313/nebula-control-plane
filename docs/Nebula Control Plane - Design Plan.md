@@ -139,11 +139,22 @@ Pilot (new host)                          Gateway → Harbor Core
   │  write cert+config (0600), start nebula, switch to mesh management (P9)
 ```
 
-Key properties: identity proven by the cloud's own signature or an out-of-band human grant, never a shared secret; the **public key is bound into the attestation**, so a stolen attestation can't be replayed with the attacker's key; re-enrollment of an instance-id with an active cert is a **conflict requiring review** (legitimate rebuild vs. compromised host minting a second identity — Harbor must not guess silently). The `name` field is **cosmetic only** — IP and groups are the sole authz inputs, so a host self-selecting a name cannot matter.
+Key properties: identity proven by the cloud's own signature or an out-of-band human grant — and never by an **unattested shared secret that auto-issues**. The one fallback for machines with no attestation root, **join keys (§4.1c)**, *is* a bearer secret, so it is accepted only behind **mandatory manual approval by default**. The **public key is bound into the attestation/request**, so a stolen attestation can't be replayed with the attacker's key; re-enrollment of an instance-id with an active cert is a **conflict requiring review** (legitimate rebuild vs. compromised host minting a second identity — Harbor must not guess silently). The `name` field is **cosmetic only** — IP and groups are the sole authz inputs, so a host self-selecting a name cannot matter.
+
+### 4.1c Join keys (off-cloud / non-attested enrollment)
+
+Machines with no cloud or hardware attestation root (on-prem servers, dev boxes, other clouds) enroll with a **join key** — an admin-issued, scoped, revocable secret (the generalization of the one-time token; cf. Tailscale auth keys, kubeadm join tokens). A join key is the **weakest** identity proof in the system (a bearer secret: possession ≠ a verified machine identity), so it is hedged on every axis:
+
+- **Manual approval is the default.** A host presenting a join key lands in the **PENDING admin queue (§4.1/3.9)** and is issued nothing until a human approves it in the UI, seeing the requested name, **pubkey fingerprint**, source, and the join-key id. Auto-issue is an explicit, **heavily-warned per-key opt-out** (`auto_issue`) for unattended fleets (CI/autoscale) — it converts the key into a self-service network-join capability and must be paired with short expiry, a usage cap, tight group scope, ephemeral nodes, and a per-key quota. **Attestation-backed methods (AWS/Azure, future TPM) may auto-issue**; bearer join keys may not, by default.
+- **Scoped, not blanket.** Each key carries its **groups** (the cert's groups come from the *key*, never from host-requested fields — the off-cloud analog of immutable-fact groups, §4.3a), an allowed network/sub-range, an expiry, and a use model: **one-time** (`max_uses=1`), **capped**, or **reusable**; optionally **ephemeral** (nodes auto-reaped offline, §7).
+- **Revocable + bounded.** Stored only as a hash; instantly revocable (stops new joins; issued certs die by expiry/blocklist, §4.7); per-key **enrollment quota (§4.0)** so a leaked key can't mint a fleet; every join audited with the key id.
+- **PoP still holds.** The enroll request is JWS-signed by the host key, so a join key only authorizes a cert *for that pubkey* — a leaked key lets an attacker mint a *new* identity (caught at approval), not steal an existing one.
+
+The stronger long-term floor for on-prem hardware is **TPM attestation** (§12); join keys are the no-hardware-root option.
 
 ### 4.1b Laptop / human-device enrollment (OIDC device flow)
 
-Laptops use an **OIDC device-code flow** against the IdP (Pilot shows a code, human authenticates with MFA, Harbor binds device→human). Closes Nebula's "no SSO" gap and gives offboarding a hook (disable user → stop renewing their devices). One-time tokens remain only for headless on-prem boxes. **Note:** this puts the IdP in the TCB for the laptop device-class (see §2.1, §7).
+Laptops use an **OIDC device-code flow** against the IdP (Pilot shows a code, human authenticates with MFA, Harbor binds device→human). Closes Nebula's "no SSO" gap and gives offboarding a hook (disable user → stop renewing their devices). **Join keys (§4.1c)** remain for headless on-prem boxes. **Note:** this puts the IdP in the TCB for the laptop device-class (see §2.1, §7).
 
 ### 4.2 IP address management (IPAM)
 
@@ -281,7 +292,8 @@ Build these specific detections, each wired to an alert:
 ## 8. Data model (Postgres, sketch)
 
 - `devices` — id, type (ec2/azurevm/laptop/server/lighthouse/core), cloud, account/subscription, instance/vm id, owner (human id for 4.1b), status, created.
-- `enrollments` — id, device_id, method (sigv4/azure/token/oidc), nonce, attestation_blob (encrypted, retention-limited), result, approver(s), ts.
+- `enrollments` — id, device_id, method (sigv4/azure/token/oidc), join_key_id (for token method), nonce, attestation_blob (encrypted, retention-limited), result, approver(s), ts.
+- `join_keys` (§4.1c) — id, name, secret_hash, groups[], network/sub_range, max_uses, used_count, expires_at, **auto_issue** (default false → manual approval), ephemeral, state (active/revoked), created_by, ts.
 - `certificates` — id, device_id, nebula_ip, groups[], ca_id, not_before, not_after, fingerprint, serial, status.
 - `ip_allocations` — ip, network, device_id, allocated_at, released_at, quarantine_until.
 - `group_map` — version, immutable-fact-selector → groups[], approvers[2], signature, ts (the §4.3a authority, versioned like policy).
