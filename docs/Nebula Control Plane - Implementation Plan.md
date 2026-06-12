@@ -14,6 +14,7 @@ Companion to [[Nebula Control Plane - Design Plan]] (v3). This breaks the design
 > - **v1** — initial milestone/step breakdown.
 > - **Windows pass** — added cross-platform Pilot (Windows Service/MSI, DACLs, Authenticode, CI runners): steps 1.2w, 1.3, 1.3a, 1.8, 1.10–1.12, 9.1, M0.4.
 > - **v2 (2026-06-11)** — independent gap pass. Added the *connective tissue and operations* the trust-spine-focused v1 missed: async enrollment delivery + internal queue (3.0a, 3.3a, 3.6a), manual approval workflow (3.9), reusable dual-control/RBAC/SSO + config & secrets + observability + device-state + audit-export (2.9–2.14), release-key custody (1.2a), renewal jitter/stampede (4.4, 9.8), version-skew (4.8), P3 chaos test (4.9), lighthouse lifecycle + underlay (0.7, 6.8), enrollment quotas (3.10), protocol spec (3.0), clock enforcement (1.13), Harbor deploy/upgrade + DB DR (9.9–9.10), and a Deferred/optional list.
+> - **v3 (2026-06-12)** — **Linux-first sequencing.** Pulled all Windows/macOS work out of its per-milestone slots and consolidated it into a new final milestone **M10 (Windows + macOS parity)**. Build the whole system end-to-end on Linux (M1→M9), then circle back for cross-platform. Until M10, a Pilot step is "done" on Linux acceptance alone, with Windows behavior stubbed but compile-clean.
 
 ## How to read this
 
@@ -26,7 +27,9 @@ Companion to [[Nebula Control Plane - Design Plan]] (v3). This breaks the design
 
 **Tech baseline (from design):** Go (Harbor + Pilot, importing `github.com/slackhq/nebula/cert`), Postgres, AWS KMS (P256, cert v2), JWS/COSE for signed envelopes.
 
-**Platform scope for Pilot (confirm before M1):** **Linux + Windows are first-class** server/VM targets from M1 — target fleets are typically Windows-heavy with a Linux-backend goal, so Windows is load-bearing, not an afterthought. **macOS** is a laptop target, landing with the M9 OIDC path. **iOS/Android are out of scope for Pilot** — mobile uses Nebula's own apps with a separate, MDM-driven enrollment story (tracked as an open question in the design doc §12). Treat Pilot as cross-platform from its first step: every Pilot-side step has Linux *and* Windows acceptance unless noted.
+**Platform scope for Pilot — Linux-first, Windows/macOS last (decision 2026-06-12).** Build the **entire system end-to-end on Linux first** (M1→M9), then add **Windows and macOS parity as a final consolidation milestone, M10.** Rationale: prove the whole trust spine — enrollment, lifecycle, policy, rotation — on one platform before paying the per-step cross-platform tax. The target fleet is Windows-heavy, so Windows parity is *essential*, but it is sequenced **last, not per-step**. Until M10, a Pilot step is **"done" on Linux acceptance alone**; cross-platform code stays compile-clean (`GOOS=windows` builds) with Windows-specific behavior **stubbed and tracked in M10** — a Linux stub must never silently pass for the Windows implementation. **iOS/Android remain out of scope** (Nebula's own apps + MDM enrollment, design §12).
+
+> **Deferred to M10** (pulled out of their original slots): **1.2w** (Authenticode/notarization), the **Windows half of 1.3** (DACL) and **1.3a** (DPAPI/Keychain), **1.10** (Windows Service + MSI), the **Windows/macOS half of 1.11** (CI runners), **1.12** (macOS launchd), and the **laptop OS-integration parts of 9.1** (Windows/macOS OIDC device flow). Their Linux equivalents stay in place. The step text below is left intact for provenance; treat those items as scheduled in M10.
 
 **Must-fix before M3 code (from the v2 gap pass):** #1 async-delivery (3.0a/3.6a), reusable dual-control/RBAC (2.11), secrets + release-key custody (2.10/1.2a), and renewal jitter (4.4). The first three are architectural-cheap-now/expensive-later; jitter prevents a self-inflicted outage.
 
@@ -76,7 +79,7 @@ Goal: a real `pilot` binary that owns a Nebula process on one host. No Harbor ye
 - **1.12** *(deferred to M9 with the laptop path)* macOS Pilot: **launchd** plist, Keychain-backed key (1.3a), notarized package. Tracked here so it isn't forgotten; built in M9.1.
 - **1.13** *(new)* **Clock / NTP sanity on Pilot.** The whole nonce-TTL / cert-validity / attestation-freshness model assumes synced clocks (§4.3). Pilot checks local clock against a trusted source, **alerts on drift, and refuses enroll/renew beyond a hard skew threshold** (fail-closed on identity, P8). *Done when:* a host with a clock skewed past threshold refuses to enroll and emits a clear diagnostic.
 
-> Demo: `pilot` runs as a **systemd service on Linux and a Windows Service on Windows**, supervises Nebula with hand-placed KMS-signed certs, joins the spike mesh, and survives child crashes on both.
+> Demo: `pilot` runs as a **systemd service on Linux**, supervises Nebula with hand-placed KMS-signed certs, joins the spike mesh, and survives child crashes. *(Windows Service parity → M10.)*
 
 **M1 progress (2026-06-12).**
 - ✅ **1.1** — `pilot`/`harbor` split binaries, Makefile, `go build`/`go test` green (Linux + `GOOS=windows` cross-compile). (CI runner itself is 1.11.)
@@ -86,9 +89,10 @@ Goal: a real `pilot` binary that owns a Nebula process on one host. No Harbor ye
 - ✅ **1.4** — `internal/hostkey` generates the P256 key-agreement key in-process via `crypto/ecdh` (the exact primitive `nebula-cert` uses) and marshals it with Nebula's own PEM functions — byte-identical to `nebula-cert keygen -curve P256`, no bespoke crypto. Private scalar has **no exported accessor**; it only reaches an `O_EXCL` `0600` file and never clobbers a live key.
 - ✅ **1.7** — `internal/nebulaconfig` renders `config.yml` from an embedded template (shape mirrors the M0-proven config); PKI paths come from the layout, policy fields from an optional values file with tight defaults (outbound open, **inbound ICMP-only** until Harbor policy lands at M6).
 - ✅ **1.9 (artifacts + offline-verified)** — systemd packaging under `packaging/systemd/`: a hardened `pilot.service` (Type=exec, dedicated `nebula-pilot` account, **ambient `CAP_NET_ADMIN` only** + `CapabilityBoundingSet=CAP_NET_ADMIN` + `NoNewPrivileges`, `ProtectSystem=strict`, `DevicePolicy=closed`+`DeviceAllow=/dev/net/tun`, syscall/address-family filters), an idempotent `install.sh` (creates the user, installs binaries, lays out `/etc/nebula-control-plane` 0700, runs `pilot init`, enables the unit), `uninstall.sh`, `values.example.yml`, and a README. `systemctl reload` → SIGHUP → nebula hot-reload (ties to 1.8). **`systemd-analyze verify` passes; offline security score 1.7/"OK"** (`make systemd-verify`). *Runtime "Done when" (systemctl start brings up the node; child holds exactly CAP_NET_ADMIN) needs root on a host/VM + a signed cert — documented as a step-by-step acceptance in the packaging README; not run on the dev workstation.*
+- ✅ **1.13** — clock/NTP sanity. `internal/clock` is a dependency-free SNTP (RFC 4330) client computing local-vs-reference offset; `Check` fails closed beyond a max-skew. `pilot clock-check` exits **0** (synced), **1** (skew → fail-closed), or **2** (time undeterminable) — distinct codes so the M3 enroll/renew gate can decide fail-open vs fail-closed on *unreachable* time. Hermetic unit tests (fake NTP server) + verified live against `pool.ntp.org` (offset ~0, all three exit codes). Documented as a sanity check vs gross drift, not a security-grade time source (NTS/Harbor-signed-time is the upgrade path).
 - ✅ **1.8** — reload-vs-restart matrix. Resolved Nebula v1.10.3's reload semantics (design §12): SIGHUP hot-reloads firewall, lighthouse/static-host-map, punchy, logging, **and a same-IP/same-curve PKI refresh**; restart is needed only for `listen.host`/`listen.port`, `tun.dev`, or a cert IP/curve change. `internal/reconcile.Classify`/`Apply` encodes the matrix; the supervisor gained `Reload()` (SIGHUP to nebula) and `Restart()` (supervised stop+start); `pilot supervise` forwards **SIGHUP → hot-reload** (Unix), and Windows degrades reload→restart (no SIGHUP). **Proven with real nebula:** a live firewall change applied via SIGHUP with the **nebula PID unchanged** (no restart). Unit tests cover the classification, the Windows restart-fallback, real SIGHUP delivery, and a single-cycle restart.
 - **Acceptance proven end-to-end:** `pilot init` → P256 CA signs the pilot-generated pubkey → **`nebula -test` accepts the rendered config with that key+cert loaded**. Automated as `internal/integration` (skips if `nebula`/`nebula-cert` absent; `make m1-smoke`).
-- **Still open in M1:** 1.2/1.2a/1.2w (signed-release pipeline + key custody + Authenticode), 1.3 Windows DACL + 1.3a DPAPI, 1.10 (Windows Service + MSI), 1.11 (Windows/macOS CI runners), 1.13 (clock/NTP sanity). *(Note: the "no live ping dropped" half of 1.8's acceptance needs the netns lab under sudo; the no-restart property was verified directly via stable PID. The runtime half of 1.9 needs root on a host/VM.)*
+- **Still open in M1 (Linux):** 1.2/1.2a (signed-release pipeline + key custody) — the only remaining Linux M1 work; not on the functional critical path (Pilot's digest gate 1.5 is the consumer), so it can run alongside M2. **Windows/macOS items (1.2w, 1.3-DACL, 1.3a, 1.10, 1.11-Win/mac, 1.12) are deferred to → M10.** *(Note: the "no live ping dropped" half of 1.8's acceptance needs the netns lab under sudo; the no-restart property was verified directly via stable PID. The runtime half of 1.9 needs root on a host/VM.)*
 
 ---
 
@@ -235,6 +239,22 @@ Goal: production-readiness, the laptop path, and the assurance work from design 
 
 ---
 
+## Milestone 10 — Windows + macOS parity (circle back)
+
+Goal: bring the non-Linux platforms up to the parity the Linux build already has. Everything here was deliberately deferred (see *Platform scope*) so the trust spine could be proven end-to-end on Linux first. By M10 the protocol (3.0), enrollment, lifecycle, policy, and rotation are settled — **this milestone is OS integration, not new control-plane design.** Each step revisits a stub the Linux build left behind.
+
+- **10.1 — host-key-at-rest + file protection** *(was 1.3 Windows / 1.3a)*. Replace the `secure_windows.go` stub with a real **DACL** (owner = service account + SYSTEM, inherited ACEs removed) under `%ProgramData%`, and **DPAPI/CNG**-wrap the host key at rest (optionally TPM-backed); **macOS Keychain** for the laptop path. *Done when:* per-OS tests assert the host key is unreadable by other principals and is not plaintext on disk.
+- **10.2 — Windows Service + installer** *(was 1.10)*. Service wrapper (SCM lifecycle, graceful stop) under a least-privilege account (virtual account / gMSA, **not** LocalSystem), holding only the Wintun rights it needs; ship an **MSI/MSIX** that registers the service, lays out `%ProgramData%` with the 10.1 DACLs, and installs signed binaries. *Done when:* the MSI installs on clean Windows Server + Windows 11 VMs, the service joins the mesh, uninstall is clean.
+- **10.3 — Windows reload→restart validation** *(was 1.8 Windows half)*. The `internal/reconcile` matrix already degrades reload→supervised-restart where SIGHUP is absent; validate the bounded, measured blip on a real Windows node. *Done when:* a firewall-only change applies via supervised restart with a measured, bounded interruption; a cert swap is ≤ one restart.
+- **10.4 — platform-native code signing** *(was 1.2w)*. **Authenticode** for Windows binaries + installer (clean SmartScreen on a fresh VM); **codesign + notarization** for macOS. Wire into the (Linux-built) release pipeline from 1.2. *Done when:* Windows artifacts are Authenticode-signed and pass SmartScreen; macOS artifacts notarize and run without Gatekeeper prompts.
+- **10.5 — Windows + macOS CI runners** *(was 1.11 Win/mac half)*. Cross-compile and run the Pilot acceptance suite (perms 10.1, supervision, reload/restart 10.3, service 10.2) on native runners. *Done when:* the suite is green on Windows and macOS runners.
+- **10.6 — macOS Pilot** *(was 1.12)*. launchd plist, Keychain-backed key (10.1), notarized package. *Done when:* `launchctl` brings up the mesh node on macOS.
+- **10.7 — laptop OIDC on Windows/macOS** *(was the OS-integration parts of 9.1)*. The device→human binding, MFA, and offboarding hook from 9.1, now on real Windows/macOS laptops using 10.2/10.6 packaging. *Done when:* a Windows laptop and a macOS laptop each enroll via browser+MFA and join; disabling the user halts both.
+
+> Demo: a Windows Server, a Windows 11 laptop, and a macOS laptop install the signed MSI/pkg, enroll, join the mesh, hot-apply policy via supervised restart, and renew — full parity with the Linux fleet.
+
+---
+
 ## Cross-cutting (every milestone, not a phase)
 
 - **Audit everything** from M2.2 onward — no action ships without an audit row, and it's exported to WORM (2.13).
@@ -242,7 +262,7 @@ Goal: production-readiness, the laptop path, and the assurance work from design 
 - **Observability with the feature** — every new service/endpoint ships logs, metrics, and health from day one (2.9).
 - **Tests as acceptance** — a step isn't done without its "Done when" automated where feasible.
 - **No bespoke crypto** (§P11) — reach for sigv4/JWS/COSE/HKDF; flag any custom construct for the 9.7 review; build to the 3.0 spec.
-- **Cross-platform Pilot** — every Pilot-side step carries Linux *and* Windows acceptance from M1 (macOS at M9). Don't let "works on my Linux box" pass as done; Windows is the majority of the fleet.
+- **Linux-first, Windows/macOS at M10** — until the M10 parity milestone, Pilot steps are accepted on **Linux alone**; keep cross-platform code compile-clean (`GOOS=windows`) with Windows behavior **stubbed**. Don't let a Linux stub silently become the Windows implementation — M10 must revisit every stub. Windows is still the majority of the fleet; it is sequenced last, not dropped.
 - **Never assume atomic fleet upgrades** — mixed Pilot/Harbor versions coexist; honor the 4.8 compatibility policy.
 - **Reuse the primitives** — dual-control/RBAC (2.11), device state (2.12), audit (2.2) are built once and reused, not re-implemented per feature.
 - **Update the design doc** when a spike (M0) or reality contradicts an assumption.

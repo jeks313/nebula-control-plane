@@ -11,7 +11,9 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"github.com/jeks313/nebula-control-plane/internal/clock"
 	"github.com/jeks313/nebula-control-plane/internal/hostkey"
 	"github.com/jeks313/nebula-control-plane/internal/nebulaconfig"
 	"github.com/jeks313/nebula-control-plane/internal/paths"
@@ -30,6 +32,8 @@ func main() {
 	switch os.Args[1] {
 	case "init":
 		cmdInit(os.Args[2:])
+	case "clock-check":
+		cmdClockCheck(os.Args[2:])
 	case "supervise":
 		cmdSupervise(os.Args[2:])
 	case "version", "--version", "-v":
@@ -48,12 +52,15 @@ func usage() {
 
 usage:
   pilot init [-dir <path>] [-values <values.yml>] [-am-lighthouse]
+  pilot clock-check [-server <host>] [-max-skew <dur>] [-timeout <dur>]
   pilot supervise -config <nebula.yml> [-nebula <path>] [-sha256 <hex>]
   pilot version
 
 commands:
   init        lay out the host dir, generate the host key (P256), and render
               config.yml. Does NOT overwrite an existing host key.
+  clock-check check local clock skew vs an NTP reference; exit 1 if beyond
+              max-skew (fail-closed for identity ops), exit 2 if undeterminable
   supervise   run and supervise the nebula subprocess (restart w/ backoff,
               clean shutdown on SIGINT/SIGTERM, SIGHUP hot-reloads nebula on
               Unix, optional binary digest check)
@@ -130,6 +137,48 @@ func cmdInit(args []string) {
 	fmt.Printf("  rendered config      %s\n", layout.Config())
 	fmt.Printf("  still needed before start: %s (CA bundle) and %s (signed cert) — see enrollment (M3)\n",
 		layout.CABundle(), layout.HostCert())
+}
+
+// cmdClockCheck verifies the host clock against an NTP reference (M1.13). The
+// identity model (nonce TTLs, cert validity, attestation freshness) assumes
+// synced clocks, so this is the fail-closed gate the enroll/renew flow (M3) will
+// call before presenting time-sensitive material. Exit codes are distinct so a
+// caller can tell "skewed" (1) from "couldn't determine time" (2).
+func cmdClockCheck(args []string) {
+	fs := flag.NewFlagSet("clock-check", flag.ExitOnError)
+	server := fs.String("server", "pool.ntp.org", "NTP server to check against")
+	maxSkew := fs.Duration("max-skew", 5*time.Second, "max tolerated clock skew (fail-closed beyond this)")
+	timeout := fs.Duration("timeout", 5*time.Second, "query timeout")
+	_ = fs.Parse(args)
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	r, err := clock.Query(ctx, *server, *timeout)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "pilot clock-check: %v\n", err)
+		os.Exit(2) // time could not be determined
+	}
+
+	dir := "ahead of"
+	if r.Offset < 0 {
+		dir = "behind"
+	}
+	fmt.Printf("clock-check: local clock %s %s reference by %s (rtt %s, server %s)\n",
+		dir, r.Server, absDur(r.Offset).Round(time.Millisecond), r.RTT.Round(time.Millisecond), r.Server)
+
+	if absDur(r.Offset) > *maxSkew {
+		fmt.Fprintf(os.Stderr, "pilot clock-check: skew %s exceeds max %s — fail-closed\n",
+			r.Offset.Round(time.Millisecond), *maxSkew)
+		os.Exit(1)
+	}
+}
+
+func absDur(d time.Duration) time.Duration {
+	if d < 0 {
+		return -d
+	}
+	return d
 }
 
 func fatalf(format string, a ...any) {
