@@ -21,6 +21,7 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/joinkey"
 	"github.com/jeks313/nebula-control-plane/internal/jws"
 	"github.com/jeks313/nebula-control-plane/internal/nonce"
+	"github.com/jeks313/nebula-control-plane/internal/policy"
 	"github.com/jeks313/nebula-control-plane/internal/queue"
 	"github.com/jeks313/nebula-control-plane/internal/replay"
 	"github.com/jeks313/nebula-control-plane/internal/signer"
@@ -95,6 +96,7 @@ type Config struct {
 	ConfigKeyID   string         // its kid (pinned by Pilot)
 	CABundlePEM   []byte         // CA cert PEM for the bundle's ca_bundle
 	Lighthouses   []bundle.Lighthouse
+	Policy        *policy.Policy // central firewall (M6); nil -> Pilot's local default
 	Results       *queue.Durable // result store (gateway↔Core shared store)
 	ResultTTL     time.Duration  // result/ticket validity (0 -> 1h)
 }
@@ -367,6 +369,7 @@ func (c *Consumer) buildBundle(deviceName, ip string, groups []string, certPEM [
 		Device:        bundle.Device{Name: deviceName, OverlayIP: ip, Groups: groups},
 		Certificate:   string(certPEM),
 		CABundle:      []string{string(c.cfg.CABundlePEM)},
+		Firewall:      bundle.CompileFirewall(c.cfg.Policy, groups),
 		Lighthouses:   c.cfg.Lighthouses,
 		NotAfter:      notAfter.UTC().Format(time.RFC3339),
 	}

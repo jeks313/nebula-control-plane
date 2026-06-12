@@ -21,6 +21,7 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/bundle"
 	"github.com/jeks313/nebula-control-plane/internal/enrollment"
 	"github.com/jeks313/nebula-control-plane/internal/jws"
+	"github.com/jeks313/nebula-control-plane/internal/policy"
 	"github.com/jeks313/nebula-control-plane/internal/signer"
 	"github.com/jeks313/nebula-control-plane/internal/store"
 	"github.com/jeks313/nebula-control-plane/internal/wire"
@@ -54,6 +55,7 @@ type Config struct {
 	ConfigKeyID   string
 	CABundlePEM   []byte
 	Lighthouses   []bundle.Lighthouse
+	Policy        *policy.Policy // central firewall (M6); nil -> Pilot's local default
 	Pool          netip.Prefix
 	CertLifetime  time.Duration
 	// RenewCommandThreshold: if a heartbeat reports a cert expiring within this
@@ -248,6 +250,7 @@ func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
 		Device:        bundle.Device{Name: dev.DeviceName, OverlayIP: dev.OverlayIP, Groups: groups},
 		Certificate:   string(certPEM),
 		CABundle:      []string{string(s.cfg.CABundlePEM)},
+		Firewall:      bundle.CompileFirewall(s.cfg.Policy, groups),
 		Lighthouses:   s.cfg.Lighthouses,
 		NotAfter:      notAfter.UTC().Format(time.RFC3339),
 	}

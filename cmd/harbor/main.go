@@ -381,6 +381,7 @@ type coreFlags struct {
 	certLifetime                         *time.Duration
 	maxPerHour                           *int
 	lighthouse                           *string
+	policyFile                           *string
 }
 
 func addCoreFlags(fs *flag.FlagSet) *coreFlags {
@@ -402,7 +403,17 @@ func addCoreFlags(fs *flag.FlagSet) *coreFlags {
 	cf.certLifetime = fs.Duration("cert-lifetime", 30*24*time.Hour, "issued cert validity")
 	cf.maxPerHour = fs.Int("max-certs-per-hour", 0, "signing circuit-breaker ceiling (0=unlimited)")
 	cf.lighthouse = fs.String("lighthouse", "", "lighthouses for the bundle: overlayIP=host:port[,...]")
+	cf.policyFile = fs.String("policy", "", "central firewall policy file (M6); omit for Pilot's local default")
 	return cf
+}
+
+// policy loads the optional central firewall policy (validated + invariant-checked).
+func (cf *coreFlags) policy() *policy.Policy {
+	if *cf.policyFile == "" {
+		return nil
+	}
+	p := loadPolicy(*cf.policyFile)
+	return &p
 }
 
 func (cf *coreFlags) build() (*enrollment.Consumer, *queue.Durable, *store.Store) {
@@ -447,7 +458,7 @@ func (cf *coreFlags) build() (*enrollment.Consumer, *queue.Durable, *store.Store
 		Store: s, Nonces: ring, Replay: replay.New(2 * time.Minute),
 		Signer: sg, Allocator: alloc, Pool: pool, CertLifetime: *cf.certLifetime,
 		ConfigBackend: cfgB, ConfigKeyID: wire.PubkeyHash(cfgPub),
-		CABundlePEM: caPEM, Lighthouses: parseLighthouses(*cf.lighthouse),
+		CABundlePEM: caPEM, Lighthouses: parseLighthouses(*cf.lighthouse), Policy: cf.policy(),
 		Results: q, ResultTTL: time.Hour,
 	})
 	return cons, q, s
@@ -694,7 +705,8 @@ func cmdCoreAPI(args []string) {
 	cfgPub, _ := cfgB.PublicKey()
 	api := coreapi.New(coreapi.Config{
 		Store: s, Signer: sg, ConfigBackend: cfgB, ConfigKeyID: wire.PubkeyHash(cfgPub),
-		CABundlePEM: caPEM, Lighthouses: parseLighthouses(*cf.lighthouse), Pool: pool, CertLifetime: *cf.certLifetime,
+		CABundlePEM: caPEM, Lighthouses: parseLighthouses(*cf.lighthouse), Policy: cf.policy(),
+		Pool: pool, CertLifetime: *cf.certLifetime,
 	})
 	srv := &http.Server{
 		Addr: *addr, Handler: api.Handler(),

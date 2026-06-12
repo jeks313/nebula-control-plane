@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/jeks313/nebula-control-plane/internal/jws"
+	"github.com/jeks313/nebula-control-plane/internal/nebulaconfig"
 	"github.com/jeks313/nebula-control-plane/internal/signer"
 )
 
@@ -33,6 +34,44 @@ func TestSignVerifyRoundTrip(t *testing.T) {
 	}
 	if out.Type != Type || out.Device.Name != "web-1" || out.Device.Groups[0] != "web" || out.CABundle[0] != "CA-PEM" {
 		t.Fatalf("round trip mismatch: %+v", out)
+	}
+}
+
+// TestSignedFirewallTamperRefused is the M6.4 acceptance: the firewall rides
+// inside the signed bundle, so tampering with it is refused by Verify.
+func TestSignedFirewallTamperRefused(t *testing.T) {
+	b, _ := signer.NewSoftwareBackend()
+	pubBytes, _ := b.PublicKey()
+	pinned, _ := jws.ParseP256PublicPoint(pubBytes)
+
+	in := Bundle{
+		Device:      Device{Name: "web-1", OverlayIP: "100.64.0.5", Groups: []string{"web"}},
+		Certificate: "CERT", CABundle: []string{"CA"},
+		Firewall: &Firewall{
+			Inbound:  []nebulaconfig.Rule{{Proto: "tcp", Port: "443", Host: "any"}},
+			Outbound: []nebulaconfig.Rule{{Proto: "tcp", Port: "5432", Group: "db"}},
+		},
+	}
+	jwsBytes, err := Sign(b, "k", in)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verifies intact, firewall present.
+	out, err := Verify(jwsBytes, pinned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Firewall == nil || out.Firewall.Inbound[0].Port != "443" {
+		t.Fatalf("firewall not carried: %+v", out.Firewall)
+	}
+
+	// Tamper any byte -> refused (the firewall is signed).
+	tampered := make([]byte, len(jwsBytes))
+	copy(tampered, jwsBytes)
+	tampered[len(tampered)/2] ^= 0x01
+	if _, err := Verify(tampered, pinned); err == nil {
+		t.Fatal("tampered bundle (incl. firewall) must be refused")
 	}
 }
 

@@ -11,6 +11,8 @@ import (
 	"fmt"
 
 	"github.com/jeks313/nebula-control-plane/internal/jws"
+	"github.com/jeks313/nebula-control-plane/internal/nebulaconfig"
+	"github.com/jeks313/nebula-control-plane/internal/policy"
 	"github.com/jeks313/nebula-control-plane/internal/wire"
 )
 
@@ -30,6 +32,15 @@ type Device struct {
 	Groups    []string `json:"groups"`
 }
 
+// Firewall is the host's central-policy firewall (M6), compiled by Harbor and
+// signed into the bundle. Present only when a central policy is in force; absent
+// means Pilot keeps its local default. Because it's inside the signed payload,
+// tampering with it breaks bundle verification.
+type Firewall struct {
+	Inbound  []nebulaconfig.Rule `json:"inbound"`
+	Outbound []nebulaconfig.Rule `json:"outbound"`
+}
+
 // Bundle is the config bundle payload (spec §6).
 type Bundle struct {
 	ProtocolVersion int             `json:"protocol_version"`
@@ -39,10 +50,21 @@ type Bundle struct {
 	Device          Device          `json:"device"`
 	Certificate     string          `json:"certificate"` // leaf cert PEM
 	CABundle        []string        `json:"ca_bundle"`   // CA cert PEM(s)
+	Firewall        *Firewall       `json:"firewall,omitempty"`
 	Config          json.RawMessage `json:"config,omitempty"`
 	Lighthouses     []Lighthouse    `json:"lighthouses"`
 	NotAfter        string          `json:"not_after"`
 	NextRenewAfter  string          `json:"next_renew_after,omitempty"`
+}
+
+// CompileFirewall compiles the central policy for a host's groups into the
+// bundle's signed firewall. nil policy -> nil firewall (Pilot keeps its default).
+func CompileFirewall(p *policy.Policy, groups []string) *Firewall {
+	if p == nil {
+		return nil
+	}
+	c := policy.CompileHost(*p, groups)
+	return &Firewall{Inbound: c.Inbound, Outbound: c.Outbound}
 }
 
 // Sign serializes and signs a bundle with the config-signing key, returning the
