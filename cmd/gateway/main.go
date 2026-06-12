@@ -17,6 +17,8 @@ import (
 
 	"github.com/jeks313/nebula-control-plane/internal/gateway"
 	"github.com/jeks313/nebula-control-plane/internal/nonce"
+	"github.com/jeks313/nebula-control-plane/internal/queue"
+	"github.com/jeks313/nebula-control-plane/internal/ratelimit"
 )
 
 // version is overridden at build time via -ldflags "-X main.version=...".
@@ -32,6 +34,8 @@ func main() {
 	addr := fs.String("addr", ":8443", "listen address")
 	keyPath := fs.String("hmac-key", "", "path to the primary nonce HMAC key (base64url, >=16 bytes)")
 	prevPath := fs.String("hmac-key-prev", "", "optional previous nonce key for rotation overlap")
+	rps := fs.Float64("rate", 5, "edge rate limit (requests/sec per IP and per key)")
+	burst := fs.Int("burst", 20, "edge rate-limit burst")
 	_ = fs.Parse(os.Args[1:])
 
 	keys, err := loadKeys(*keyPath, *prevPath)
@@ -43,9 +47,17 @@ func main() {
 		fatalf("%v", err)
 	}
 
+	// NOTE: the in-memory queue is the local/dev path (3.3a swaps in a durable,
+	// authenticated queue). Candidates published here are drained by Core.
+	gw := gateway.New(gateway.Config{
+		Nonces:  ring,
+		Queue:   queue.NewMemory(),
+		Limiter: ratelimit.New(*rps, *burst),
+	})
+
 	srv := &http.Server{
 		Addr:              *addr,
-		Handler:           gateway.New(ring).Handler(),
+		Handler:           gw.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
