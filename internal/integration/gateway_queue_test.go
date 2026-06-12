@@ -67,6 +67,19 @@ func TestEnrollEndToEndPollBundle(t *testing.T) {
 	if b.Device.Groups[0] != "web" || len(b.Lighthouses) != 1 {
 		t.Fatalf("bundle device/lighthouses wrong: %+v", b)
 	}
+	// M6.4: the signed bundle carries the central-policy firewall for this host.
+	if b.Firewall == nil {
+		t.Fatal("bundle should carry the central firewall")
+	}
+	var has443 bool
+	for _, r := range b.Firewall.Inbound {
+		if r.Proto == "tcp" && r.Port == "443" {
+			has443 = true
+		}
+	}
+	if !has443 {
+		t.Fatalf("web host firewall should allow inbound tcp/443: %+v", b.Firewall.Inbound)
+	}
 	// And the cert inside verifies against the CA.
 	pool, _ := cert.NewCAPoolFromPEM([]byte(b.CABundle[0]))
 	c, _, _ := cert.UnmarshalCertificateFromPEM([]byte(b.Certificate))

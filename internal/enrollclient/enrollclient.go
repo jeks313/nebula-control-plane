@@ -340,6 +340,11 @@ func (p Params) writeArtifacts(b bundle.Bundle) error {
 		CACertPath:  p.Layout.CABundle(), CertPath: p.Layout.HostCert(), KeyPath: p.Layout.HostKey(),
 	}
 	v.Defaults()
+	// A signed central-policy firewall (M6) overrides Pilot's local default.
+	if b.Firewall != nil {
+		v.Inbound = b.Firewall.Inbound
+		v.Outbound = b.Firewall.Outbound
+	}
 	cfg, err := nebulaconfig.Render(v)
 	if err != nil {
 		return err
