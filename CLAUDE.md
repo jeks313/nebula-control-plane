@@ -22,21 +22,23 @@ This is a **standalone project**. Typical deployment context: mixed Linux/Window
 AWS and/or Azure that want zero-trust private networking and authenticated host-to-host calls
 without per-host manual certificate ops.
 
-## The planning docs live in the vault (read these first)
+## The planning docs (read these first)
 
-Path: `~/Data/knowledge/Plans/` (Chris's Obsidian vault — also a git repo
-`github.com:jeks313/knowledge`, synced via OneDrive). The build follows them.
+In-repo copies live in **`docs/`** (self-contained; no vault needed). Originals are in Chris's
+Obsidian vault `~/Data/knowledge/Plans/` — keep the two in sync; treat **this repo as
+canonical** going forward. See `docs/README.md`.
 
-- **`Nebula Control Plane - Design Plan.md`** (v3) — architecture, security model, flows.
-  Uses `§`/`P` refs (e.g. §4.3, P2). **This is the source of truth for *what* and *why*.**
-- **`Nebula Control Plane - Implementation Plan.md`** (v2) — milestones **M0–M9**, PR-sized
-  steps with "Done when" acceptance. **This is the source of truth for *order* and *scope*.**
-- **`Nebula Control Plane - Infrastructure Plan (AWS).md`** (v2) — local-first → minimal AWS
+- **`docs/Nebula Control Plane - Design Plan.md`** (v3) — architecture, security model, flows.
+  Uses `§`/`P` refs (e.g. §4.3, P2). **Source of truth for *what* and *why*.**
+- **`docs/Nebula Control Plane - Implementation Plan.md`** (v2) — milestones **M0–M9**, PR-sized
+  steps with "Done when" acceptance. **Source of truth for *order* and *scope*.**
+- **`docs/Nebula Control Plane - Infrastructure Plan (AWS).md`** (v2) — local-first → minimal AWS
   harness → full production tiers (incl. k3s Tier 1+).
-- **`Nebula Control Plane - Admin UI Plan.md`** — the Harbor web console + site settings.
-- Background: `~/Data/knowledge/Interesting/Nebula - Open Source Overlay Mesh Network.md`.
+- **`docs/Nebula Control Plane - Admin UI Plan.md`** — the Harbor web console + site settings.
+- Background (vault only): `~/Data/knowledge/Interesting/Nebula - Open Source Overlay Mesh Network.md`.
 
-Re-read them rather than trusting this summary; they evolve.
+Re-read them rather than trusting this summary; they evolve. (Docs use Obsidian `[[wikilinks]]`
+that only resolve in the vault — they read fine as plain text here.)
 
 ## Locked design decisions (don't relitigate without the user)
 

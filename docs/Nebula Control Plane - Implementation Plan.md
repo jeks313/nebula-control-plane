@@ -1,0 +1,240 @@
+---
+created: 2026-06-11
+source: claude-chat
+status: draft-v2
+project: nebula-control-plane
+tags: [networking, nebula, security, implementation, roadmap, go, aws]
+---
+
+# Nebula Control Plane — Implementation Plan (v2)
+
+Companion to [[Nebula Control Plane - Design Plan]] (v3). This breaks the design into the smallest viable, independently-shippable steps. Section references like *(§4.3)* point at the design doc.
+
+> **Revision history**
+> - **v1** — initial milestone/step breakdown.
+> - **Windows pass** — added cross-platform Pilot (Windows Service/MSI, DACLs, Authenticode, CI runners): steps 1.2w, 1.3, 1.3a, 1.8, 1.10–1.12, 9.1, M0.4.
+> - **v2 (2026-06-11)** — independent gap pass. Added the *connective tissue and operations* the trust-spine-focused v1 missed: async enrollment delivery + internal queue (3.0a, 3.3a, 3.6a), manual approval workflow (3.9), reusable dual-control/RBAC/SSO + config & secrets + observability + device-state + audit-export (2.9–2.14), release-key custody (1.2a), renewal jitter/stampede (4.4, 9.8), version-skew (4.8), P3 chaos test (4.9), lighthouse lifecycle + underlay (0.7, 6.8), enrollment quotas (3.10), protocol spec (3.0), clock enforcement (1.13), Harbor deploy/upgrade + DB DR (9.9–9.10), and a Deferred/optional list.
+
+## How to read this
+
+- **Steps are PR-sized** — roughly a half-day to two days each, each independently reviewable and testable.
+- **Each step has a "Done when"** — a concrete acceptance check. If you can't write one, the step is too big; split it.
+- **Milestones end in a demo** — a capability you can show working end to end.
+- **Security lands with the feature.** Audit, the signing circuit-breaker, binary-digest checks, and least-privilege are in from their first relevant step — never a later "hardening" bolt-on.
+
+**Sequencing strategy:** (1) a throwaway **spike** proves the riskiest unknowns — does KMS-signed Nebula cert v2 even work; (2) a **walking skeleton** gets one host on the mesh end-to-end with the thinnest possible Harbor; (3) thicken outward — lifecycle, attestation, policy, rotation, hardening. Don't build Harbor's breadth before the trust spine is proven.
+
+**Tech baseline (from design):** Go (Harbor + Pilot, importing `github.com/slackhq/nebula/cert`), Postgres, AWS KMS (P256, cert v2), JWS/COSE for signed envelopes.
+
+**Platform scope for Pilot (confirm before M1):** **Linux + Windows are first-class** server/VM targets from M1 — target fleets are typically Windows-heavy with a Linux-backend goal, so Windows is load-bearing, not an afterthought. **macOS** is a laptop target, landing with the M9 OIDC path. **iOS/Android are out of scope for Pilot** — mobile uses Nebula's own apps with a separate, MDM-driven enrollment story (tracked as an open question in the design doc §12). Treat Pilot as cross-platform from its first step: every Pilot-side step has Linux *and* Windows acceptance unless noted.
+
+**Must-fix before M3 code (from the v2 gap pass):** #1 async-delivery (3.0a/3.6a), reusable dual-control/RBAC (2.11), secrets + release-key custody (2.10/1.2a), and renewal jitter (4.4). The first three are architectural-cheap-now/expensive-later; jitter prevents a self-inflicted outage.
+
+---
+
+## Milestone 0 — Spike: de-risk the unknowns (throwaway)
+
+Goal: prove the foundations work *before* committing to architecture. Code here is disposable; capture findings in the design doc's open-questions (§12).
+
+- **0.1** Pin a Nebula version; create a **cert v2 / P256 CA** with `nebula-cert` (`-curve P256`). *Done when:* a P256 CA + one host cert verify with `nebula-cert print`.
+- **0.2** Stand up 2 nodes + 1 lighthouse by hand with those certs; confirm an encrypted tunnel + ping across the overlay. *Done when:* `nebula` on host A reaches host B's overlay IP.
+- **0.3** Replace the local CA with an **AWS KMS P256 key**; sign a host cert via [`nebula-cert-kms`](https://github.com/NebulaOSS/nebula-cert-kms) (or PKCS#11). *Done when:* a KMS-signed cert is accepted and a tunnel forms — **this is the single biggest feasibility risk; prove it first.**
+- **0.4** Empirically map **reload semantics** (§12 caveat): what does `SIGHUP` hot-reload (firewall rules?) vs. what needs a restart (host cert? CA bundle?), on the pinned version, **on Linux, Windows, and macOS** (Windows has no SIGHUP at all — establish its reload trigger/equivalent or confirm restart-only). *Done when:* a written per-platform matrix of change → reload-or-restart lands in the design doc.
+- **0.5** Verify **blocklist is peer-enforced at handshake** (§4.7): blocklist host B's fingerprint on host A, confirm A refuses B even though B still wants to connect. *Done when:* behavior confirmed and documented.
+- **0.6** Confirm Nebula **groups in cert → firewall rule** semantics: a rule referencing `group:x` admits only certs carrying that group. *Done when:* a deny + an allow both demonstrated.
+- **0.7** *(new)* **Underlay networking spike**: required UDP port(s); security-group/NSG rules for public lighthouse UDP; **MTU / overlay-MTU** behavior (Nebula's classic fragmentation footgun); NAT-traversal/hole-punching across two real clouds. *Done when:* documented underlay requirements + an MTU setting that avoids fragmentation on AWS↔Azure tunnels.
+
+> Exit gate: if any of 0.3/0.4/0.5/0.7 surprises us, revisit the design before writing production code.
+
+---
+
+## Milestone 1 — Walking skeleton: Pilot supervises Nebula (local only)
+
+Goal: a real `pilot` binary that owns a Nebula process on one host. No Harbor yet; certs/config are placed manually.
+
+- **1.1** Repo + module scaffolding; `pilot` and `harbor` as separate binaries in one module; Makefile, `golangci-lint`, unit-test CI. *Done when:* CI green on an empty `--version`.
+- **1.2** **Signed-release pipeline skeleton** (cosign/sigstore) producing signed `pilot`/`nebula` artifacts. Lands now because the update channel is a top-tier trust root (§2.1) and retrofitting signing is painful. *Done when:* CI emits a signed artifact + verifiable signature.
+- **1.2a** *(new)* **Release-signing key custody.** §2.1 makes this **co-equal with the CA** (worst case = fleet RCE), so it can't be a loose CI secret: KMS/HSM-backed key, **dual-control signing** (no single identity can sign a release), restricted release branch/tag, provenance (SLSA-style) attestation. *Done when:* a release cannot be signed by one person; signing identity is KMS/HSM-held and audited.
+- **1.2w** **Platform-native code signing** alongside sigstore — OS execution trust ignores cosign. **Authenticode** for Windows binaries + installer (else SmartScreen/AV friction and no real Windows trust anchor); **codesign + notarization** for macOS. Provision the signing certs/identities and wire them into the release pipeline. *Done when:* Windows artifacts are Authenticode-signed and pass SmartScreen on a clean VM; macOS artifacts notarize and run without Gatekeeper prompts.
+- **1.3** Pilot: config/file layout + permissions, **per-platform** — host key, cert, CA bundle, pinned Harbor pubkeys, rendered `config.yml` under a fixed dir. POSIX uses `0600`/dir `0700`; **Windows has no `chmod`** — restrict the host key via a **DACL** (owner = service account + SYSTEM, inherited ACEs removed), under `%ProgramData%`. *Done when:* `pilot init` lays out the dir with correct protection on each platform; **separate Linux and Windows tests** assert the key is unreadable by other principals.
+- **1.3a** **Host-key-at-rest protection** spec + impl. The design's TPM ambition (§12) is far off, but nearer-term per-platform options exist: **Windows DPAPI/CNG** (optionally TPM-backed) to wrap the key; **macOS Keychain**; Linux kernel keyring or file perms as the floor. Pick the v1 floor and the upgrade path. *Done when:* the host key on Windows is DPAPI-wrapped at rest (not plaintext on disk); decision recorded in the design doc §12.
+- **1.4** Pilot: **local Nebula keypair generation** (P256), private key never written world-readable. *Done when:* keypair generated, pubkey exportable, unit test asserts key never leaves the struct/file boundary.
+- **1.5** Pilot: **nebula binary digest verification before exec** (§5). *Done when:* exec refused + logged if digest mismatches; passes when it matches.
+- **1.6** Pilot: **supervise the nebula subprocess** — start, liveness, exponential-backoff restart, signal forwarding, clean shutdown. *Done when:* killing the child triggers a backed-off restart; SIGTERM to Pilot stops both cleanly.
+- **1.7** Pilot: **config rendering** from a template + a local values file (placeholder for Harbor-supplied policy). *Done when:* template renders a valid `config.yml` Nebula accepts.
+- **1.8** Pilot: **reload vs restart** logic per the 0.4 matrix — SIGHUP path for firewall changes (Unix), staged restart for cert changes; **Windows uses the restart path for everything** (no SIGHUP). *Done when:* on Linux a firewall-only change reloads without dropping a live ping; on Windows the same change applies via supervised restart with a bounded, measured blip; a cert change swaps with ≤ one restart on both.
+- **1.9** Package Pilot as a **systemd unit** (Linux) running as a dedicated least-priv account with only `CAP_NET_ADMIN`. *Done when:* `systemctl start pilot` brings up the mesh node; no extra capabilities granted.
+- **1.10** Package Pilot as a **Windows Service** — service wrapper (lifecycle, restart, graceful stop integrated with SCM), running as a dedicated **least-privilege service account** (or virtual account / gMSA), holding only the rights needed for the TUN adapter (Wintun) — *not* LocalSystem if avoidable. Ship an **MSI** (or MSIX) installer that registers the service, lays out `%ProgramData%` with the 1.3 DACLs, and installs the signed binaries. *Done when:* the MSI installs on a clean Windows Server + Windows 11 VM, the service starts the mesh node, and uninstall is clean.
+- **1.11** **CI runners for Windows (and macOS)**: cross-compile + run the Linux/Windows Pilot acceptance tests (perms 1.3, supervision 1.6, reload/restart 1.8, service 1.10) on native runners. *Done when:* the Pilot test suite is green on Linux and Windows runners in CI; macOS runner stubbed for M9.
+- **1.12** *(deferred to M9 with the laptop path)* macOS Pilot: **launchd** plist, Keychain-backed key (1.3a), notarized package. Tracked here so it isn't forgotten; built in M9.1.
+- **1.13** *(new)* **Clock / NTP sanity on Pilot.** The whole nonce-TTL / cert-validity / attestation-freshness model assumes synced clocks (§4.3). Pilot checks local clock against a trusted source, **alerts on drift, and refuses enroll/renew beyond a hard skew threshold** (fail-closed on identity, P8). *Done when:* a host with a clock skewed past threshold refuses to enroll and emits a clear diagnostic.
+
+> Demo: `pilot` runs as a **systemd service on Linux and a Windows Service on Windows**, supervises Nebula with hand-placed KMS-signed certs, joins the spike mesh, and survives child crashes on both.
+
+---
+
+## Milestone 2 — Harbor Core skeleton + the signing spine
+
+Goal: the minimum Harbor that can mint a cert safely, **plus the platform plumbing every later milestone reuses** (observability, secrets, RBAC/dual-control, device state, audit export). No network enrollment yet — drive it via an internal admin CLI.
+
+- **2.1** Postgres + migration tooling; first tables: `keys`, `audit_log`. *Done when:* migrations apply/rollback cleanly in CI.
+- **2.2** **Hash-chained audit log** primitive (§7): append-only, each row carries prev-hash; a verifier detects tampering. *Done when:* unit test proves a mutated row breaks chain verification. Land this first so every later action is auditable from day one.
+- **2.3** **Signer service**: wrap KMS `Sign`/`GetPublicKey` for the CA key; assemble + sign a Nebula cert from a pubkey + template. *Done when:* Signer produces a cert identical-in-validity to the 0.3 path, logged to audit.
+- **2.4** Signer **template validation** (§4.3): reject out-of-allocation IPs, disallowed groups, insane lifetimes — *before* calling KMS. *Done when:* malformed templates are refused with typed errors; tests cover each rule.
+- **2.5** Signer **circuit-breaker** (§4.3): fleet-wide certs/hour ceiling; breach → halt + alarm + audit. *Done when:* exceeding the test ceiling halts signing and emits an alert event.
+- **2.6** **IPAM allocator**: `devices`, `ip_allocations` tables; allocate/release with quarantine; pool config + per-cloud sub-ranges. *Done when:* concurrent allocations never collide (test with parallel requests); released IPs honor quarantine.
+- **2.7** **Cross-account KMS isolation** (§6.3): Signer assumes a scoped role into the PKI account; that role can `Sign`/`GetPublicKey` only; SCP denies delete/policy-edit. *Done when:* Signer works via assumed role; a deletion attempt is denied by SCP (verified in a sandbox account).
+- **2.8** Admin CLI: `harbor issue-cert` driving 2.3–2.6 end to end. *Done when:* CLI mints a cert for a fake device, IP allocated, audit row chained.
+- **2.9** *(new)* **Observability baseline** — scaffold at the *start* of M2 so everything after is observable: structured logging, metrics (Prometheus), `/healthz` + `/readyz`, request tracing, and a minimal SLO doc for Harbor services; plus a `pilot diagnose` command for the "won't enroll" case. *Done when:* every Harbor service exposes health/metrics; a failed sign produces a traceable, structured error end to end.
+- **2.10** *(new)* **Harbor config & secrets management.** Provision and rotate: DB DSN, KMS ARNs, the **shared gateway↔Core nonce HMAC key** (with auto-rotation, §4.8), the **gateway TLS cert**, and **service-to-service auth**. Use Secrets Manager / SSM + IAM roles; no static secrets in images. *Done when:* no secret is baked into an artifact; nonce-key rotation works with overlap; a secret rotation needs no redeploy.
+- **2.11** *(new)* **Reusable dual-control + RBAC + admin SSO.** One primitive — *not* reinvented per feature — providing: admin login via **IdP SSO + MFA**, RBAC roles, and a **two-person approval** workflow reused by policy publish (6.5), bulk revoke (7.2), privileged-group grants, and CA/key rotation. *Done when:* a privileged action requires two distinct authenticated approvers; single-approver attempts are blocked and audited.
+- **2.12** *(new)* **Device lifecycle state machine.** Define + enforce `pending → active → suspended → decommissioned → re-enrolling` with legal transitions, each audited. Conflict handling (5.4), revocation (M7), and re-attestation all key off this. *Done when:* illegal transitions are rejected; state changes are audited.
+- **2.13** *(new)* **Durable audit export (WORM).** Ship the hash-chained log off mutable Postgres to **object-lock / WORM** storage (§7) + SIEM, continuously, with gap detection. *Done when:* tampering with or deleting Postgres rows is detectable against the immutable copy.
+
+> Demo: `harbor issue-cert` mints a KMS-signed cert with IPAM + validation + circuit-breaker + audit — the whole trust spine — and every action is observable, the audit is exported to WORM, and a privileged CLI action requires two approvers.
+
+---
+
+## Milestone 3 — First real join: token enrollment (gateway + core)
+
+Goal: a fresh host enrolls over the network with a one-time token and joins the mesh. This is the first true end-to-end. **Async by construction** — the gateway is credential-less and Core is mesh-only, so the flow is submit → poll → receive.
+
+- **3.0** *(new)* **Protocol specification.** Write the enrollment/attestation/bundle **wire protocol** up front: request/response schemas, the JWS/COSE envelope structure, nonce/replay/freshness semantics, error model, and **versioning**. M3–M5 implement *against this doc*; it's the artifact externally reviewed in 9.7 (don't reverse-engineer it there). *Done when:* the spec exists, is versioned, and M3 code references it.
+- **3.1** **Genesis ceremony tooling + runbook** (§3.1): scripted two-operator creation of CA + config-signing keys and the first lighthouse/Core certs via `nebula-cert-kms`, with retroactive audit entries. *Done when:* a documented genesis run produces a working lighthouse + recorded keys.
+- **3.2** **Enrollment Gateway**: `GET /v1/nonce` as stateless `HMAC(k_gw, ts‖binding)` with TTL. *Done when:* nonces verify without server state; expired/forged nonces rejected.
+- **3.3** Gateway `POST /v1/enroll`: strict size/schema/timeout limits, edge rate-limit, publish vetted candidate to an internal queue, **return a retrieval ticket** (enrollment id + a retrieval secret bound to the request). **No DB/KMS creds.** *Done when:* oversized/malformed requests rejected pre-parse; valid ones land on the queue and the caller gets a ticket.
+- **3.3a** *(new)* **Internal queue infrastructure + gateway↔Core trust.** Stand up the queue (e.g. SQS/NATS): authenticated publish from the gateway, Core as the only consumer, poison-message handling, backpressure, and at-least-once semantics with idempotent processing. The gateway's only privilege is *publish + read-own-result* — nothing else. *Done when:* a forged/replayed queue message is rejected by Core; queue outage degrades gracefully (enroll returns retryable, data plane unaffected).
+- **3.4** Core enroll consumer: validate nonce, validate **one-time token** (single-use, TTL), bind **pubkey hash**, record identity, drive device state (2.12). *Done when:* a token enrolls exactly once; replay rejected.
+- **3.5** **Static group resolution** stub (real immutable-fact map comes in M5): map token → device-class → groups. *Done when:* enrolled cert carries expected groups.
+- **3.6** Core: assemble response bundle — signed cert + CA bundle + initial **JWS-signed config bundle** (§P11) — and write it to the **result store**. *Done when:* Pilot can verify the JWS against the pinned config-signing pubkey.
+- **3.6a** *(new)* **Async result delivery.** A **result store** + gateway `GET /v1/enroll/{id}` poll endpoint; the result is released **only to the holder of the retrieval ticket / matching pubkey** (no enumeration, no cross-tenant fetch); short TTL; one-time read. (Stakes are mainly correctness — a cert isn't secret without its private key — but bind retrieval anyway.) *Done when:* the right Pilot retrieves its bundle; a wrong/forged ticket gets nothing; results expire.
+- **3.7** Pilot **enroll flow** (async-aware): gen keypair → fetch nonce → build token request → submit → **poll with ticket** → receive bundle → write files → start nebula. *Done when:* a clean VM runs `pilot enroll --token …` and reaches the overlay, including the poll/pending path.
+- **3.8** **E2E test harness**: ephemeral Postgres + KMS (or localstack/kms emulation where faithful) + 2 VMs; assert a fresh host joins. *Done when:* one command spins the scenario and passes in CI/nightly.
+- **3.9** *(new)* **Manual approval workflow.** The `PENDING` path referenced throughout: an admin queue to **list / approve / deny** enrollments, approver authz via 2.11, full audit. *Done when:* a non-auto enrollment waits in the queue and only issues after an authorized approval; denials are recorded.
+- **3.10** *(new)* **Enrollment quota enforcement** (§4.0) — distinct from the signing circuit-breaker: per-cloud-account and per-instance-id caps so one stolen attestation can't mint a fleet. *Done when:* exceeding a per-account/per-instance quota blocks further auto-issue and alerts.
+
+> Demo: bare host → `pilot enroll --token` → on the mesh, pinging another node; a second host lands in the approval queue and joins only after an admin approves. Pains **#1 (IP) and #2 (joining)** solved for the token path.
+
+---
+
+## Milestone 4 — Lifecycle over the mesh: renewal & heartbeat
+
+Goal: certs renew themselves with zero downtime; Harbor sees fleet state; the data plane survives Harbor being down. Solves pain **#3**.
+
+- **4.1** **Core becomes a mesh node**: Core runs Pilot+nebula in `group:control-plane`; Core API bound to its overlay IP. *Done when:* an enrolled host can reach Core's API over the tunnel; the public internet cannot.
+- **4.2** **Mesh tunnel-identity auth** (§4.5): Core authenticates requests by the calling tunnel's cert vs the device record. *Done when:* a request whose tunnel cert ≠ claimed device is rejected.
+- **4.3** `POST /v1/certs/renew` (mesh-only): re-sign for an already-enrolled device, new pubkey, no re-attestation. *Done when:* renewal returns a fresh cert within the same identity.
+- **4.4** Pilot **proactive renewal** at ~⅔ life **with randomized jitter** *(new)* — spread renewals across a window so a fleet enrolled together doesn't stampede the Signer (tripping the circuit-breaker) or throttle KMS: new keypair → renew → stage → atomic swap + reload. *Done when:* a short-lived test cert auto-renews with no dropped ping; a simulated 1,000-host cohort renews spread across the window, not in a spike.
+- **4.5** **Core self-renewal local path** (§3.1): Pilot-on-Core renews via loopback to Signer, not over the mesh, scoped to Core's own identity. *Done when:* Core re-certs itself with the overlay forcibly degraded.
+- **4.6** `POST /v1/heartbeat`: versions, cert expiry, applied config version, drift, clock; **typed command channel** back (renew / apply-config-N / restart) — never arbitrary exec. *Done when:* heartbeats persist; an unknown command type is rejected.
+- **4.7** **Expiry/health dashboards + alerts**: "% of fleet within N days of expiry," lighthouse expiry, clock drift. *Done when:* alerts fire in a drill where renewal is blocked.
+- **4.8** *(new)* **Pilot↔Harbor version compatibility.** You can't upgrade 10k Pilots atomically, so define API **versioning + skew policy** and a negotiation handshake; CI runs a **mixed-version matrix** (old Pilot ↔ new Harbor and vice-versa). *Done when:* an N-1 Pilot interoperates with current Harbor; breaking changes are gated behind version negotiation.
+- **4.9** *(new)* **P3 chaos test + documented limit.** Take Harbor fully offline mid-renewal and assert the **data plane is unaffected** (existing tunnels + valid certs keep working). Document the genuine worst case — **Harbor down longer than cert lifetime** → hosts age out — with the expiry-% alert (4.7) as the control and an emergency response in the runbook. *Done when:* the chaos test passes; the limitation + response are written down.
+
+> Demo: a host enrolled days ago silently rolls to a new cert; Harbor dashboard shows the fleet's expiry posture; killing Harbor mid-test doesn't drop a single tunnel.
+
+---
+
+## Milestone 5 — Cloud attestation (zero-touch cloud enrollment)
+
+Goal: AWS/Azure VMs enroll with no token. Introduces the immutable-fact group map.
+
+- **5.1** **AWS sigv4 attestation — Pilot side** (§6.1): build a signed `sts:GetCallerIdentity` with `X-Harbor-Nonce` + `X-Harbor-Pubkey-Hash` in the signature. *Done when:* request builds from instance role creds.
+- **5.2** **AWS sigv4 — Core verify**: execute/validate the presigned request; check account + role-path allowlist; verify nonce+pubkey binding. *Done when:* a real EC2 instance auto-enrolls; a replayed/foreign request is refused.
+- **5.3** **IID secondary cross-check** + `ec2:DescribeInstances` (running state, account/region — **not tags for authz**). *Done when:* enrollment requires both sigv4 and a matching live instance.
+- **5.4** **One-enrollment-per-instance-id** conflict handling (§4.1): second active enrollment → alert + PENDING (3.9), never silent auto-issue. *Done when:* a rebuild scenario raises a review, not a duplicate identity.
+- **5.5** **Group map from immutable facts** (§4.3a): versioned, signed, dual-control (2.11) `group_map` keyed to account/role/subscription — replaces the M3 static stub. *Done when:* groups derive only from immutable facts; a tag-based escalation attempt yields no extra groups (regression test).
+- **5.6** **Azure attested data** — Pilot fetch (with nonce) + Core verify (chain to Azure CA, subscription/vmId allowlist, optional ARM check). *Done when:* a real Azure VM auto-enrolls; chain-rotation handling tested.
+- **5.7** **PrivateLink / Azure Private Endpoint** enrollment paths (§4.0) so cloud VMs never touch the public gateway. *Done when:* a VM enrolls with the public gateway firewalled off from it.
+
+> Demo: launch an EC2 instance and an Azure VM with the right role/identity → both appear on the mesh automatically, correct groups, no human step.
+
+---
+
+## Milestone 6 — Central firewall policy (solves pain #4)
+
+Goal: Harbor owns the firewall; hosts can't drift; the fleet can't sever itself.
+
+- **6.1** Policy **data model + group-based DSL** (`allow group:web → group:db tcp 5432`); default-deny baseline (§4.4). *Done when:* policy parses/validates; default is deny.
+- **6.2** **Compiler**: global policy → per-host firewall section (only rules touching the host's groups). *Done when:* compiled output matches hand-written expectation for sample fleets.
+- **6.3** **Compile-time invariants** (§P10): cannot publish a policy that removes reachability to `group:control-plane` or blocks lighthouse discovery. *Done when:* an invariant-violating policy is rejected at compile, regardless of approvals.
+- **6.4** **JWS-signed policy/config bundles** + Pilot verification before apply. *Done when:* an unsigned/tampered bundle is refused by Pilot.
+- **6.5** **Dual-control publish** workflow — *reusing the 2.11 primitive* — + audit. *Done when:* single-approver publish is blocked; two-approver succeeds and is chained in audit.
+- **6.6** **Staged canary rollout + auto-rollback** (§4.4): canary wave → watch heartbeats → missing-heartbeat threshold auto-reverts + freezes → widen in waves. *Done when:* an intentionally-bad canary auto-rolls-back without operator action.
+- **6.7** Pilot **drift detection + revert**: local firewall edits reverted to the signed version next sync; tamper logged. *Done when:* a manual edit is reverted and reported.
+- **6.8** *(new)* **Lighthouse fleet lifecycle.** Add / replace / remove a lighthouse and **propagate the updated `static_host_map`** (and `am_lighthouse` settings) to every host via the signed config bundle, with the 6.3 invariant guaranteeing discovery is never lost mid-change. *Done when:* replacing a lighthouse updates the whole fleet with no discovery outage; a removed lighthouse stops being advertised.
+
+> Demo: author a rule centrally, watch it canary across the fleet with auto-rollback armed, watch a hand-edit get reverted, and roll a lighthouse out of the fleet live.
+
+---
+
+## Milestone 7 — Revocation & offboarding
+
+Goal: kill a host fast and safely; make revocation itself non-weaponizable.
+
+- **7.1** **Blocklist distribution** via the signed config bundle; rely on **peer-side enforcement** (§4.7). *Done when:* blocklisting host B causes all *other* hosts to refuse B within the propagation SLO, even if B's Pilot ignores it.
+- **7.2** **Revocation-as-DoS guards** (§P10/§4.7): cannot blocklist `control-plane`/lighthouses; **bulk revoke = dual-control (2.11) + rate-limited**. *Done when:* a mass-revoke needs two approvers and can't target the control plane.
+- **7.3** **Decommission flow**: revoke enrollment (forces re-attest), drive device state (2.12), release IP to quarantine, auto-reap on cloud terminate events. *Done when:* a terminated EC2 instance is reaped and its IP quarantined automatically.
+- **7.4** **Human-device offboarding** hook: IdP user disable → stop renewals for their devices (pairs with M9 OIDC). *Done when:* disabling a user halts their devices' renewals.
+
+> Demo: blocklist a compromised host and watch peers drop it; attempt a reckless mass-revoke and watch the guardrails stop it.
+
+---
+
+## Milestone 8 — CA & key rotation (the dangerous machinery)
+
+Goal: rotate the trust roots online, with a drill that proves it.
+
+- **8.1** **Multi-CA trust bundle distribution**: ship `[CA1, CA2]`, confirm 100% adoption via heartbeat before any cut-over. *Done when:* every host reports trusting both before step 8.3 is allowed.
+- **8.2** **CA lifecycle state machine** (`staged→active→draining→retired`); won't retire a CA with live dependents (§4.6). *Done when:* state transitions are enforced; illegal transitions rejected.
+- **8.3** **Signing cut-over** to CA2 + **drain tracking** (active certs per CA) + force-renew stragglers. *Done when:* fleet migrates to CA2 and CA1 reaches zero dependents.
+- **8.4** **CA1 retirement**: distrust + scheduled KMS deletion with alarms. *Done when:* `[CA2]`-only bundle deployed; deletion scheduled with deletion-alarm wired.
+- **8.5** **Config-signing key rotation** by the same dual-key-overlap mechanism. *Done when:* config bundles verify across the K1→K2 overlap with no Pilot rejections.
+- **8.6** **Emergency rotation path** (immediate distrust + mass re-issue). *Done when:* a simulated CA-compromise runbook completes in staging.
+- **8.7** **Full rotation drill in staging** (design §13). *Done when:* a real end-to-end CA rotation runs on a staging fleet with zero data-plane outage; findings recorded.
+
+> Demo: rotate the CA on a live staging mesh, start to finish, without dropping tunnels.
+
+---
+
+## Milestone 9 — Hardening, operations & assurance
+
+Goal: production-readiness, the laptop path, and the assurance work from design §13.
+
+- **9.1** **OIDC device-code flow** for laptops (§4.1b): device→human binding, MFA, offboarding hook — on **both Windows and macOS laptops**. Completes the **macOS Pilot (M1.12)**: launchd plist, Keychain-backed key (1.3a), notarized package; and the Windows laptop variant reuses the M1.10 service/MSI. *Done when:* a Windows laptop and a macOS laptop each enroll via browser+MFA and join the mesh; disabling the user halts both.
+- **9.2** **Out-of-band admin break-glass** (§10): SSM Session Manager / bastion path into Core that doesn't ride Nebula; dual-operator + alarms. *Done when:* an admin can reach Core with the mesh fully down.
+- **9.3** **Detection catalog → SIEM** (§7.1): wire each detection (group-never-held, new account, signing-rate, chain-break, double-enroll, off-window policy change, issued-vs-inventory reconciliation, KMS deletion). *Done when:* each detection fires in a drill.
+- **9.4** **Posture-gated renewal** (optional): renewal conditioned on disk-encryption/patch facts. *Done when:* a non-compliant host is denied renewal in a test policy.
+- **9.5** **HA Harbor**: multiple Core replicas, Postgres failover (see [[PgDog - Horizontal Scaling for PostgreSQL]] if scaling demands it), multi-region KMS keys verified. *Done when:* killing a Core replica causes no enrollment/renewal outage.
+- **9.6** **Signed, waved self-update channel** for Pilot/nebula with health gates + rollback. *Done when:* a bad update is caught by the canary wave and rolled back.
+- **9.7** **Assurance pass** (§13): parser fuzzing in CI, **external protocol review** (of the 3.0 spec), gateway pentest, runbook tabletops (genesis + both break-glass), detection-fires validation. *Done when:* each is completed and findings triaged.
+- **9.8** *(new)* **Load & scale testing.** Simulate fleet-scale **enrollment + renewal storms** (with 4.4 jitter), verify the Signer/circuit-breaker behave, and size **KMS API rate-limit headroom** (KMS Sign throttling is an availability risk distinct from the security ceiling). *Done when:* a 10k-host renewal cohort completes within SLO without tripping the breaker or throttling KMS.
+- **9.9** *(new)* **Harbor deploy / upgrade / rollback.** The control plane's own release process: blue-green or rolling Core deploys, **schema-migration/code coordination** (expand-contract), and a tested rollback. *Done when:* a Harbor version can be deployed and rolled back on a live mesh with no enrollment/renewal outage.
+- **9.10** *(new)* **DB backup / restore / DR drill.** PITR + tested restore of Harbor state; regional DR for Postgres; verify the WORM audit copy (2.13) survives a primary loss. *Done when:* a restore-from-backup drill rebuilds a working Harbor; RPO/RTO recorded.
+
+> Demo: production cutover criteria met — laptops on the mesh, break-glass proven, detections live, update channel safe, a fleet-scale renewal storm rides out cleanly, and a DB-restore drill passes.
+
+---
+
+## Cross-cutting (every milestone, not a phase)
+
+- **Audit everything** from M2.2 onward — no action ships without an audit row, and it's exported to WORM (2.13).
+- **Least privilege** for every new service/role at creation, not later.
+- **Observability with the feature** — every new service/endpoint ships logs, metrics, and health from day one (2.9).
+- **Tests as acceptance** — a step isn't done without its "Done when" automated where feasible.
+- **No bespoke crypto** (§P11) — reach for sigv4/JWS/COSE/HKDF; flag any custom construct for the 9.7 review; build to the 3.0 spec.
+- **Cross-platform Pilot** — every Pilot-side step carries Linux *and* Windows acceptance from M1 (macOS at M9). Don't let "works on my Linux box" pass as done; Windows is the majority of the fleet.
+- **Never assume atomic fleet upgrades** — mixed Pilot/Harbor versions coexist; honor the 4.8 compatibility policy.
+- **Reuse the primitives** — dual-control/RBAC (2.11), device state (2.12), audit (2.2) are built once and reused, not re-implemented per feature.
+- **Update the design doc** when a spike (M0) or reality contradicts an assumption.
+
+## Deferred / optional (track, decide later)
+
+- **Overlay DNS/naming** — Nebula's `lighthouse.dns` for name→overlay-IP resolution, if services need names not IPs.
+- **Brownfield migration** — importing an existing Nebula mesh (and cert-v1→v2 migration, §12) into Harbor management.
+- **Environment isolation** — staging vs prod as fully separate trust domains (separate CAs, KMS keys, meshes, Harbor instances) — likely a *should*, confirm.
+- **Data residency** — where Harbor state (device records, audit) lives relative to the deployment's approved region set.
+
+## Suggested first slice (if you want a concrete start)
+
+M0.1 → M0.2 → **M0.3 (KMS-signed cert tunnel — the make-or-break feasibility test)** → M0.7 (underlay/MTU). Everything downstream assumes 0.3 works; prove it in week one before writing a line of Harbor. Then write the **3.0 protocol spec** before M3 code, and stand up the **2.9–2.11** plumbing before piling features on Harbor.
