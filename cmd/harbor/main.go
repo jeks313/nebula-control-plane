@@ -296,6 +296,7 @@ func cmdJoinKey(args []string) {
 	ttl := fs.Duration("ttl", 0, "validity (0 = no expiry)")
 	autoIssue := fs.Bool("auto-issue", false, "skip manual approval (HEAVILY DISCOURAGED)")
 	ephemeral := fs.Bool("ephemeral", false, "nodes joined with this key are ephemeral")
+	quota := fs.Int("quota", 0, "max enrollments/hour via this key (0 = unlimited; recommended for reusable/auto-issue keys)")
 	_ = fs.Parse(args[1:])
 
 	s := openStore(*driver, *dsn)
@@ -315,6 +316,7 @@ func cmdJoinKey(args []string) {
 		secret, jk, err := joinkey.Create(ctx, s, joinkey.Params{
 			Name: *name, Groups: parseCSV(*groups), SubRange: *subRange,
 			MaxUses: *maxUses, TTL: *ttl, AutoIssue: *autoIssue, Ephemeral: *ephemeral,
+			QuotaPerHour: *quota,
 		}, time.Now())
 		if err != nil {
 			fatalf("%v", err)

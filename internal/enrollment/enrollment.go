@@ -45,6 +45,7 @@ var (
 	ErrReplay     = errors.New("enrollment: nonce replay")
 	ErrMethod     = errors.New("enrollment: unsupported method")
 	ErrNotPending = errors.New("enrollment: not a pending enrollment")
+	ErrQuota      = errors.New("enrollment: join-key enrollment quota exceeded")
 )
 
 // Enrollment is a persisted enrollment attempt (the PENDING queue + result).
@@ -84,6 +85,7 @@ type Config struct {
 	Allocator    *ipam.Allocator
 	Pool         netip.Prefix
 	CertLifetime time.Duration
+	EnrollWindow time.Duration // per-key quota window (0 -> 1h)
 	Now          func() time.Time
 
 	// Bundle assembly + delivery (3.6/3.6a). Optional: if ConfigBackend/Results
@@ -134,7 +136,7 @@ func (c *Consumer) Drain(ctx context.Context, q *queue.Durable, batch int, lease
 // vs. a transient/infra failure (retry).
 func terminal(err error) bool {
 	for _, t := range []error{
-		ErrBadRequest, ErrSignature, ErrNonce, ErrReplay, ErrMethod,
+		ErrBadRequest, ErrSignature, ErrNonce, ErrReplay, ErrMethod, ErrQuota,
 		joinkey.ErrNotFound, joinkey.ErrExpired, joinkey.ErrExhausted,
 	} {
 		if errors.Is(err, t) {
@@ -163,11 +165,28 @@ func (c *Consumer) Process(ctx context.Context, cand queue.Candidate) (Result, e
 		Token string `json:"token"`
 	}
 	_ = json.Unmarshal(req.Credential, &cred)
-	jk, err := joinkey.ValidateAndConsume(ctx, c.cfg.Store, cred.Token, c.now())
+	jk, err := joinkey.Lookup(ctx, c.cfg.Store, cred.Token, c.now())
 	if err != nil {
-		c.record(ctx, cand.EnrollmentID, req, pubBytes, 0, "[]", StatusDenied, nil, "")
-		c.writeResult(ctx, cand.EnrollmentID, cand.RetrievalSecretHash, nil, StatusDenied, err.Error())
-		_ = c.audit(ctx, "system", "enroll-denied", req.CSR.RequestedName, err.Error())
+		c.deny(ctx, cand, req, pubBytes, "enroll-denied", err.Error())
+		return Result{EnrollmentID: cand.EnrollmentID, Status: StatusDenied}, err
+	}
+
+	// Per-key enrollment rate quota (3.10): a leaked/reusable key can't mint a
+	// fleet. Checked before consuming a use; blocks both auto-issue and pending.
+	if jk.QuotaPerHour > 0 {
+		n, qerr := c.recentEnrollments(ctx, jk.ID)
+		if qerr != nil {
+			return Result{}, qerr // transient -> retry
+		}
+		if n >= jk.QuotaPerHour {
+			reason := fmt.Sprintf("join-key %q quota %d/h exceeded", jk.Name, jk.QuotaPerHour)
+			c.deny(ctx, cand, req, pubBytes, "enroll-quota-exceeded", reason)
+			return Result{EnrollmentID: cand.EnrollmentID, Status: StatusDenied}, ErrQuota
+		}
+	}
+
+	if err := joinkey.Consume(ctx, c.cfg.Store, jk); err != nil {
+		c.deny(ctx, cand, req, pubBytes, "enroll-denied", err.Error())
 		return Result{EnrollmentID: cand.EnrollmentID, Status: StatusDenied}, err
 	}
 
@@ -235,6 +254,31 @@ func (c *Consumer) Approve(ctx context.Context, enrollmentID, approver string) (
 	c.writeResult(ctx, enrollmentID, nil, bundleJWS, StatusIssued, "")
 	_ = c.audit(ctx, approver, "enroll-approved", e.DeviceName, fmt.Sprintf(`{"overlay_ip":%q}`, ip))
 	return Result{EnrollmentID: enrollmentID, Status: StatusIssued, OverlayIP: ip.String(), CertPEM: certPEM}, nil
+}
+
+// deny records a denied enrollment + result + audit (the shared rejection path).
+func (c *Consumer) deny(ctx context.Context, cand queue.Candidate, req wire.EnrollRequest, pubBytes []byte, action, reason string) {
+	c.record(ctx, cand.EnrollmentID, req, pubBytes, 0, "[]", StatusDenied, nil, "")
+	c.writeResult(ctx, cand.EnrollmentID, cand.RetrievalSecretHash, nil, StatusDenied, reason)
+	_ = c.audit(ctx, "system", action, req.CSR.RequestedName, reason)
+}
+
+// recentEnrollments counts accepted (pending+issued) enrollments for a join key
+// within the quota window.
+func (c *Consumer) recentEnrollments(ctx context.Context, joinKeyID int64) (int, error) {
+	window := c.cfg.EnrollWindow
+	if window <= 0 {
+		window = time.Hour
+	}
+	cutoff := c.now().Add(-window).UnixNano()
+	var n int64
+	err := c.cfg.Store.DB.WithContext(ctx).Model(&Enrollment{}).
+		Where("join_key_id = ? AND status IN ? AND created_at > ?",
+			joinKeyID, []string{StatusPending, StatusIssued}, cutoff).Count(&n).Error
+	if err != nil {
+		return 0, fmt.Errorf("enrollment: count quota: %w", err)
+	}
+	return int(n), nil
 }
 
 // existing returns the recorded result for an enrollment_id, if already processed.

@@ -30,18 +30,19 @@ var (
 
 // JoinKey is a stored join key (secret held only as a hash).
 type JoinKey struct {
-	ID         int64  `gorm:"column:id;primaryKey"`
-	Name       string `gorm:"column:name"`
-	SecretHash []byte `gorm:"column:secret_hash"`
-	Groups     string `gorm:"column:groups"` // JSON array
-	SubRange   string `gorm:"column:sub_range"`
-	MaxUses    int    `gorm:"column:max_uses"` // 0 = unlimited
-	UsedCount  int    `gorm:"column:used_count"`
-	ExpiresAt  int64  `gorm:"column:expires_at"` // unix ns; 0 = none
-	AutoIssue  bool   `gorm:"column:auto_issue"`
-	Ephemeral  bool   `gorm:"column:ephemeral"`
-	State      string `gorm:"column:state"`
-	CreatedAt  int64  `gorm:"column:created_at"`
+	ID           int64  `gorm:"column:id;primaryKey"`
+	Name         string `gorm:"column:name"`
+	SecretHash   []byte `gorm:"column:secret_hash"`
+	Groups       string `gorm:"column:groups"` // JSON array
+	SubRange     string `gorm:"column:sub_range"`
+	MaxUses      int    `gorm:"column:max_uses"` // 0 = unlimited
+	UsedCount    int    `gorm:"column:used_count"`
+	ExpiresAt    int64  `gorm:"column:expires_at"` // unix ns; 0 = none
+	AutoIssue    bool   `gorm:"column:auto_issue"`
+	Ephemeral    bool   `gorm:"column:ephemeral"`
+	QuotaPerHour int    `gorm:"column:quota_per_hour"` // 0 = no rate quota
+	State        string `gorm:"column:state"`
+	CreatedAt    int64  `gorm:"column:created_at"`
 }
 
 func (JoinKey) TableName() string { return "join_keys" }
@@ -55,13 +56,14 @@ func (k JoinKey) GroupList() []string {
 
 // Params configures a new join key.
 type Params struct {
-	Name      string
-	Groups    []string
-	SubRange  string
-	MaxUses   int // 0 = unlimited
-	TTL       time.Duration
-	AutoIssue bool
-	Ephemeral bool
+	Name         string
+	Groups       []string
+	SubRange     string
+	MaxUses      int // 0 = unlimited
+	TTL          time.Duration
+	AutoIssue    bool
+	Ephemeral    bool
+	QuotaPerHour int // 0 = no rate quota
 }
 
 // Create generates a key, stores its hash, and returns the secret ONCE (it
@@ -81,7 +83,7 @@ func Create(ctx context.Context, s *store.Store, p Params, now time.Time) (secre
 	jk = JoinKey{
 		Name: p.Name, SecretHash: sum[:], Groups: string(groups), SubRange: p.SubRange,
 		MaxUses: p.MaxUses, ExpiresAt: exp, AutoIssue: p.AutoIssue, Ephemeral: p.Ephemeral,
-		State: "active", CreatedAt: now.UnixNano(),
+		QuotaPerHour: p.QuotaPerHour, State: "active", CreatedAt: now.UnixNano(),
 	}
 	if err = s.DB.WithContext(ctx).Create(&jk).Error; err != nil {
 		return "", JoinKey{}, fmt.Errorf("joinkey: create: %w", err)
@@ -112,11 +114,10 @@ func Revoke(ctx context.Context, s *store.Store, name string) error {
 	return nil
 }
 
-// ValidateAndConsume looks up an active key by the presented secret, checks
-// expiry and the use cap, and atomically consumes one use. The conditional
-// UPDATE makes concurrent consumption safe: only one of N racing callers can
-// take the last use.
-func ValidateAndConsume(ctx context.Context, s *store.Store, secret string, now time.Time) (JoinKey, error) {
+// Lookup validates a presented secret (active, not expired, uses remaining)
+// WITHOUT consuming a use — so callers can apply a rate quota (3.10) before
+// committing a use.
+func Lookup(ctx context.Context, s *store.Store, secret string, now time.Time) (JoinKey, error) {
 	sum := sha256.Sum256([]byte(secret))
 	var jk JoinKey
 	err := s.DB.WithContext(ctx).Where("secret_hash = ? AND state = ?", sum[:], "active").First(&jk).Error
@@ -129,18 +130,37 @@ func ValidateAndConsume(ctx context.Context, s *store.Store, secret string, now 
 	if jk.ExpiresAt != 0 && now.UnixNano() >= jk.ExpiresAt {
 		return JoinKey{}, ErrExpired
 	}
+	if jk.MaxUses > 0 && jk.UsedCount >= jk.MaxUses {
+		return JoinKey{}, ErrExhausted
+	}
+	return jk, nil
+}
 
-	q := s.DB.WithContext(ctx).Model(&JoinKey{}).
-		Where("id = ? AND state = ?", jk.ID, "active")
+// Consume atomically takes one use of a key. The conditional UPDATE makes
+// concurrent consumption safe: only one of N racing callers can take the last use.
+func Consume(ctx context.Context, s *store.Store, jk JoinKey) error {
+	q := s.DB.WithContext(ctx).Model(&JoinKey{}).Where("id = ? AND state = ?", jk.ID, "active")
 	if jk.MaxUses > 0 {
 		q = q.Where("used_count < ?", jk.MaxUses)
 	}
 	res := q.UpdateColumn("used_count", gorm.Expr("used_count + 1"))
 	if res.Error != nil {
-		return JoinKey{}, fmt.Errorf("joinkey: consume: %w", res.Error)
+		return fmt.Errorf("joinkey: consume: %w", res.Error)
 	}
 	if res.RowsAffected == 0 {
-		return JoinKey{}, ErrExhausted
+		return ErrExhausted
+	}
+	return nil
+}
+
+// ValidateAndConsume looks up an active key and atomically consumes one use.
+func ValidateAndConsume(ctx context.Context, s *store.Store, secret string, now time.Time) (JoinKey, error) {
+	jk, err := Lookup(ctx, s, secret, now)
+	if err != nil {
+		return JoinKey{}, err
+	}
+	if err := Consume(ctx, s, jk); err != nil {
+		return JoinKey{}, err
 	}
 	jk.UsedCount++
 	return jk, nil
