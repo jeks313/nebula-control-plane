@@ -33,6 +33,7 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/policy"
 	"github.com/jeks313/nebula-control-plane/internal/queue"
 	"github.com/jeks313/nebula-control-plane/internal/replay"
+	"github.com/jeks313/nebula-control-plane/internal/rollout"
 	"github.com/jeks313/nebula-control-plane/internal/signer"
 	"github.com/jeks313/nebula-control-plane/internal/store"
 	"github.com/jeks313/nebula-control-plane/internal/store/migrate"
@@ -65,6 +66,8 @@ func main() {
 		cmdFleet(os.Args[2:])
 	case "lighthouse":
 		cmdLighthouse(os.Args[2:])
+	case "rollout":
+		cmdRollout(os.Args[2:])
 	case "policy":
 		cmdPolicy(os.Args[2:])
 	case "genesis":
@@ -105,6 +108,11 @@ usage:
   harbor lighthouse replace -ip OVERLAY -addrs host:port[,...] -actor A [db flags]
   harbor lighthouse remove -ip OVERLAY -actor A [db flags]   (keeps >=1 active)
   harbor lighthouse list   [db flags]
+  harbor rollout start     -target N -prev M -hosts ip1,ip2,... [-canary K]
+                           [-wave-size W] [-min-healthy H] [-observe D] [-missing-after D] -actor A
+  harbor rollout step      [db flags]      force one evaluation (cron/ops)
+  harbor rollout status    [db flags]
+  harbor rollout abort     -actor A [db flags]
   harbor policy validate   <policy.txt>
   harbor policy compile    -groups a,b <policy.txt>   preview a host's firewall
   harbor policy propose    <policy.txt> -proposer A   open a dual-control publish (6.5)
@@ -685,6 +693,87 @@ func cmdLighthouse(args []string) {
 	}
 }
 
+// cmdRollout drives staged canary rollouts (6.6). core-api evaluates rollouts on
+// every heartbeat; this CLI starts/inspects/forces them for ops and cron.
+func cmdRollout(args []string) {
+	if len(args) < 1 {
+		fatalf("rollout: want start|step|status|abort")
+	}
+	sub := args[0]
+	fs := flag.NewFlagSet("rollout "+sub, flag.ExitOnError)
+	driver, dsn := dbFlags(fs)
+	target := fs.Int("target", 0, "target bundle version")
+	prev := fs.Int("prev", 1, "previous (stable) bundle version")
+	hosts := fs.String("hosts", "", "ordered overlay IPs; the first -canary form the canary wave")
+	canary := fs.Int("canary", 1, "canary wave size")
+	waveSize := fs.Int("wave-size", 0, "post-canary hosts per wave (0 = all remaining)")
+	minHealthy := fs.Int("min-healthy", 0, "healthy-converged required per wave (0 = all in wave)")
+	observe := fs.Duration("observe", 10*time.Minute, "wait this long for a wave to converge before judging it stuck")
+	missingAfter := fs.Duration("missing-after", 3*time.Minute, "heartbeat silence beyond this => host is down")
+	desc := fs.String("desc", "", "rollout description")
+	actor := fs.String("actor", "operator", "admin identity for the audit trail")
+	_ = fs.Parse(args[1:])
+
+	s := openStore(*driver, *dsn)
+	defer s.Close()
+	audit := func(c context.Context, a, ac, t, d string) error { _, e := s.AppendAudit(c, a, ac, t, d); return e }
+	eng := rollout.New(s.DB, audit)
+	ctx := context.Background()
+
+	switch sub {
+	case "start":
+		if *target == 0 || *hosts == "" {
+			fatalf("rollout start: -target and -hosts are required")
+		}
+		r, err := eng.Start(ctx, rollout.StartConfig{
+			Description: *desc, TargetVersion: *target, PrevVersion: *prev, Hosts: parseCSV(*hosts),
+			CanarySize: *canary, WaveSize: *waveSize, MinHealthy: *minHealthy,
+			Observe: *observe, MissingAfter: *missingAfter, Actor: *actor,
+		})
+		if err != nil {
+			fatalf("rollout start: %v", err)
+		}
+		fmt.Printf("started rollout #%d: %d -> %d, canary %d of %d host(s)\n", r.ID, *prev, *target, *canary, len(parseCSV(*hosts)))
+	case "step":
+		changed, err := eng.Evaluate(ctx)
+		if err != nil {
+			fatalf("rollout step: %v", err)
+		}
+		printRolloutStatus(ctx, eng)
+		if !changed {
+			fmt.Println("(no state change)")
+		}
+	case "status":
+		printRolloutStatus(ctx, eng)
+	case "abort":
+		if err := eng.Abort(ctx, *actor); err != nil {
+			fatalf("rollout abort: %v", err)
+		}
+		fmt.Println("rollout aborted — touched hosts will revert to prev")
+	default:
+		fatalf("rollout: unknown subcommand %q", sub)
+	}
+}
+
+func printRolloutStatus(ctx context.Context, eng *rollout.Engine) {
+	r, hosts, err := eng.Status(ctx)
+	if err != nil {
+		if err == rollout.ErrNone {
+			fmt.Println("no rollouts")
+			return
+		}
+		fatalf("rollout status: %v", err)
+	}
+	fmt.Printf("rollout #%d: %s  %d -> %d  active_wave=%d\n", r.ID, r.State, r.PrevVersion, r.TargetVersion, r.ActiveWave)
+	if r.Note != "" {
+		fmt.Printf("  note: %s\n", r.Note)
+	}
+	fmt.Printf("  %-16s %-5s %s\n", "OVERLAY_IP", "WAVE", "STATUS")
+	for _, h := range hosts {
+		fmt.Printf("  %-16s %-5d %s\n", h.OverlayIP, h.Wave, h.Status)
+	}
+}
+
 func cmdPolicy(args []string) {
 	if len(args) < 1 {
 		fatalf("policy: want 'validate' or 'compile'")
@@ -992,7 +1081,8 @@ func cmdCoreAPI(args []string) {
 	api := coreapi.New(coreapi.Config{
 		Store: s, Signer: sg, ConfigBackend: cfgB, ConfigKeyID: wire.PubkeyHash(cfgPub),
 		CABundlePEM: caPEM, Lighthouses: parseLighthouses(*cf.lighthouse), LighthouseSource: cf.lighthouseSource(s), Policy: cf.policy(s),
-		Pool: pool, CertLifetime: *cf.certLifetime,
+		Rollout: rollout.New(s.DB, audit),
+		Pool:    pool, CertLifetime: *cf.certLifetime,
 	})
 	srv := &http.Server{
 		Addr: *addr, Handler: api.Handler(),
