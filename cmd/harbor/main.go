@@ -7,8 +7,10 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net/netip"
 	"os"
 
+	"github.com/jeks313/nebula-control-plane/internal/ipam"
 	"github.com/jeks313/nebula-control-plane/internal/store"
 	"github.com/jeks313/nebula-control-plane/internal/store/migrate"
 )
@@ -26,6 +28,8 @@ func main() {
 		cmdMigrate(os.Args[2:])
 	case "audit":
 		cmdAudit(os.Args[2:])
+	case "ipam":
+		cmdIPAM(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Printf("harbor %s\n", version)
 	case "help", "-h", "--help":
@@ -44,6 +48,8 @@ usage:
   harbor migrate up|down   [-driver sqlite|postgres] [-dsn <dsn>]
   harbor audit add         -actor A -action X [-target T] [-details D] [db flags]
   harbor audit verify      [db flags]
+  harbor ipam allocate     -device NAME [-range R] [-pool CIDR] [-quarantine D] [db flags]
+  harbor ipam release      -ip ADDR [-pool CIDR] [-quarantine D] [db flags]
   harbor version
 
 db flags default to a local SQLite file (./harbor.db). Set -driver postgres
@@ -143,6 +149,57 @@ func auditVerify(args []string) {
 		os.Exit(1)
 	}
 	fmt.Printf("audit: chain verified, %d rows intact\n", n)
+}
+
+func cmdIPAM(args []string) {
+	if len(args) < 1 {
+		fatalf("ipam: want 'allocate' or 'release'")
+	}
+	fs := flag.NewFlagSet("ipam", flag.ExitOnError)
+	driver, dsn := dbFlags(fs)
+	poolStr := fs.String("pool", "100.64.0.0/16", "overlay pool CIDR")
+	quarantine := fs.Duration("quarantine", 0, "quarantine TTL on release")
+	device := fs.String("device", "", "device name (allocate)")
+	subRange := fs.String("range", "", "sub-range name (allocate)")
+	ipStr := fs.String("ip", "", "address to release (release)")
+	_ = fs.Parse(args[1:])
+
+	prefix, err := netip.ParsePrefix(*poolStr)
+	if err != nil {
+		fatalf("ipam: bad -pool: %v", err)
+	}
+	s := openStore(*driver, *dsn)
+	defer s.Close()
+	alloc, err := ipam.NewAllocator(s, ipam.Pool{Prefix: prefix, QuarantineTTL: *quarantine})
+	if err != nil {
+		fatalf("%v", err)
+	}
+
+	switch args[0] {
+	case "allocate":
+		if *device == "" {
+			fatalf("ipam allocate: -device is required")
+		}
+		ip, err := alloc.Allocate(context.Background(), *device, *subRange)
+		if err != nil {
+			fatalf("%v", err)
+		}
+		fmt.Printf("ipam: allocated %s to %s\n", ip, *device)
+	case "release":
+		if *ipStr == "" {
+			fatalf("ipam release: -ip is required")
+		}
+		addr, err := netip.ParseAddr(*ipStr)
+		if err != nil {
+			fatalf("ipam release: bad -ip: %v", err)
+		}
+		if err := alloc.Release(context.Background(), addr); err != nil {
+			fatalf("%v", err)
+		}
+		fmt.Printf("ipam: released %s (quarantine %s)\n", addr, *quarantine)
+	default:
+		fatalf("ipam: unknown subcommand %q (want allocate|release)", args[0])
+	}
 }
 
 func openStore(driver, dsn string) *store.Store {
