@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/jeks313/nebula-control-plane/internal/bundle"
 	"github.com/jeks313/nebula-control-plane/internal/coreapi"
+	"github.com/jeks313/nebula-control-plane/internal/dualcontrol"
 	"github.com/jeks313/nebula-control-plane/internal/enrollment"
 	"github.com/jeks313/nebula-control-plane/internal/fleet"
 	"github.com/jeks313/nebula-control-plane/internal/genesis"
@@ -98,6 +100,11 @@ usage:
   harbor fleet             [-expiry-within D] [-stale-after D] [-alert] [db flags]
   harbor policy validate   <policy.txt>
   harbor policy compile    -groups a,b <policy.txt>   preview a host's firewall
+  harbor policy propose    <policy.txt> -proposer A   open a dual-control publish (6.5)
+  harbor policy approve    <change-id> -approver B    second, distinct admin → publish
+  harbor policy deny       <change-id> -actor A [-reason R]
+  harbor policy list       [-pending] [db flags]
+  harbor policy active     [db flags]                 show the published policy
   harbor genesis           -out DIR -operator-a A -operator-b B -lighthouse-pub PEM [...]
   harbor ca-init           -ca-cert OUT [-backend software|pkcs11] [-ca-key OUT] [...]
   harbor issue-cert        -name DEVICE -in-pub HOST.pub -ca-cert CA [-groups a,b] [...]
@@ -382,6 +389,7 @@ type coreFlags struct {
 	maxPerHour                           *int
 	lighthouse                           *string
 	policyFile                           *string
+	policyDB                             *bool
 }
 
 func addCoreFlags(fs *flag.FlagSet) *coreFlags {
@@ -404,11 +412,23 @@ func addCoreFlags(fs *flag.FlagSet) *coreFlags {
 	cf.maxPerHour = fs.Int("max-certs-per-hour", 0, "signing circuit-breaker ceiling (0=unlimited)")
 	cf.lighthouse = fs.String("lighthouse", "", "lighthouses for the bundle: overlayIP=host:port[,...]")
 	cf.policyFile = fs.String("policy", "", "central firewall policy file (M6); omit for Pilot's local default")
+	cf.policyDB = fs.Bool("policy-db", false, "use the dual-control published policy from the DB (6.5) instead of -policy")
 	return cf
 }
 
-// policy loads the optional central firewall policy (validated + invariant-checked).
-func (cf *coreFlags) policy() *policy.Policy {
+// policy resolves the central firewall policy Core serves into bundles. With
+// -policy-db it reads the active, dual-control-published policy from the store
+// (6.5 — the active policy is the latest committed policy.publish change);
+// otherwise it reads the -policy file (or nil for Pilot's local default).
+func (cf *coreFlags) policy(s *store.Store) *policy.Policy {
+	if *cf.policyDB {
+		p, ok := activePolicy(context.Background(), s)
+		if !ok {
+			fmt.Fprintln(os.Stderr, "harbor: -policy-db set but no policy has been published yet; serving default-deny")
+			return nil
+		}
+		return &p
+	}
 	if *cf.policyFile == "" {
 		return nil
 	}
@@ -458,7 +478,7 @@ func (cf *coreFlags) build() (*enrollment.Consumer, *queue.Durable, *store.Store
 		Store: s, Nonces: ring, Replay: replay.New(2 * time.Minute),
 		Signer: sg, Allocator: alloc, Pool: pool, CertLifetime: *cf.certLifetime,
 		ConfigBackend: cfgB, ConfigKeyID: wire.PubkeyHash(cfgPub),
-		CABundlePEM: caPEM, Lighthouses: parseLighthouses(*cf.lighthouse), Policy: cf.policy(),
+		CABundlePEM: caPEM, Lighthouses: parseLighthouses(*cf.lighthouse), Policy: cf.policy(s),
 		Results: q, ResultTTL: time.Hour,
 	})
 	return cons, q, s
@@ -606,9 +626,192 @@ func cmdPolicy(args []string) {
 		printRules(c.Inbound)
 		fmt.Println("outbound:")
 		printRules(c.Outbound)
+	case "propose":
+		policyPropose(args[1:])
+	case "approve":
+		policyApprove(args[1:])
+	case "deny":
+		policyDeny(args[1:])
+	case "list":
+		policyList(args[1:])
+	case "active":
+		policyActive(args[1:])
 	default:
 		fatalf("policy: unknown subcommand %q", args[0])
 	}
+}
+
+// KindPolicyPublish is the dual-control change kind for firewall policy publish
+// (6.5). The active fleet policy is the latest committed change of this kind.
+const KindPolicyPublish = "policy.publish"
+
+// newPolicyController builds the dual-control controller wired to the audit log,
+// with a committer that re-validates the policy payload at commit time (defense
+// in depth — invariants are also checked at propose).
+func newPolicyController(s *store.Store) *dualcontrol.Controller {
+	audit := func(c context.Context, a, ac, t, d string) error { _, e := s.AppendAudit(c, a, ac, t, d); return e }
+	dc := dualcontrol.New(dualcontrol.Config{DB: s.DB, Audit: audit})
+	dc.Register(KindPolicyPublish, func(ctx context.Context, ch dualcontrol.Change) error {
+		p, err := policy.Parse(string(ch.Payload))
+		if err != nil {
+			return err
+		}
+		return policy.CheckInvariants(p)
+	})
+	return dc
+}
+
+// activePolicy returns the currently published policy (latest committed
+// policy.publish), if any.
+func activePolicy(ctx context.Context, s *store.Store) (policy.Policy, bool) {
+	dc := newPolicyController(s)
+	ch, ok, err := dc.LatestCommitted(ctx, KindPolicyPublish)
+	if err != nil {
+		fatalf("policy: read active: %v", err)
+	}
+	if !ok {
+		return policy.Policy{}, false
+	}
+	p, err := policy.Parse(string(ch.Payload))
+	if err != nil {
+		fatalf("policy: active policy #%d is unparseable: %v", ch.ID, err)
+	}
+	return p, true
+}
+
+func policyPropose(args []string) {
+	if len(args) < 1 {
+		fatalf("policy propose: want a <policy.txt>")
+	}
+	// The policy file is positional and comes first; flags follow (flag.Parse
+	// stops at the first non-flag argument).
+	file := args[0]
+	fs := flag.NewFlagSet("policy propose", flag.ExitOnError)
+	driver, dsn := dbFlags(fs)
+	proposer := fs.String("proposer", "", "proposing admin identity (required)")
+	_ = fs.Parse(args[1:])
+	if *proposer == "" {
+		fatalf("policy propose: -proposer is required")
+	}
+	// Validate + invariant-check before opening a change — never queue a policy
+	// that could not be published.
+	p := loadPolicy(file)
+	raw, err := os.ReadFile(file)
+	if err != nil {
+		fatalf("policy propose: read %s: %v", file, err)
+	}
+	s := openStore(*driver, *dsn)
+	defer s.Close()
+	ch, err := newPolicyController(s).Propose(context.Background(), KindPolicyPublish,
+		fmt.Sprintf("firewall policy (%d rules)", len(p.Rules)), raw, *proposer)
+	if err != nil {
+		fatalf("policy propose: %v", err)
+	}
+	fmt.Printf("proposed policy change #%d by %s — needs %d distinct approver(s); approve with:\n", ch.ID, *proposer, ch.Quorum)
+	fmt.Printf("  harbor policy approve %d -approver <other-admin>\n", ch.ID)
+}
+
+func policyApprove(args []string) {
+	id := positionalID(args, "policy approve", "<change-id>")
+	fs := flag.NewFlagSet("policy approve", flag.ExitOnError)
+	driver, dsn := dbFlags(fs)
+	approver := fs.String("approver", "", "approving admin identity, distinct from the proposer (required)")
+	_ = fs.Parse(args[1:])
+	if *approver == "" {
+		fatalf("policy approve: -approver is required")
+	}
+	s := openStore(*driver, *dsn)
+	defer s.Close()
+	ch, err := newPolicyController(s).Approve(context.Background(), id, *approver)
+	if err != nil {
+		fatalf("policy approve: %v", err)
+	}
+	switch dualcontrol.State(ch.State) {
+	case dualcontrol.StateCommitted:
+		fmt.Printf("policy change #%d committed by %s — now the active fleet policy\n", id, *approver)
+	default:
+		fmt.Printf("policy change #%d: recorded %s's approval (state=%s)\n", id, *approver, ch.State)
+	}
+}
+
+func policyDeny(args []string) {
+	id := positionalID(args, "policy deny", "<change-id>")
+	fs := flag.NewFlagSet("policy deny", flag.ExitOnError)
+	driver, dsn := dbFlags(fs)
+	actor := fs.String("actor", "", "admin identity recording the denial (required)")
+	reason := fs.String("reason", "", "denial reason")
+	_ = fs.Parse(args[1:])
+	if *actor == "" {
+		fatalf("policy deny: -actor is required")
+	}
+	s := openStore(*driver, *dsn)
+	defer s.Close()
+	if _, err := newPolicyController(s).Deny(context.Background(), id, *actor, *reason); err != nil {
+		fatalf("policy deny: %v", err)
+	}
+	fmt.Printf("policy change #%d denied by %s\n", id, *actor)
+}
+
+func policyList(args []string) {
+	fs := flag.NewFlagSet("policy list", flag.ExitOnError)
+	driver, dsn := dbFlags(fs)
+	pending := fs.Bool("pending", false, "show only changes awaiting approval")
+	_ = fs.Parse(args)
+	s := openStore(*driver, *dsn)
+	defer s.Close()
+	state := dualcontrol.State("")
+	if *pending {
+		state = dualcontrol.StatePending
+	}
+	changes, err := newPolicyController(s).List(context.Background(), state)
+	if err != nil {
+		fatalf("policy list: %v", err)
+	}
+	if len(changes) == 0 {
+		fmt.Println("no policy changes")
+		return
+	}
+	fmt.Printf("%-4s %-10s %-18s %-10s %s\n", "ID", "STATE", "PROPOSER", "QUORUM", "TARGET")
+	for _, c := range changes {
+		_, sigs, _ := newPolicyController(s).Get(context.Background(), c.ID)
+		approvals := 0
+		for _, sg := range sigs {
+			if sg.Decision == "approve" {
+				approvals++
+			}
+		}
+		fmt.Printf("%-4d %-10s %-18s %d/%-8d %s\n", c.ID, c.State, c.Proposer, approvals, c.Quorum, c.Target)
+	}
+}
+
+func policyActive(args []string) {
+	fs := flag.NewFlagSet("policy active", flag.ExitOnError)
+	driver, dsn := dbFlags(fs)
+	_ = fs.Parse(args)
+	s := openStore(*driver, *dsn)
+	defer s.Close()
+	dc := newPolicyController(s)
+	ch, ok, err := dc.LatestCommitted(context.Background(), KindPolicyPublish)
+	if err != nil {
+		fatalf("policy active: %v", err)
+	}
+	if !ok {
+		fmt.Println("no policy published yet (fleet is default-deny)")
+		return
+	}
+	fmt.Printf("# active policy: change #%d, hash %x\n%s\n", ch.ID, ch.PayloadHash[:8], string(ch.Payload))
+}
+
+// positionalID extracts a required positional int64 id that precedes flags.
+func positionalID(args []string, cmd, what string) int64 {
+	if len(args) < 1 {
+		fatalf("%s: want %s", cmd, what)
+	}
+	id, err := strconv.ParseInt(args[0], 10, 64)
+	if err != nil {
+		fatalf("%s: bad %s %q", cmd, what, args[0])
+	}
+	return id
 }
 
 func loadPolicy(path string) policy.Policy {
@@ -705,7 +908,7 @@ func cmdCoreAPI(args []string) {
 	cfgPub, _ := cfgB.PublicKey()
 	api := coreapi.New(coreapi.Config{
 		Store: s, Signer: sg, ConfigBackend: cfgB, ConfigKeyID: wire.PubkeyHash(cfgPub),
-		CABundlePEM: caPEM, Lighthouses: parseLighthouses(*cf.lighthouse), Policy: cf.policy(),
+		CABundlePEM: caPEM, Lighthouses: parseLighthouses(*cf.lighthouse), Policy: cf.policy(s),
 		Pool: pool, CertLifetime: *cf.certLifetime,
 	})
 	srv := &http.Server{
