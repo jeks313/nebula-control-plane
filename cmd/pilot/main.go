@@ -10,10 +10,12 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/jeks313/nebula-control-plane/internal/clock"
+	"github.com/jeks313/nebula-control-plane/internal/enrollclient"
 	"github.com/jeks313/nebula-control-plane/internal/hostkey"
 	"github.com/jeks313/nebula-control-plane/internal/nebulaconfig"
 	"github.com/jeks313/nebula-control-plane/internal/paths"
@@ -32,6 +34,8 @@ func main() {
 	switch os.Args[1] {
 	case "init":
 		cmdInit(os.Args[2:])
+	case "enroll":
+		cmdEnroll(os.Args[2:])
 	case "clock-check":
 		cmdClockCheck(os.Args[2:])
 	case "supervise":
@@ -52,6 +56,7 @@ func usage() {
 
 usage:
   pilot init [-dir <path>] [-values <values.yml>] [-am-lighthouse]
+  pilot enroll -gateway <url> -join-key <secret> -config-pub <pem> [-dir <path>] [-name N] [-groups a,b]
   pilot clock-check [-server <host>] [-max-skew <dur>] [-timeout <dur>]
   pilot supervise -config <nebula.yml> [-nebula <path>] [-sha256 <hex>]
   pilot version
@@ -59,12 +64,76 @@ usage:
 commands:
   init        lay out the host dir, generate the host key (P256), and render
               config.yml. Does NOT overwrite an existing host key.
+  enroll      join the mesh: gen key -> nonce -> signed submit -> poll -> verify
+              the bundle against the pinned config-signing key -> write files`)
+	fmt.Fprint(os.Stderr, `
   clock-check check local clock skew vs an NTP reference; exit 1 if beyond
               max-skew (fail-closed for identity ops), exit 2 if undeterminable
   supervise   run and supervise the nebula subprocess (restart w/ backoff,
               clean shutdown on SIGINT/SIGTERM, SIGHUP hot-reloads nebula on
               Unix, optional binary digest check)
 `)
+}
+
+// cmdEnroll runs the full join flow (M3.7): nonce -> signed submit -> poll ->
+// verify the bundle against the pinned config-signing key -> write files.
+func cmdEnroll(args []string) {
+	fs := flag.NewFlagSet("enroll", flag.ExitOnError)
+	dir := fs.String("dir", "", "host directory (default: platform-specific)")
+	gateway := fs.String("gateway", "", "enrollment gateway base URL (required)")
+	joinKey := fs.String("join-key", "", "join key secret (required)")
+	configPub := fs.String("config-pub", "", "pinned config-signing public key PEM (required)")
+	name := fs.String("name", "", "requested device name (cosmetic)")
+	groups := fs.String("groups", "", "requested groups (advisory; the join key decides)")
+	timeout := fs.Duration("timeout", 60*time.Second, "max time to wait for the result")
+	_ = fs.Parse(args)
+	if *gateway == "" || *joinKey == "" || *configPub == "" {
+		fatalf("enroll: -gateway, -join-key and -config-pub are required")
+	}
+
+	pubPEM, err := os.ReadFile(*configPub)
+	if err != nil {
+		fatalf("enroll: read -config-pub: %v", err)
+	}
+	pinned, err := enrollclient.ParsePinnedConfigPub(pubPEM)
+	if err != nil {
+		fatalf("enroll: %v", err)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	layout := paths.New(*dir)
+	res, err := enrollclient.Enroll(ctx, enrollclient.Params{
+		GatewayURL: *gateway, JoinKey: *joinKey, Layout: layout,
+		RequestedName: *name, RequestedGroups: splitCSV(*groups),
+		PinnedConfigPub: pinned, PollTimeout: *timeout,
+	})
+	if err != nil {
+		fatalf("enroll: %v", err)
+	}
+	switch res.Status {
+	case "issued":
+		fmt.Printf("enrolled: overlay IP %s\n", res.OverlayIP)
+		fmt.Printf("  wrote %s, %s, %s\n", layout.HostCert(), layout.CABundle(), layout.Config())
+		fmt.Printf("  start the node: pilot supervise -config %s\n", layout.Config())
+	case "pending":
+		fmt.Println("enroll: submitted — awaiting manual approval.")
+		fmt.Println("  This host joined via a join key, which requires an admin to approve it")
+		fmt.Println("  before a certificate is issued. Re-run enroll later, or have an admin approve it.")
+	case "denied":
+		fatalf("enroll denied: %s", res.Reason)
+	}
+}
+
+func splitCSV(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // cmdInit prepares a host: secure layout dir, P256 host key (generated once,
