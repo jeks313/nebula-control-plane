@@ -4,6 +4,8 @@
 package wire
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 )
@@ -70,6 +72,57 @@ type NonceResponse struct {
 	ProtocolVersion int    `json:"protocol_version"`
 	Nonce           string `json:"nonce"`
 	ExpiresAt       string `json:"expires_at"`
+}
+
+// TypEnrollRequest is the JWS `typ` for an enrollment request (spec §3).
+const TypEnrollRequest = "ncp-request+jws"
+
+// Enrollment methods (spec §5.4).
+const (
+	MethodToken     = "token"
+	MethodAWSSigV4  = "aws-sigv4"
+	MethodAzureIMDS = "azure-imds"
+	MethodOIDC      = "oidc"
+)
+
+// CSR is the to-be-certified key + requested attributes (spec §5.1). Requested
+// fields are advisory; Harbor is authoritative.
+type CSR struct {
+	Curve           string   `json:"curve"`
+	PublicKey       string   `json:"public_key"` // base64url 65-byte P256 point
+	RequestedName   string   `json:"requested_name"`
+	RequestedGroups []string `json:"requested_groups"`
+}
+
+// EnrollRequest is the JWS payload of POST /v1/enroll (spec §5.1).
+type EnrollRequest struct {
+	ProtocolVersion int             `json:"protocol_version"`
+	Type            string          `json:"type"`
+	IssuedAt        string          `json:"issued_at"`
+	Nonce           string          `json:"nonce"`
+	CSR             CSR             `json:"csr"`
+	Method          string          `json:"method"`
+	Credential      json.RawMessage `json:"credential"`
+	Client          struct {
+		PilotVersion              string `json:"pilot_version"`
+		SupportedProtocolVersions []int  `json:"supported_protocol_versions"`
+	} `json:"client"`
+}
+
+// EnrollAccepted is the 202 ticket (spec §5.1).
+type EnrollAccepted struct {
+	ProtocolVersion int    `json:"protocol_version"`
+	EnrollmentID    string `json:"enrollment_id"`
+	RetrievalSecret string `json:"retrieval_secret"`
+	PollAfterMs     int    `json:"poll_after_ms"`
+	ExpiresAt       string `json:"expires_at"`
+}
+
+// PubkeyHash is base64url(SHA-256(pubkey)) — the stable key identifier used for
+// nonce binding and JWS kid (spec §4.2).
+func PubkeyHash(pub []byte) string {
+	h := sha256.Sum256(pub)
+	return base64.RawURLEncoding.EncodeToString(h[:])
 }
 
 // WriteJSON writes v as JSON with the given status.
