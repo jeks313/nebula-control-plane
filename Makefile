@@ -4,7 +4,7 @@ M0 := spike/m0
 .PHONY: help
 help:
 	@echo "build targets:"
-	@echo "  build        build pilot + harbor into bin/"
+	@echo "  build        build pilot + harbor + gateway into bin/"
 	@echo "  test         go test ./..."
 	@echo "  m1-smoke     run the M1 acceptance (needs nebula + nebula-cert)"
 	@echo "  systemd-verify  offline-validate packaging/systemd/pilot.service"
@@ -27,6 +27,7 @@ build:
 	@mkdir -p bin
 	go build -trimpath -ldflags "$(LDFLAGS)" -o bin/pilot ./cmd/pilot
 	go build -trimpath -ldflags "$(LDFLAGS)" -o bin/harbor ./cmd/harbor
+	go build -trimpath -ldflags "$(LDFLAGS)" -o bin/gateway ./cmd/gateway
 
 .PHONY: test
 test:
