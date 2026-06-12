@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/jeks313/nebula-control-plane/internal/clock"
+	"github.com/jeks313/nebula-control-plane/internal/drift"
 	"github.com/jeks313/nebula-control-plane/internal/enrollclient"
 	"github.com/jeks313/nebula-control-plane/internal/heartbeat"
 	"github.com/jeks313/nebula-control-plane/internal/hostkey"
@@ -347,6 +348,10 @@ func cmdSupervise(args []string) {
 			},
 		})
 		go func() { _ = hb.Run(ctx) }()
+
+		// Drift detection (M6.7): re-assert the signed config over any local edit.
+		dm := drift.New(drift.Config{Layout: layout, PinnedConfigPub: pinned, Reload: sup.Reload})
+		go func() { _ = dm.Run(ctx) }()
 	}
 
 	if err := sup.Run(ctx); err != nil {
