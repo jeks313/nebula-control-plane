@@ -75,34 +75,36 @@ func Enroll(ctx context.Context, p Params) (Result, error) {
 	pubBytes := kp.PublicKeyBytes()
 	pubkeyHash := wire.PubkeyHash(pubBytes)
 
-	// 2. Nonce.
-	nonce, err := p.fetchNonce(ctx, pubkeyHash)
-	if err != nil {
-		return Result{}, err
-	}
-
-	// 3. Build + sign the request (proof of possession).
-	req := wire.EnrollRequest{
-		ProtocolVersion: wire.ProtocolVersion, Type: "enroll",
-		IssuedAt: p.Now().UTC().Format(time.RFC3339), Nonce: nonce,
-		Method: wire.MethodToken, Credential: json.RawMessage(`{"token":"` + p.JoinKey + `"}`),
-	}
-	req.CSR = wire.CSR{
-		Curve: "P256", PublicKey: base64.RawURLEncoding.EncodeToString(pubBytes),
-		RequestedName: p.RequestedName, RequestedGroups: p.RequestedGroups,
-	}
-	req.Client.SupportedProtocolVersions = []int{wire.ProtocolVersion}
-	payload, _ := json.Marshal(req)
-	env, err := jws.SignBackendES256(kp, jws.Header{Typ: wire.TypEnrollRequest, Ver: 1, Kid: pubkeyHash}, payload)
-	if err != nil {
-		return Result{}, err
-	}
-	body, _ := json.Marshal(env)
-
-	// 4. Submit -> ticket.
-	var acc wire.EnrollAccepted
-	if err := p.postJSON(ctx, "/v1/enroll", body, &acc); err != nil {
-		return Result{}, err
+	// 2–4. Resume an existing ticket if we have one (host was left PENDING);
+	// otherwise fetch a nonce, sign the request (proof of possession), and submit.
+	ticketPath := p.Layout.EnrollTicket()
+	acc, resumed := loadTicket(ticketPath)
+	if !resumed {
+		nonce, err := p.fetchNonce(ctx, pubkeyHash)
+		if err != nil {
+			return Result{}, err
+		}
+		req := wire.EnrollRequest{
+			ProtocolVersion: wire.ProtocolVersion, Type: "enroll",
+			IssuedAt: p.Now().UTC().Format(time.RFC3339), Nonce: nonce,
+			Method: wire.MethodToken, Credential: json.RawMessage(`{"token":"` + p.JoinKey + `"}`),
+		}
+		req.CSR = wire.CSR{
+			Curve: "P256", PublicKey: base64.RawURLEncoding.EncodeToString(pubBytes),
+			RequestedName: p.RequestedName, RequestedGroups: p.RequestedGroups,
+		}
+		req.Client.SupportedProtocolVersions = []int{wire.ProtocolVersion}
+		payload, _ := json.Marshal(req)
+		env, err := jws.SignBackendES256(kp, jws.Header{Typ: wire.TypEnrollRequest, Ver: 1, Kid: pubkeyHash}, payload)
+		if err != nil {
+			return Result{}, err
+		}
+		body, _ := json.Marshal(env)
+		if err := p.postJSON(ctx, "/v1/enroll", body, &acc); err != nil {
+			return Result{}, err
+		}
+		// Persist the ticket so a PENDING host can resume after approval.
+		_ = saveTicket(ticketPath, acc)
 	}
 
 	// 5. Poll -> bundle.
@@ -111,7 +113,10 @@ func Enroll(ctx context.Context, p Params) (Result, error) {
 		return Result{}, err
 	}
 	if status != "issued" {
-		return Result{Status: status, Reason: reason}, nil
+		if status == "denied" {
+			_ = os.Remove(ticketPath) // terminal
+		}
+		return Result{Status: status, Reason: reason}, nil // pending keeps the ticket
 	}
 
 	// 6. Verify bundle against the pinned config-signing key, then the cert.
@@ -123,11 +128,35 @@ func Enroll(ctx context.Context, p Params) (Result, error) {
 		return Result{}, err
 	}
 
-	// 7. Write files + render config.
+	// 7. Write files + render config; the ticket is spent.
 	if err := p.writeArtifacts(b); err != nil {
 		return Result{}, err
 	}
+	_ = os.Remove(ticketPath)
 	return Result{Status: "issued", OverlayIP: b.Device.OverlayIP}, nil
+}
+
+type ticket struct {
+	EnrollmentID    string `json:"enrollment_id"`
+	RetrievalSecret string `json:"retrieval_secret"`
+	PollAfterMs     int    `json:"poll_after_ms"`
+}
+
+func loadTicket(path string) (wire.EnrollAccepted, bool) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return wire.EnrollAccepted{}, false
+	}
+	var t ticket
+	if json.Unmarshal(raw, &t) != nil || t.EnrollmentID == "" || t.RetrievalSecret == "" {
+		return wire.EnrollAccepted{}, false
+	}
+	return wire.EnrollAccepted{EnrollmentID: t.EnrollmentID, RetrievalSecret: t.RetrievalSecret, PollAfterMs: t.PollAfterMs}, true
+}
+
+func saveTicket(path string, acc wire.EnrollAccepted) error {
+	raw, _ := json.Marshal(ticket{EnrollmentID: acc.EnrollmentID, RetrievalSecret: acc.RetrievalSecret, PollAfterMs: acc.PollAfterMs})
+	return os.WriteFile(path, raw, 0o600) // contains the retrieval secret
 }
 
 func loadOrGenerate(layout paths.Layout) (*hostkey.KeyPair, error) {
