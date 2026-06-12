@@ -43,6 +43,10 @@ func (l Layout) CABundle() string { return filepath.Join(l.Base, "ca.crt") }
 // Config is the rendered nebula config.yml that the supervised nebula reads.
 func (l Layout) Config() string { return filepath.Join(l.Base, "config.yml") }
 
+// EnrollTicket holds an in-progress enrollment's retrieval ticket, so a host
+// left PENDING (awaiting approval) can resume and fetch its bundle later.
+func (l Layout) EnrollTicket() string { return filepath.Join(l.Base, "enroll-ticket.json") }
+
 // Ensure creates the base directory with owner-only protection appropriate to
 // the platform. It is idempotent.
 func (l Layout) Ensure() error {

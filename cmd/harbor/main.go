@@ -5,20 +5,29 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"net/netip"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
+	"github.com/jeks313/nebula-control-plane/internal/bundle"
+	"github.com/jeks313/nebula-control-plane/internal/enrollment"
 	"github.com/jeks313/nebula-control-plane/internal/genesis"
 	"github.com/jeks313/nebula-control-plane/internal/ipam"
 	"github.com/jeks313/nebula-control-plane/internal/joinkey"
+	"github.com/jeks313/nebula-control-plane/internal/nonce"
+	"github.com/jeks313/nebula-control-plane/internal/queue"
+	"github.com/jeks313/nebula-control-plane/internal/replay"
 	"github.com/jeks313/nebula-control-plane/internal/signer"
 	"github.com/jeks313/nebula-control-plane/internal/store"
 	"github.com/jeks313/nebula-control-plane/internal/store/migrate"
+	"github.com/jeks313/nebula-control-plane/internal/wire"
 	"github.com/slackhq/nebula/cert"
 )
 
@@ -39,6 +48,8 @@ func main() {
 		cmdIPAM(os.Args[2:])
 	case "joinkey":
 		cmdJoinKey(os.Args[2:])
+	case "enroll":
+		cmdEnrollCore(os.Args[2:])
 	case "genesis":
 		cmdGenesis(os.Args[2:])
 	case "ca-init":
@@ -68,10 +79,17 @@ usage:
   harbor joinkey create    -name N [-groups a,b] [-max-uses K] [-ttl D] [-auto-issue] [db flags]
   harbor joinkey list      [db flags]
   harbor joinkey revoke    -name N [db flags]
+  harbor enroll worker     [core flags]      run the queue consumer (Core)
+  harbor enroll pending    [db flags]        list enrollments awaiting approval
+  harbor enroll approve    <id> -approver A  [core flags]  approve a pending host
   harbor genesis           -out DIR -operator-a A -operator-b B -lighthouse-pub PEM [...]
   harbor ca-init           -ca-cert OUT [-backend software|pkcs11] [-ca-key OUT] [...]
   harbor issue-cert        -name DEVICE -in-pub HOST.pub -ca-cert CA [-groups a,b] [...]
   harbor version
+
+core flags (enroll worker/approve): -ca-cert, -ca-key/-config-key (software) or
+  -pkcs11-* labels, -hmac-key, -queue-dsn, -queue-key, -pool, -cert-lifetime,
+  -lighthouse "overlayIP=host:port[,...]".
 
 backend flags (ca-init, issue-cert):
   -backend software|pkcs11   software persists the CA key to -ca-key (local dev);
@@ -332,6 +350,231 @@ func cmdJoinKey(args []string) {
 	default:
 		fatalf("joinkey: unknown subcommand %q", args[0])
 	}
+}
+
+// coreFlags wires Core's enrollment consumer (worker/approve).
+type coreFlags struct {
+	driver, dsn                          *string
+	backend                              *string
+	caCert, caKey, configKey             *string
+	module, token, pin, caLbl, configLbl *string
+	hmacKey, queueDSN, queueKey          *string
+	pool                                 *string
+	certLifetime                         *time.Duration
+	maxPerHour                           *int
+	lighthouse                           *string
+}
+
+func addCoreFlags(fs *flag.FlagSet) *coreFlags {
+	cf := &coreFlags{}
+	cf.driver, cf.dsn = dbFlags(fs)
+	cf.backend = fs.String("backend", "software", "CA/config backend: software|pkcs11")
+	cf.caCert = fs.String("ca-cert", "", "CA certificate PEM (required)")
+	cf.caKey = fs.String("ca-key", "", "software CA key (software backend)")
+	cf.configKey = fs.String("config-key", "", "software config-signing key (software backend)")
+	cf.module = fs.String("pkcs11-module", "/usr/lib/softhsm/libsofthsm2.so", "PKCS#11 module")
+	cf.token = fs.String("pkcs11-token", "", "PKCS#11 token label")
+	cf.pin = fs.String("pkcs11-pin", "", "PKCS#11 PIN")
+	cf.caLbl = fs.String("pkcs11-ca-key-label", "", "PKCS#11 CA key label")
+	cf.configLbl = fs.String("pkcs11-config-key-label", "", "PKCS#11 config-signing key label")
+	cf.hmacKey = fs.String("hmac-key", "", "nonce HMAC key (base64url, shared with gateway) (required)")
+	cf.queueDSN = fs.String("queue-dsn", "", "durable queue DSN (required)")
+	cf.queueKey = fs.String("queue-key", "", "queue HMAC key (base64url, shared with gateway) (required)")
+	cf.pool = fs.String("pool", "100.64.0.0/16", "overlay pool CIDR")
+	cf.certLifetime = fs.Duration("cert-lifetime", 30*24*time.Hour, "issued cert validity")
+	cf.maxPerHour = fs.Int("max-certs-per-hour", 0, "signing circuit-breaker ceiling (0=unlimited)")
+	cf.lighthouse = fs.String("lighthouse", "", "lighthouses for the bundle: overlayIP=host:port[,...]")
+	return cf
+}
+
+func (cf *coreFlags) build() (*enrollment.Consumer, *queue.Durable, *store.Store) {
+	if *cf.caCert == "" || *cf.hmacKey == "" || *cf.queueDSN == "" || *cf.queueKey == "" {
+		fatalf("enroll: -ca-cert, -hmac-key, -queue-dsn and -queue-key are required")
+	}
+	pool, err := netip.ParsePrefix(*cf.pool)
+	if err != nil {
+		fatalf("enroll: bad -pool: %v", err)
+	}
+	caPEM, err := os.ReadFile(*cf.caCert)
+	if err != nil {
+		fatalf("enroll: read -ca-cert: %v", err)
+	}
+	caB := cf.loadBackend(*cf.caKey, *cf.caLbl, "CA")
+	cfgB := cf.loadBackend(*cf.configKey, *cf.configLbl, "config-signing")
+
+	s := openStore(*cf.driver, *cf.dsn)
+	audit := func(c context.Context, a, ac, t, d string) error { _, e := s.AppendAudit(c, a, ac, t, d); return e }
+	sg, err := signer.New(signer.Config{
+		CACertPEM: caPEM, Backend: caB,
+		Policy:          signer.Policy{AllowedNetwork: pool, MaxLifetime: *cf.certLifetime},
+		MaxCertsPerHour: *cf.maxPerHour, Audit: audit,
+	})
+	if err != nil {
+		fatalf("enroll: signer: %v", err)
+	}
+	alloc, err := ipam.NewAllocator(s, ipam.Pool{Prefix: pool})
+	if err != nil {
+		fatalf("enroll: ipam: %v", err)
+	}
+	ring, err := nonce.NewKeyring([][]byte{readB64Key(*cf.hmacKey)}, 0, 0)
+	if err != nil {
+		fatalf("enroll: nonce key: %v", err)
+	}
+	q, err := queue.OpenDurable(queue.DurableConfig{DSN: *cf.queueDSN, Key: readB64Key(*cf.queueKey)})
+	if err != nil {
+		fatalf("enroll: queue: %v", err)
+	}
+	cfgPub, _ := cfgB.PublicKey()
+	cons := enrollment.New(enrollment.Config{
+		Store: s, Nonces: ring, Replay: replay.New(2 * time.Minute),
+		Signer: sg, Allocator: alloc, Pool: pool, CertLifetime: *cf.certLifetime,
+		ConfigBackend: cfgB, ConfigKeyID: wire.PubkeyHash(cfgPub),
+		CABundlePEM: caPEM, Lighthouses: parseLighthouses(*cf.lighthouse),
+		Results: q, ResultTTL: time.Hour,
+	})
+	return cons, q, s
+}
+
+func (cf *coreFlags) loadBackend(softKey, label, what string) signer.Backend {
+	switch *cf.backend {
+	case "software":
+		if softKey == "" {
+			fatalf("enroll: software backend requires the %s key path", what)
+		}
+		pem, err := os.ReadFile(softKey)
+		if err != nil {
+			fatalf("enroll: read %s key: %v", what, err)
+		}
+		b, err := signer.LoadSoftwareBackendPEM(pem)
+		if err != nil {
+			fatalf("enroll: load %s key: %v", what, err)
+		}
+		return b
+	case "pkcs11":
+		b, err := signer.NewPKCS11Backend(signer.PKCS11Config{ModulePath: *cf.module, TokenLabel: *cf.token, Pin: *cf.pin, KeyLabel: label})
+		if err != nil {
+			fatalf("enroll: %s pkcs11: %v", what, err)
+		}
+		return b
+	default:
+		fatalf("enroll: unknown backend %q", *cf.backend)
+		return nil
+	}
+}
+
+func cmdEnrollCore(args []string) {
+	if len(args) < 1 {
+		fatalf("enroll: want 'worker', 'pending', or 'approve'")
+	}
+	switch args[0] {
+	case "worker":
+		enrollWorker(args[1:])
+	case "pending":
+		enrollPending(args[1:])
+	case "approve":
+		enrollApprove(args[1:])
+	default:
+		fatalf("enroll: unknown subcommand %q", args[0])
+	}
+}
+
+func enrollWorker(args []string) {
+	fs := flag.NewFlagSet("enroll worker", flag.ExitOnError)
+	cf := addCoreFlags(fs)
+	batch := fs.Int("batch", 16, "max messages claimed per cycle")
+	interval := fs.Duration("interval", 500*time.Millisecond, "idle poll interval")
+	lease := fs.Duration("lease", time.Minute, "claim lease duration")
+	_ = fs.Parse(args)
+
+	cons, q, s := cf.build()
+	defer s.Close()
+	defer q.Close()
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	fmt.Fprintln(os.Stderr, "harbor enroll worker: draining queue (ctrl-c to stop)")
+	for ctx.Err() == nil {
+		n, err := cons.Drain(ctx, q, *batch, *lease)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "harbor enroll worker: drain: %v\n", err)
+		}
+		if n == 0 {
+			select {
+			case <-ctx.Done():
+			case <-time.After(*interval):
+			}
+		} else {
+			fmt.Printf("processed %d enrollment(s)\n", n)
+		}
+	}
+}
+
+func enrollPending(args []string) {
+	fs := flag.NewFlagSet("enroll pending", flag.ExitOnError)
+	driver, dsn := dbFlags(fs)
+	_ = fs.Parse(args)
+	s := openStore(*driver, *dsn)
+	defer s.Close()
+	cons := enrollment.New(enrollment.Config{Store: s}) // Pending() needs only the store
+	pend, err := cons.Pending(context.Background())
+	if err != nil {
+		fatalf("%v", err)
+	}
+	if len(pend) == 0 {
+		fmt.Println("no enrollments awaiting approval")
+		return
+	}
+	fmt.Printf("%-28s %-16s %-22s %s\n", "ENROLLMENT_ID", "DEVICE", "PUBKEY_HASH", "GROUPS")
+	for _, e := range pend {
+		fmt.Printf("%-28s %-16s %-22s %s\n", e.EnrollmentID, e.DeviceName, e.PubkeyHash[:20]+"…", e.Groups)
+	}
+}
+
+func enrollApprove(args []string) {
+	if len(args) < 1 {
+		fatalf("enroll approve: want an <enrollment_id>")
+	}
+	// The enrollment id is positional and comes first; flags follow.
+	id := args[0]
+	fs := flag.NewFlagSet("enroll approve", flag.ExitOnError)
+	cf := addCoreFlags(fs)
+	approver := fs.String("approver", "", "approving admin identity (required)")
+	_ = fs.Parse(args[1:])
+	if *approver == "" {
+		fatalf("enroll approve: -approver is required")
+	}
+	cons, q, s := cf.build()
+	defer s.Close()
+	defer q.Close()
+	res, err := cons.Approve(context.Background(), id, *approver)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	fmt.Printf("approved %s by %s — issued, overlay IP %s\n", id, *approver, res.OverlayIP)
+}
+
+func parseLighthouses(s string) []bundle.Lighthouse {
+	var out []bundle.Lighthouse
+	for _, pair := range parseCSV(s) {
+		ip, addr, ok := strings.Cut(pair, "=")
+		if !ok {
+			fatalf("enroll: bad -lighthouse %q (want overlayIP=host:port)", pair)
+		}
+		out = append(out, bundle.Lighthouse{OverlayIP: ip, PublicAddrs: []string{addr}})
+	}
+	return out
+}
+
+func readB64Key(path string) []byte {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		fatalf("read key %s: %v", path, err)
+	}
+	k, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(string(raw)))
+	if err != nil {
+		fatalf("key %s not base64url: %v", path, err)
+	}
+	return k
 }
 
 func cmdGenesis(args []string) {

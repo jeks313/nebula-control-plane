@@ -150,7 +150,11 @@ Goal: a fresh host enrolls over the network with a one-time token and joins the 
 - **3.9** *(new)* **Manual approval workflow.** The `PENDING` path — **the default for every join-key (non-attested) enrollment** (§4.1c), plus conflicts and non-`auto_issue` flows: an admin queue to **list / approve / deny** enrollments (showing name, pubkey fingerprint, source, join-key id), approver authz via 2.11, full audit. *Done when:* a join-key enrollment waits in the queue and only issues after an authorized approval; denials are recorded.
 - **3.10** *(new)* **Enrollment quota enforcement** (§4.0) — distinct from the signing circuit-breaker: per-cloud-account, per-instance-id, and **per-join-key** caps so one stolen attestation or leaked key can't mint a fleet. *Done when:* exceeding a per-account/per-instance/per-key quota blocks further auto-issue and alerts.
 
-> Demo: bare host → `pilot enroll -join-key …` → (auto_issue key) on the mesh, pinging another node; a default join key instead **lands in the approval queue and joins only after an admin approves**. Pains **#1 (IP) and #2 (joining)** solved for the join-key path. *(Code-complete & wire-proven; the live multi-process mesh demo — gateway + a `harbor` Core drainer + lighthouse in the netns lab — is the remaining harness step.)*
+> Demo: bare host → `pilot enroll -join-key …` → (auto_issue key) on the mesh, pinging another node; a default join key instead **lands in the approval queue and joins only after an admin approves**. Pains **#1 (IP) and #2 (joining)** solved for the join-key path.
+>
+> ✅ **Live multi-process demo proven (2026-06-12):** `harbor genesis` → `gateway` + **`harbor enroll worker`** (Core) as separate processes → `pilot enroll` (auto_issue) joins (IP .2); a default key → **PENDING** → `harbor enroll pending` → `harbor enroll approve` → host **resumes its saved ticket** and joins (IP .3); audit chain intact; enrolled config passes `nebula -test`. Only the actual overlay *ping* needs the netns/root lab.
+
+**Harbor Core CLIs (2026-06-12):** `harbor enroll worker` (durable-queue consumer loop), `harbor enroll pending` (approval queue), `harbor enroll approve <id> -approver A` (the 3.9 primitive). Pilot persists its retrieval ticket (`enroll-ticket.json`, 0600) and **resumes** after approval rather than re-enrolling.
 
 ---
 
