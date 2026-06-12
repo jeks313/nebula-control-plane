@@ -36,6 +36,8 @@ func main() {
 	prevPath := fs.String("hmac-key-prev", "", "optional previous nonce key for rotation overlap")
 	rps := fs.Float64("rate", 5, "edge rate limit (requests/sec per IP and per key)")
 	burst := fs.Int("burst", 20, "edge rate-limit burst")
+	queueDSN := fs.String("queue-dsn", "", "durable queue SQLite DSN (default: in-memory dev queue)")
+	queueKeyPath := fs.String("queue-key", "", "gateway<->Core queue HMAC key (base64url, >=16 bytes)")
 	_ = fs.Parse(os.Args[1:])
 
 	keys, err := loadKeys(*keyPath, *prevPath)
@@ -47,11 +49,14 @@ func main() {
 		fatalf("%v", err)
 	}
 
-	// NOTE: the in-memory queue is the local/dev path (3.3a swaps in a durable,
-	// authenticated queue). Candidates published here are drained by Core.
+	q, err := openQueue(*queueDSN, *queueKeyPath)
+	if err != nil {
+		fatalf("%v", err)
+	}
+
 	gw := gateway.New(gateway.Config{
 		Nonces:  ring,
-		Queue:   queue.NewMemory(),
+		Queue:   q,
 		Limiter: ratelimit.New(*rps, *burst),
 	})
 
@@ -107,6 +112,24 @@ func loadKeys(keyPath, prevPath string) ([][]byte, error) {
 		keys = append(keys, p)
 	}
 	return keys, nil
+}
+
+// openQueue returns the durable queue when -queue-dsn is set, else the in-memory
+// dev queue. The durable queue is the gateway's only persistent dependency — and
+// it is queue-only (no CA/devices/audit), preserving least privilege (P3).
+func openQueue(dsn, keyPath string) (queue.Queue, error) {
+	if dsn == "" {
+		fmt.Fprintln(os.Stderr, "gateway: WARNING: no -queue-dsn; using an in-memory queue (dev only)")
+		return queue.NewMemory(), nil
+	}
+	if keyPath == "" {
+		return nil, fmt.Errorf("-queue-dsn requires -queue-key")
+	}
+	key, err := readKey(keyPath)
+	if err != nil {
+		return nil, err
+	}
+	return queue.OpenDurable(queue.DurableConfig{DSN: dsn, Key: key})
 }
 
 func readKey(path string) ([]byte, error) {
