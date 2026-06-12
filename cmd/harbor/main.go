@@ -21,6 +21,7 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/bundle"
 	"github.com/jeks313/nebula-control-plane/internal/coreapi"
 	"github.com/jeks313/nebula-control-plane/internal/enrollment"
+	"github.com/jeks313/nebula-control-plane/internal/fleet"
 	"github.com/jeks313/nebula-control-plane/internal/genesis"
 	"github.com/jeks313/nebula-control-plane/internal/ipam"
 	"github.com/jeks313/nebula-control-plane/internal/joinkey"
@@ -55,6 +56,8 @@ func main() {
 		cmdEnrollCore(os.Args[2:])
 	case "core-api":
 		cmdCoreAPI(os.Args[2:])
+	case "fleet":
+		cmdFleet(os.Args[2:])
 	case "genesis":
 		cmdGenesis(os.Args[2:])
 	case "ca-init":
@@ -88,6 +91,7 @@ usage:
   harbor enroll pending    [db flags]        list enrollments awaiting approval
   harbor enroll approve    <id> -approver A  [core flags]  approve a pending host
   harbor core-api          -addr ADDR [core flags]  mesh-only API (renew/heartbeat)
+  harbor fleet             [-expiry-within D] [-stale-after D] [-alert] [db flags]
   harbor genesis           -out DIR -operator-a A -operator-b B -lighthouse-pub PEM [...]
   harbor ca-init           -ca-cert OUT [-backend software|pkcs11] [-ca-key OUT] [...]
   harbor issue-cert        -name DEVICE -in-pub HOST.pub -ca-cert CA [-groups a,b] [...]
@@ -559,6 +563,44 @@ func enrollApprove(args []string) {
 		fatalf("%v", err)
 	}
 	fmt.Printf("approved %s by %s — issued, overlay IP %s\n", id, *approver, res.OverlayIP)
+}
+
+func cmdFleet(args []string) {
+	fs := flag.NewFlagSet("fleet", flag.ExitOnError)
+	driver, dsn := dbFlags(fs)
+	expiryWithin := fs.Duration("expiry-within", 7*24*time.Hour, "flag certs expiring within this")
+	staleAfter := fs.Duration("stale-after", 5*time.Minute, "flag devices silent longer than this")
+	clockSkew := fs.Int("clock-skew-ms", 5000, "flag clock offset beyond this (ms)")
+	alert := fs.Bool("alert", false, "exit non-zero if any renewal-health alert fires")
+	_ = fs.Parse(args)
+
+	s := openStore(*driver, *dsn)
+	defer s.Close()
+	rep, err := fleet.Generate(context.Background(), s, time.Now(), fleet.Thresholds{
+		ExpiryWindow: *expiryWithin, StaleAfter: *staleAfter, ClockSkewMs: *clockSkew,
+	})
+	if err != nil {
+		fatalf("%v", err)
+	}
+
+	fmt.Printf("fleet: %d device(s)  expired=%d  expiring<%s=%d  stale>%s=%d  clock-skewed=%d  unhealthy=%d\n",
+		rep.Total, rep.Expired, *expiryWithin, rep.ExpiringSoon, *staleAfter, rep.Stale, rep.ClockSkewed, rep.Unhealthy)
+	if len(rep.AtRisk) > 0 {
+		fmt.Printf("\n%-16s %-16s %-24s %-12s %s\n", "OVERLAY_IP", "DEVICE", "CERT_NOT_AFTER", "LAST_SEEN", "RISK")
+		for _, d := range rep.AtRisk {
+			fmt.Printf("%-16s %-16s %-24s %-12s %v\n", d.OverlayIP, d.Name,
+				d.CertNotAfter.UTC().Format(time.RFC3339), d.LastSeen.UTC().Format("15:04:05"), d.Reasons)
+		}
+	}
+	if len(rep.Alerts) > 0 {
+		fmt.Println("\nALERTS:")
+		for _, a := range rep.Alerts {
+			fmt.Printf("  ⚠ %s\n", a)
+		}
+	}
+	if *alert && rep.HasAlerts() {
+		os.Exit(1)
+	}
 }
 
 func cmdCoreAPI(args []string) {
