@@ -9,10 +9,14 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/jeks313/nebula-control-plane/internal/ipam"
+	"github.com/jeks313/nebula-control-plane/internal/signer"
 	"github.com/jeks313/nebula-control-plane/internal/store"
 	"github.com/jeks313/nebula-control-plane/internal/store/migrate"
+	"github.com/slackhq/nebula/cert"
 )
 
 // version is overridden at build time via -ldflags "-X main.version=...".
@@ -30,6 +34,10 @@ func main() {
 		cmdAudit(os.Args[2:])
 	case "ipam":
 		cmdIPAM(os.Args[2:])
+	case "ca-init":
+		cmdCAInit(os.Args[2:])
+	case "issue-cert":
+		cmdIssueCert(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Printf("harbor %s\n", version)
 	case "help", "-h", "--help":
@@ -50,7 +58,14 @@ usage:
   harbor audit verify      [db flags]
   harbor ipam allocate     -device NAME [-range R] [-pool CIDR] [-quarantine D] [db flags]
   harbor ipam release      -ip ADDR [-pool CIDR] [-quarantine D] [db flags]
+  harbor ca-init           -ca-cert OUT [-backend software|pkcs11] [-ca-key OUT] [...]
+  harbor issue-cert        -name DEVICE -in-pub HOST.pub -ca-cert CA [-groups a,b] [...]
   harbor version
+
+backend flags (ca-init, issue-cert):
+  -backend software|pkcs11   software persists the CA key to -ca-key (local dev);
+                             pkcs11 uses a SoftHSM/HSM token (requires -tags pkcs11):
+  -pkcs11-module PATH -pkcs11-token LABEL -pkcs11-pin PIN -pkcs11-key-label LABEL
 
 db flags default to a local SQLite file (./harbor.db). Set -driver postgres
 -dsn "postgres://user:pass@host/db?sslmode=require" for production.
@@ -200,6 +215,243 @@ func cmdIPAM(args []string) {
 	default:
 		fatalf("ipam: unknown subcommand %q (want allocate|release)", args[0])
 	}
+}
+
+// backendFlags adds the CA-backend selection flags shared by ca-init/issue-cert.
+type backendFlags struct {
+	kind, caKey, module, token, pin, keyLabel *string
+}
+
+func addBackendFlags(fs *flag.FlagSet) *backendFlags {
+	return &backendFlags{
+		kind:     fs.String("backend", "software", "CA backend: software|pkcs11"),
+		caKey:    fs.String("ca-key", "", "software CA private key path (software backend)"),
+		module:   fs.String("pkcs11-module", "/usr/lib/softhsm/libsofthsm2.so", "PKCS#11 module"),
+		token:    fs.String("pkcs11-token", "", "PKCS#11 token label"),
+		pin:      fs.String("pkcs11-pin", "", "PKCS#11 user PIN"),
+		keyLabel: fs.String("pkcs11-key-label", "", "PKCS#11 CA key label"),
+	}
+}
+
+// load returns a backend bound to an existing CA key (issue-cert path).
+func (b *backendFlags) load() (signer.Backend, error) {
+	switch *b.kind {
+	case "software":
+		if *b.caKey == "" {
+			return nil, fmt.Errorf("software backend requires -ca-key")
+		}
+		pem, err := os.ReadFile(*b.caKey)
+		if err != nil {
+			return nil, err
+		}
+		return signer.LoadSoftwareBackendPEM(pem)
+	case "pkcs11":
+		return signer.NewPKCS11Backend(signer.PKCS11Config{
+			ModulePath: *b.module, TokenLabel: *b.token, Pin: *b.pin, KeyLabel: *b.keyLabel,
+		})
+	default:
+		return nil, fmt.Errorf("unknown backend %q (want software|pkcs11)", *b.kind)
+	}
+}
+
+func cmdCAInit(args []string) {
+	fs := flag.NewFlagSet("ca-init", flag.ExitOnError)
+	driver, dsn := dbFlags(fs)
+	bf := addBackendFlags(fs)
+	name := fs.String("name", "harbor-ca", "CA name")
+	netsStr := fs.String("networks", "", "comma-separated CA network CIDRs (optional)")
+	caCertOut := fs.String("ca-cert", "", "output path for the CA certificate (required)")
+	lifetime := fs.Duration("lifetime", 10*365*24*time.Hour, "CA validity")
+	_ = fs.Parse(args)
+	if *caCertOut == "" {
+		fatalf("ca-init: -ca-cert is required")
+	}
+
+	nets, err := parsePrefixes(*netsStr)
+	if err != nil {
+		fatalf("ca-init: %v", err)
+	}
+
+	// Build the backend. For software we generate a fresh key and persist it.
+	var backend signer.Backend
+	var softKeyPEM []byte
+	switch *bf.kind {
+	case "software":
+		if *bf.caKey == "" {
+			fatalf("ca-init: software backend requires -ca-key")
+		}
+		sb, err := signer.NewSoftwareBackend()
+		if err != nil {
+			fatalf("%v", err)
+		}
+		backend, softKeyPEM = sb, sb.PrivateKeyPEM()
+	case "pkcs11":
+		backend, err = bf.load() // key must already exist in the token
+		if err != nil {
+			fatalf("ca-init: %v", err)
+		}
+	default:
+		fatalf("ca-init: unknown backend %q", *bf.kind)
+	}
+
+	now := time.Now()
+	caCert, caPEM, err := signer.SelfSignCA(backend, signer.CATemplate{
+		Name: *name, Networks: nets, NotBefore: now.Add(-time.Hour), NotAfter: now.Add(*lifetime),
+	})
+	if err != nil {
+		fatalf("%v", err)
+	}
+
+	// Persist the software CA key (O_EXCL: never clobber an existing CA key).
+	if softKeyPEM != nil {
+		f, err := os.OpenFile(*bf.caKey, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
+		if err != nil {
+			fatalf("ca-init: write ca-key: %v", err)
+		}
+		_, _ = f.Write(softKeyPEM)
+		f.Close()
+	}
+	if err := os.WriteFile(*caCertOut, caPEM, 0o644); err != nil {
+		fatalf("ca-init: write ca-cert: %v", err)
+	}
+
+	// Record the CA key in the keys table + audit.
+	s := openStore(*driver, *dsn)
+	defer s.Close()
+	pub, _ := backend.PublicKey()
+	if err := s.DB.Create(&store.Key{
+		Name: *name, Kind: "ca", Backend: *bf.kind, Curve: "P256",
+		PublicKey: pub, State: "active", CreatedAt: now.UnixNano(),
+	}).Error; err != nil {
+		fatalf("ca-init: record key: %v", err)
+	}
+	fp, _ := caCert.Fingerprint()
+	if _, err := s.AppendAudit(context.Background(), "operator", "ca-init", *name,
+		fmt.Sprintf(`{"backend":%q,"fingerprint":%q}`, *bf.kind, fp)); err != nil {
+		fatalf("ca-init: audit: %v", err)
+	}
+	fmt.Printf("ca-init: CA %q created (%s)\n  ca-cert: %s\n  fingerprint: %s\n",
+		*name, *bf.kind, *caCertOut, fp)
+}
+
+func cmdIssueCert(args []string) {
+	fs := flag.NewFlagSet("issue-cert", flag.ExitOnError)
+	driver, dsn := dbFlags(fs)
+	bf := addBackendFlags(fs)
+	caCertPath := fs.String("ca-cert", "", "CA certificate path (required)")
+	name := fs.String("name", "", "device name (required)")
+	inPub := fs.String("in-pub", "", "host public key PEM path (required)")
+	groupsStr := fs.String("groups", "", "comma-separated groups")
+	poolStr := fs.String("pool", "100.64.0.0/16", "overlay pool CIDR")
+	subRange := fs.String("range", "", "pool sub-range name")
+	lifetime := fs.Duration("lifetime", 30*24*time.Hour, "certificate validity")
+	maxPerHour := fs.Int("max-per-hour", 0, "signing circuit-breaker ceiling (0=unlimited)")
+	out := fs.String("out", "", "output path for the issued cert (default: stdout)")
+	_ = fs.Parse(args)
+	if *name == "" || *inPub == "" || *caCertPath == "" {
+		fatalf("issue-cert: -name, -in-pub and -ca-cert are required")
+	}
+
+	pubPEM, err := os.ReadFile(*inPub)
+	if err != nil {
+		fatalf("issue-cert: read -in-pub: %v", err)
+	}
+	pub, _, curve, err := cert.UnmarshalPublicKeyFromPEM(pubPEM)
+	if err != nil {
+		fatalf("issue-cert: parse host public key: %v", err)
+	}
+	if curve != cert.Curve_P256 {
+		fatalf("issue-cert: host key curve is %s, want P256", curve)
+	}
+	caPEM, err := os.ReadFile(*caCertPath)
+	if err != nil {
+		fatalf("issue-cert: read -ca-cert: %v", err)
+	}
+	pool, err := netip.ParsePrefix(*poolStr)
+	if err != nil {
+		fatalf("issue-cert: bad -pool: %v", err)
+	}
+
+	backend, err := bf.load()
+	if err != nil {
+		fatalf("issue-cert: %v", err)
+	}
+
+	s := openStore(*driver, *dsn)
+	defer s.Close()
+	audit := func(ctx context.Context, actor, action, target, details string) error {
+		_, err := s.AppendAudit(ctx, actor, action, target, details)
+		return err
+	}
+	sg, err := signer.New(signer.Config{
+		CACertPEM:       caPEM,
+		Backend:         backend,
+		Policy:          signer.Policy{AllowedNetwork: pool, MaxLifetime: *lifetime},
+		MaxCertsPerHour: *maxPerHour,
+		Audit:           audit,
+	})
+	if err != nil {
+		fatalf("issue-cert: %v", err)
+	}
+	alloc, err := ipam.NewAllocator(s, ipam.Pool{Prefix: pool})
+	if err != nil {
+		fatalf("issue-cert: %v", err)
+	}
+
+	ctx := context.Background()
+	ip, err := alloc.Allocate(ctx, *name, *subRange)
+	if err != nil {
+		fatalf("issue-cert: allocate IP: %v", err)
+	}
+
+	// Backdate NotBefore for clock-skew tolerance; keep the validity window
+	// exactly -lifetime so it sits within the policy ceiling.
+	notBefore := time.Now().Add(-5 * time.Minute)
+	tmpl := signer.Template{
+		Name:      *name,
+		Networks:  []netip.Prefix{netip.PrefixFrom(ip, pool.Bits())},
+		Groups:    parseCSV(*groupsStr),
+		NotBefore: notBefore,
+		NotAfter:  notBefore.Add(*lifetime),
+		PublicKey: pub,
+	}
+	c, certPEM, err := sg.Issue(ctx, "operator", tmpl)
+	if err != nil {
+		// Roll back the IP so a failed issue doesn't leak an allocation.
+		_ = alloc.Release(ctx, ip)
+		fatalf("issue-cert: %v", err)
+	}
+
+	if *out == "" {
+		fmt.Print(string(certPEM))
+	} else if err := os.WriteFile(*out, certPEM, 0o644); err != nil {
+		fatalf("issue-cert: write cert: %v", err)
+	}
+	fp, _ := c.Fingerprint()
+	fmt.Fprintf(os.Stderr, "issue-cert: %s -> %s groups=%v\n  fingerprint: %s\n",
+		*name, ip, tmpl.Groups, fp)
+}
+
+func parseCSV(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func parsePrefixes(s string) ([]netip.Prefix, error) {
+	var out []netip.Prefix
+	for _, p := range parseCSV(s) {
+		pre, err := netip.ParsePrefix(p)
+		if err != nil {
+			return nil, fmt.Errorf("bad CIDR %q: %w", p, err)
+		}
+		out = append(out, pre)
+	}
+	return out, nil
 }
 
 func openStore(driver, dsn string) *store.Store {

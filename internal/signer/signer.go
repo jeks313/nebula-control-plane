@@ -229,6 +229,43 @@ func (s *Signer) validate(t Template) error {
 	return nil
 }
 
+// CATemplate describes a self-signed CA certificate.
+type CATemplate struct {
+	Name      string
+	Networks  []netip.Prefix // optional; constrains what leaves may carry
+	NotBefore time.Time
+	NotAfter  time.Time
+}
+
+// SelfSignCA creates a self-signed P256 CA certificate from the backend's key.
+// This is the building block for the genesis ceremony (M3.1); for now it backs
+// `harbor ca-init` and tests.
+func SelfSignCA(b Backend, t CATemplate) (cert.Certificate, []byte, error) {
+	pub, err := b.PublicKey()
+	if err != nil {
+		return nil, nil, fmt.Errorf("signer: backend public key: %w", err)
+	}
+	tbs := &cert.TBSCertificate{
+		Version:   cert.Version2,
+		Name:      t.Name,
+		Networks:  t.Networks,
+		IsCA:      true,
+		NotBefore: t.NotBefore,
+		NotAfter:  t.NotAfter,
+		PublicKey: pub,
+		Curve:     cert.Curve_P256,
+	}
+	c, err := SignTBS(b, tbs, nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("signer: self-sign CA: %w", err)
+	}
+	pem, err := c.MarshalPEM()
+	if err != nil {
+		return nil, nil, fmt.Errorf("signer: marshal CA: %w", err)
+	}
+	return c, pem, nil
+}
+
 // SignTBS signs a to-be-signed certificate with the backend. If ca is nil, tbs
 // must be a CA (self-signed) — useful for the genesis ceremony (M3.1) and tests.
 func SignTBS(b Backend, tbs *cert.TBSCertificate, ca cert.Certificate) (cert.Certificate, error) {
