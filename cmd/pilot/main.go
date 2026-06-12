@@ -36,6 +36,8 @@ func main() {
 		cmdInit(os.Args[2:])
 	case "enroll":
 		cmdEnroll(os.Args[2:])
+	case "renew":
+		cmdRenew(os.Args[2:])
 	case "clock-check":
 		cmdClockCheck(os.Args[2:])
 	case "supervise":
@@ -57,6 +59,7 @@ func usage() {
 usage:
   pilot init [-dir <path>] [-values <values.yml>] [-am-lighthouse]
   pilot enroll -gateway <url> -join-key <secret> -config-pub <pem> [-dir <path>] [-name N] [-groups a,b]
+  pilot renew -core <url> -config-pub <pem> [-dir <path>]
   pilot clock-check [-server <host>] [-max-skew <dur>] [-timeout <dur>]
   pilot supervise -config <nebula.yml> [-nebula <path>] [-sha256 <hex>]
   pilot version
@@ -73,6 +76,36 @@ commands:
               clean shutdown on SIGINT/SIGTERM, SIGHUP hot-reloads nebula on
               Unix, optional binary digest check)
 `)
+}
+
+// cmdRenew rotates to a fresh key and re-certifies the same identity over the
+// mesh (M4.4). The Core API authenticates us by our overlay IP.
+func cmdRenew(args []string) {
+	fs := flag.NewFlagSet("renew", flag.ExitOnError)
+	dir := fs.String("dir", "", "host directory (default: platform-specific)")
+	core := fs.String("core", "", "Core API base URL, reached over the mesh (required)")
+	configPub := fs.String("config-pub", "", "pinned config-signing public key PEM (required)")
+	_ = fs.Parse(args)
+	if *core == "" || *configPub == "" {
+		fatalf("renew: -core and -config-pub are required")
+	}
+	pubPEM, err := os.ReadFile(*configPub)
+	if err != nil {
+		fatalf("renew: read -config-pub: %v", err)
+	}
+	pinned, err := enrollclient.ParsePinnedConfigPub(pubPEM)
+	if err != nil {
+		fatalf("renew: %v", err)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	layout := paths.New(*dir)
+	res, err := enrollclient.Renew(ctx, enrollclient.RenewParams{CoreURL: *core, Layout: layout, PinnedConfigPub: pinned})
+	if err != nil {
+		fatalf("renew: %v", err)
+	}
+	fmt.Printf("renewed: overlay IP %s (new key + cert written)\n", res.OverlayIP)
+	fmt.Printf("  hot-reload the running node: systemctl reload pilot  (or: kill -HUP <pilot-pid>)\n")
 }
 
 // cmdEnroll runs the full join flow (M3.7): nonce -> signed submit -> poll ->

@@ -77,8 +77,25 @@ type NonceResponse struct {
 // JWS `typ` values (spec §3).
 const (
 	TypEnrollRequest = "ncp-request+jws"
+	TypRenewRequest  = "ncp-renew+jws"
 	TypBundle        = "ncp-bundle+jws"
 )
+
+// RenewRequest is the JWS payload of POST /v1/certs/renew (spec §8.1), signed by
+// the host's NEW key (proof of possession). The identity is established by the
+// calling tunnel (source overlay IP), not by this request.
+type RenewRequest struct {
+	ProtocolVersion int    `json:"protocol_version"`
+	Type            string `json:"type"` // "renew"
+	IssuedAt        string `json:"issued_at"`
+	CSR             CSR    `json:"csr"`
+}
+
+// RenewResponse carries the freshly signed bundle.
+type RenewResponse struct {
+	ProtocolVersion int             `json:"protocol_version"`
+	Bundle          json.RawMessage `json:"bundle"`
+}
 
 // PollResponse is the GET /v1/enroll/{id} body (spec §5.3).
 type PollResponse struct {
