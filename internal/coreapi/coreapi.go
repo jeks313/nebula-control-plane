@@ -22,6 +22,7 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/enrollment"
 	"github.com/jeks313/nebula-control-plane/internal/jws"
 	"github.com/jeks313/nebula-control-plane/internal/policy"
+	"github.com/jeks313/nebula-control-plane/internal/rollout"
 	"github.com/jeks313/nebula-control-plane/internal/signer"
 	"github.com/jeks313/nebula-control-plane/internal/store"
 	"github.com/jeks313/nebula-control-plane/internal/wire"
@@ -61,8 +62,12 @@ type Config struct {
 	// discovery in an issued bundle).
 	LighthouseSource func(context.Context) ([]bundle.Lighthouse, error)
 	Policy           *policy.Policy // central firewall (M6); nil -> Pilot's local default
-	Pool             netip.Prefix
-	CertLifetime     time.Duration
+	// Rollout, if set, drives staged canary rollouts (6.6): heartbeats are fed to
+	// the engine, in-wave hosts are commanded toward the target version, and the
+	// renew bundle is stamped with the host's rollout version.
+	Rollout      *rollout.Engine
+	Pool         netip.Prefix
+	CertLifetime time.Duration
 	// RenewCommandThreshold: if a heartbeat reports a cert expiring within this
 	// window, Core replies with a `renew` command (a backstop to Pilot's own
 	// proactive renewal). 0 disables it.
@@ -91,6 +96,17 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/certs/renew", s.handleRenew)
 	mux.HandleFunc("POST /v1/heartbeat", s.handleHeartbeat)
 	return mux
+}
+
+// bundleVersion returns the bundle version to stamp for a host: the rollout's
+// per-host version (6.6) when a rollout governs it, else the baseline 1.
+func (s *Server) bundleVersion(ctx context.Context, overlayIP string) int {
+	if s.cfg.Rollout != nil {
+		if v, ok := s.cfg.Rollout.VersionFor(ctx, overlayIP); ok {
+			return v
+		}
+	}
+	return 1
 }
 
 // lighthouses returns the fleet's lighthouses for a bundle: the live registry
@@ -172,19 +188,34 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 6.6: each heartbeat drives the rollout state machine — convergence widens,
+	// a failed/silent canary auto-rolls-back. A rollout error never fails the
+	// heartbeat (the data plane must keep reporting).
+	if s.cfg.Rollout != nil {
+		if _, err := s.cfg.Rollout.Evaluate(ctx); err != nil {
+			_, _ = s.cfg.Store.AppendAudit(ctx, "system", "rollout-eval-error", dev.OverlayIP, err.Error())
+		}
+	}
+
 	wire.WriteJSON(w, http.StatusOK, wire.HeartbeatResponse{
 		ProtocolVersion: wire.ProtocolVersion,
-		Commands:        s.commandsFor(certNotAfter),
+		Commands:        s.commandsFor(ctx, dev.OverlayIP, req.AppliedBundleVersion, certNotAfter),
 	})
 }
 
-// commandsFor decides the typed commands to return. For 4.6 it's the
-// near-expiry renew backstop; M6 adds apply_bundle from central policy.
-func (s *Server) commandsFor(certNotAfter int64) []wire.Command {
+// commandsFor decides the typed commands to return: the near-expiry renew
+// backstop (4.6) plus, for 6.6, an apply_bundle that drives the host toward its
+// rollout target version (or back to prev after a rollback).
+func (s *Server) commandsFor(ctx context.Context, overlayIP string, appliedVersion int, certNotAfter int64) []wire.Command {
 	var cmds []wire.Command
 	if s.cfg.RenewCommandThreshold > 0 && certNotAfter > 0 {
 		if time.Unix(0, certNotAfter).Sub(s.now()) < s.cfg.RenewCommandThreshold {
 			cmds = append(cmds, wire.Command{Type: wire.CmdRenew})
+		}
+	}
+	if s.cfg.Rollout != nil {
+		if cmd, ok := s.cfg.Rollout.CommandFor(ctx, overlayIP, appliedVersion); ok {
+			cmds = append(cmds, cmd)
 		}
 	}
 	return cmds
@@ -264,7 +295,7 @@ func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
 	}
 
 	b := bundle.Bundle{
-		BundleVersion: 1,
+		BundleVersion: s.bundleVersion(ctx, dev.OverlayIP),
 		IssuedAt:      s.now().UTC().Format(time.RFC3339),
 		Device:        bundle.Device{Name: dev.DeviceName, OverlayIP: dev.OverlayIP, Groups: groups},
 		Certificate:   string(certPEM),
