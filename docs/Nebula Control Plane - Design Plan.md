@@ -331,7 +331,7 @@ Build these specific detections, each wired to an alert:
 - **sigv4 dependency.** Requires every AWS instance to have *an* IAM role (even permission-less). Confirm fleet-wide; some spot/legacy launch paths lack one.
 - **Stack:** **Go** for Harbor and Pilot (matches Nebula; can import `github.com/slackhq/nebula/cert`; static binaries). Postgres for state.
 - **Build vs buy:** overlaps **Defined Networking's** managed plane. The mesh-only management plane + KMS custody + account isolation are the deciding lens — verify whether their product can meet them before building.
-- **Cert-v1 → v2 migration** if any nodes are on Ed25519/v1 — whole mesh must be v2-capable before KMS signing works.
+- **Cert v2 / PKCS#11 — VALIDATED (M0, 2026-06-11).** A SoftHSM-held **P256** CA signs working Nebula certs via `nebula-cert` built `-tags pkcs11` (build pinned to the runtime nebula version; nebula 1.10.3 already defaults to cert v2). The AWS KMS path is the same shape, different backend. Flow: host `keygen` locally → CA `sign -pkcs11 -in-pub` (host key never leaves the host). Any legacy Ed25519/v1 nodes must move to v2 before KMS/HSM signing.
 
 ## 13. Security assurance (how we gain confidence)
 
