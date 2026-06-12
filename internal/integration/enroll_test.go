@@ -239,6 +239,37 @@ func TestEnrollNonceReplayRejected(t *testing.T) {
 	}
 }
 
+// TestEnrollPerKeyQuota is the M3.10 acceptance: a per-key rate quota blocks
+// further enrollments once the ceiling is hit, without over-consuming the key.
+func TestEnrollPerKeyQuota(t *testing.T) {
+	e := setupEnroll(t)
+	ctx := context.Background()
+	secret, _, _ := joinkey.Create(ctx, e.store,
+		joinkey.Params{Name: "q", Groups: []string{"web"}, MaxUses: 0, AutoIssue: true, QuotaPerHour: 2}, time.Now())
+
+	for _, name := range []string{"hq0", "hq1"} {
+		res, err := e.cons.Process(ctx, e.candidate(t, secret, name))
+		if err != nil || res.Status != enrollment.StatusIssued {
+			t.Fatalf("%s: status=%s err=%v", name, res.Status, err)
+		}
+	}
+	// 3rd within the window is blocked.
+	res, err := e.cons.Process(ctx, e.candidate(t, secret, "hq2"))
+	if !errors.Is(err, enrollment.ErrQuota) {
+		t.Fatalf("3rd enroll err = %v, want ErrQuota", err)
+	}
+	if res.Status != enrollment.StatusDenied {
+		t.Fatalf("3rd status = %s, want denied", res.Status)
+	}
+	// The blocked attempt did not consume a use.
+	keys, _ := joinkey.List(ctx, e.store)
+	for _, k := range keys {
+		if k.Name == "q" && k.UsedCount != 2 {
+			t.Fatalf("used_count = %d, want 2 (blocked attempt must not consume)", k.UsedCount)
+		}
+	}
+}
+
 func TestEnrollRevokedKeyDenied(t *testing.T) {
 	e := setupEnroll(t)
 	ctx := context.Background()
