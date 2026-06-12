@@ -27,6 +27,7 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/genesis"
 	"github.com/jeks313/nebula-control-plane/internal/ipam"
 	"github.com/jeks313/nebula-control-plane/internal/joinkey"
+	"github.com/jeks313/nebula-control-plane/internal/lighthouse"
 	"github.com/jeks313/nebula-control-plane/internal/nebulaconfig"
 	"github.com/jeks313/nebula-control-plane/internal/nonce"
 	"github.com/jeks313/nebula-control-plane/internal/policy"
@@ -62,6 +63,8 @@ func main() {
 		cmdCoreAPI(os.Args[2:])
 	case "fleet":
 		cmdFleet(os.Args[2:])
+	case "lighthouse":
+		cmdLighthouse(os.Args[2:])
 	case "policy":
 		cmdPolicy(os.Args[2:])
 	case "genesis":
@@ -98,6 +101,10 @@ usage:
   harbor enroll approve    <id> -approver A  [core flags]  approve a pending host
   harbor core-api          -addr ADDR [core flags]  mesh-only API (renew/heartbeat)
   harbor fleet             [-expiry-within D] [-stale-after D] [-alert] [db flags]
+  harbor lighthouse add    -ip OVERLAY -addrs host:port[,...] [-name N] -actor A [db flags]
+  harbor lighthouse replace -ip OVERLAY -addrs host:port[,...] -actor A [db flags]
+  harbor lighthouse remove -ip OVERLAY -actor A [db flags]   (keeps >=1 active)
+  harbor lighthouse list   [db flags]
   harbor policy validate   <policy.txt>
   harbor policy compile    -groups a,b <policy.txt>   preview a host's firewall
   harbor policy propose    <policy.txt> -proposer A   open a dual-control publish (6.5)
@@ -388,6 +395,7 @@ type coreFlags struct {
 	certLifetime                         *time.Duration
 	maxPerHour                           *int
 	lighthouse                           *string
+	lighthouseDB                         *bool
 	policyFile                           *string
 	policyDB                             *bool
 }
@@ -411,6 +419,7 @@ func addCoreFlags(fs *flag.FlagSet) *coreFlags {
 	cf.certLifetime = fs.Duration("cert-lifetime", 30*24*time.Hour, "issued cert validity")
 	cf.maxPerHour = fs.Int("max-certs-per-hour", 0, "signing circuit-breaker ceiling (0=unlimited)")
 	cf.lighthouse = fs.String("lighthouse", "", "lighthouses for the bundle: overlayIP=host:port[,...]")
+	cf.lighthouseDB = fs.Bool("lighthouse-db", false, "source lighthouses from the DB registry (6.8) instead of -lighthouse")
 	cf.policyFile = fs.String("policy", "", "central firewall policy file (M6); omit for Pilot's local default")
 	cf.policyDB = fs.Bool("policy-db", false, "use the dual-control published policy from the DB (6.5) instead of -policy")
 	return cf
@@ -434,6 +443,16 @@ func (cf *coreFlags) policy(s *store.Store) *policy.Policy {
 	}
 	p := loadPolicy(*cf.policyFile)
 	return &p
+}
+
+// lighthouseSource returns the live registry source when -lighthouse-db is set,
+// else nil (Core then uses the static -lighthouse list).
+func (cf *coreFlags) lighthouseSource(s *store.Store) func(context.Context) ([]bundle.Lighthouse, error) {
+	if !*cf.lighthouseDB {
+		return nil
+	}
+	reg := lighthouse.New(s.DB, nil)
+	return reg.Active
 }
 
 func (cf *coreFlags) build() (*enrollment.Consumer, *queue.Durable, *store.Store) {
@@ -478,7 +497,7 @@ func (cf *coreFlags) build() (*enrollment.Consumer, *queue.Durable, *store.Store
 		Store: s, Nonces: ring, Replay: replay.New(2 * time.Minute),
 		Signer: sg, Allocator: alloc, Pool: pool, CertLifetime: *cf.certLifetime,
 		ConfigBackend: cfgB, ConfigKeyID: wire.PubkeyHash(cfgPub),
-		CABundlePEM: caPEM, Lighthouses: parseLighthouses(*cf.lighthouse), Policy: cf.policy(s),
+		CABundlePEM: caPEM, Lighthouses: parseLighthouses(*cf.lighthouse), LighthouseSource: cf.lighthouseSource(s), Policy: cf.policy(s),
 		Results: q, ResultTTL: time.Hour,
 	})
 	return cons, q, s
@@ -600,6 +619,70 @@ func enrollApprove(args []string) {
 		fatalf("%v", err)
 	}
 	fmt.Printf("approved %s by %s — issued, overlay IP %s\n", id, *approver, res.OverlayIP)
+}
+
+// cmdLighthouse manages the lighthouse fleet registry (6.8). Core serves the
+// active rows into every bundle's static_host_map when run with -lighthouse-db.
+func cmdLighthouse(args []string) {
+	if len(args) < 1 {
+		fatalf("lighthouse: want add|replace|remove|list")
+	}
+	sub := args[0]
+	fs := flag.NewFlagSet("lighthouse "+sub, flag.ExitOnError)
+	driver, dsn := dbFlags(fs)
+	ip := fs.String("ip", "", "lighthouse overlay IP")
+	addrs := fs.String("addrs", "", "comma-separated public underlay addrs host:port")
+	name := fs.String("name", "", "optional friendly hostname")
+	actor := fs.String("actor", "operator", "admin identity for the audit trail")
+	_ = fs.Parse(args[1:])
+
+	s := openStore(*driver, *dsn)
+	defer s.Close()
+	audit := func(c context.Context, a, ac, t, d string) error { _, e := s.AppendAudit(c, a, ac, t, d); return e }
+	reg := lighthouse.New(s.DB, audit)
+	ctx := context.Background()
+
+	switch sub {
+	case "add":
+		if *ip == "" || *addrs == "" {
+			fatalf("lighthouse add: -ip and -addrs are required")
+		}
+		if _, err := reg.Add(ctx, *ip, *name, parseCSV(*addrs), *actor); err != nil {
+			fatalf("lighthouse add: %v", err)
+		}
+		fmt.Printf("added lighthouse %s (%s)\n", *ip, *addrs)
+	case "replace":
+		if *ip == "" || *addrs == "" {
+			fatalf("lighthouse replace: -ip and -addrs are required")
+		}
+		if _, err := reg.Replace(ctx, *ip, parseCSV(*addrs), *actor); err != nil {
+			fatalf("lighthouse replace: %v", err)
+		}
+		fmt.Printf("re-addressed lighthouse %s -> %s\n", *ip, *addrs)
+	case "remove":
+		if *ip == "" {
+			fatalf("lighthouse remove: -ip is required")
+		}
+		if err := reg.Remove(ctx, *ip, *actor); err != nil {
+			fatalf("lighthouse remove: %v", err)
+		}
+		fmt.Printf("removed lighthouse %s (no longer advertised)\n", *ip)
+	case "list":
+		rows, err := reg.List(ctx)
+		if err != nil {
+			fatalf("lighthouse list: %v", err)
+		}
+		if len(rows) == 0 {
+			fmt.Println("no lighthouses registered")
+			return
+		}
+		fmt.Printf("%-16s %-9s %-20s %s\n", "OVERLAY_IP", "STATE", "HOSTNAME", "PUBLIC_ADDRS")
+		for _, r := range rows {
+			fmt.Printf("%-16s %-9s %-20s %v\n", r.OverlayIP, r.State, r.Hostname, r.Addrs())
+		}
+	default:
+		fatalf("lighthouse: unknown subcommand %q", sub)
+	}
 }
 
 func cmdPolicy(args []string) {
@@ -908,7 +991,7 @@ func cmdCoreAPI(args []string) {
 	cfgPub, _ := cfgB.PublicKey()
 	api := coreapi.New(coreapi.Config{
 		Store: s, Signer: sg, ConfigBackend: cfgB, ConfigKeyID: wire.PubkeyHash(cfgPub),
-		CABundlePEM: caPEM, Lighthouses: parseLighthouses(*cf.lighthouse), Policy: cf.policy(s),
+		CABundlePEM: caPEM, Lighthouses: parseLighthouses(*cf.lighthouse), LighthouseSource: cf.lighthouseSource(s), Policy: cf.policy(s),
 		Pool: pool, CertLifetime: *cf.certLifetime,
 	})
 	srv := &http.Server{

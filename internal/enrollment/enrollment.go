@@ -96,9 +96,13 @@ type Config struct {
 	ConfigKeyID   string         // its kid (pinned by Pilot)
 	CABundlePEM   []byte         // CA cert PEM for the bundle's ca_bundle
 	Lighthouses   []bundle.Lighthouse
-	Policy        *policy.Policy // central firewall (M6); nil -> Pilot's local default
-	Results       *queue.Durable // result store (gateway↔Core shared store)
-	ResultTTL     time.Duration  // result/ticket validity (0 -> 1h)
+	// LighthouseSource, if set, is consulted at bundle-build time so registry
+	// changes (6.8) propagate live; overrides Lighthouses, with a fallback to it
+	// on error (a transient registry read must not sever discovery).
+	LighthouseSource func(context.Context) ([]bundle.Lighthouse, error)
+	Policy           *policy.Policy // central firewall (M6); nil -> Pilot's local default
+	Results          *queue.Durable // result store (gateway↔Core shared store)
+	ResultTTL        time.Duration  // result/ticket validity (0 -> 1h)
 }
 
 // Consumer processes enrollment candidates.
@@ -209,7 +213,7 @@ func (c *Consumer) Process(ctx context.Context, cand queue.Candidate) (Result, e
 	if err != nil {
 		return Result{}, err
 	}
-	bundleJWS, err := c.buildBundle(deviceName, ip.String(), jk.GroupList(), certPEM, notAfter)
+	bundleJWS, err := c.buildBundle(ctx, deviceName, ip.String(), jk.GroupList(), certPEM, notAfter)
 	if err != nil {
 		return Result{}, err
 	}
@@ -249,7 +253,7 @@ func (c *Consumer) Approve(ctx context.Context, enrollmentID, approver string) (
 		return Result{}, err
 	}
 	// Flip the poll result to issued (secret hash preserved from the pending row).
-	bundleJWS, err := c.buildBundle(e.DeviceName, ip.String(), groups, certPEM, notAfter)
+	bundleJWS, err := c.buildBundle(ctx, e.DeviceName, ip.String(), groups, certPEM, notAfter)
 	if err != nil {
 		return Result{}, err
 	}
@@ -359,7 +363,7 @@ func (c *Consumer) issue(ctx context.Context, actor, deviceName string, pubBytes
 
 // buildBundle assembles + signs the config bundle (3.6). Returns nil if no
 // config-signing backend is configured.
-func (c *Consumer) buildBundle(deviceName, ip string, groups []string, certPEM []byte, notAfter time.Time) ([]byte, error) {
+func (c *Consumer) buildBundle(ctx context.Context, deviceName, ip string, groups []string, certPEM []byte, notAfter time.Time) ([]byte, error) {
 	if c.cfg.ConfigBackend == nil {
 		return nil, nil
 	}
@@ -370,10 +374,24 @@ func (c *Consumer) buildBundle(deviceName, ip string, groups []string, certPEM [
 		Certificate:   string(certPEM),
 		CABundle:      []string{string(c.cfg.CABundlePEM)},
 		Firewall:      bundle.CompileFirewall(c.cfg.Policy, groups),
-		Lighthouses:   c.cfg.Lighthouses,
+		Lighthouses:   c.lighthouses(ctx),
 		NotAfter:      notAfter.UTC().Format(time.RFC3339),
 	}
 	return bundle.Sign(c.cfg.ConfigBackend, c.cfg.ConfigKeyID, b)
+}
+
+// lighthouses returns the fleet's lighthouses for a bundle: the live registry
+// (6.8) when a source is set, else the static list; a failed read falls back to
+// the static list rather than severing discovery.
+func (c *Consumer) lighthouses(ctx context.Context) []bundle.Lighthouse {
+	if c.cfg.LighthouseSource == nil {
+		return c.cfg.Lighthouses
+	}
+	lhs, err := c.cfg.LighthouseSource(ctx)
+	if err != nil || len(lhs) == 0 {
+		return c.cfg.Lighthouses
+	}
+	return lhs
 }
 
 // writeResult records a poll result (3.6a). No-op if no result store is set.
