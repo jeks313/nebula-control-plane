@@ -5,13 +5,18 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
 
+	"github.com/jeks313/nebula-control-plane/internal/hostkey"
+	"github.com/jeks313/nebula-control-plane/internal/nebulaconfig"
+	"github.com/jeks313/nebula-control-plane/internal/paths"
 	"github.com/jeks313/nebula-control-plane/internal/supervisor"
+	"gopkg.in/yaml.v3"
 )
 
 // version is overridden at build time via -ldflags "-X main.version=...".
@@ -23,6 +28,8 @@ func main() {
 		os.Exit(2)
 	}
 	switch os.Args[1] {
+	case "init":
+		cmdInit(os.Args[2:])
 	case "supervise":
 		cmdSupervise(os.Args[2:])
 	case "version", "--version", "-v":
@@ -40,13 +47,93 @@ func usage() {
 	fmt.Fprint(os.Stderr, `pilot — Nebula Control Plane host agent
 
 usage:
+  pilot init [-dir <path>] [-values <values.yml>] [-am-lighthouse]
   pilot supervise -config <nebula.yml> [-nebula <path>] [-sha256 <hex>]
   pilot version
 
 commands:
+  init        lay out the host dir, generate the host key (P256), and render
+              config.yml. Does NOT overwrite an existing host key.
   supervise   run and supervise the nebula subprocess (restart w/ backoff,
               clean shutdown on SIGINT/SIGTERM, optional binary digest check)
 `)
+}
+
+// cmdInit prepares a host: secure layout dir, P256 host key (generated once,
+// never clobbered), and a rendered config.yml. The signed cert + CA bundle are
+// provisioned separately by enrollment (M3); init reports they're still needed.
+func cmdInit(args []string) {
+	fs := flag.NewFlagSet("init", flag.ExitOnError)
+	dir := fs.String("dir", "", "base directory for host identity (default: platform-specific)")
+	valuesPath := fs.String("values", "", "optional YAML values file for config policy")
+	amLH := fs.Bool("am-lighthouse", false, "render this node as a lighthouse")
+	_ = fs.Parse(args)
+
+	layout := paths.New(*dir)
+	if err := layout.Ensure(); err != nil {
+		fatalf("init: %v", err)
+	}
+
+	// 1. Host key (M1.4): generate once; never overwrite a live key.
+	keyGenerated := false
+	if _, err := os.Stat(layout.HostKey()); errors.Is(err, os.ErrNotExist) {
+		kp, err := hostkey.Generate()
+		if err != nil {
+			fatalf("init: %v", err)
+		}
+		if err := kp.WritePrivateKey(layout.HostKey()); err != nil {
+			fatalf("init: %v", err)
+		}
+		if err := kp.WritePublicKey(layout.HostPub()); err != nil {
+			fatalf("init: %v", err)
+		}
+		keyGenerated = true
+	} else if err != nil {
+		fatalf("init: stat host key: %v", err)
+	}
+
+	// 2. Config (M1.7): policy from values file (if any), PKI paths from layout.
+	var v nebulaconfig.Values
+	if *valuesPath != "" {
+		raw, err := os.ReadFile(*valuesPath)
+		if err != nil {
+			fatalf("init: read values: %v", err)
+		}
+		if err := yaml.Unmarshal(raw, &v); err != nil {
+			fatalf("init: parse values: %v", err)
+		}
+	}
+	if *amLH {
+		v.AmLighthouse = true
+	}
+	v.CACertPath = layout.CABundle()
+	v.CertPath = layout.HostCert()
+	v.KeyPath = layout.HostKey()
+	v.Defaults()
+
+	cfg, err := nebulaconfig.Render(v)
+	if err != nil {
+		fatalf("init: %v", err)
+	}
+	if err := os.WriteFile(layout.Config(), cfg, 0644); err != nil {
+		fatalf("init: write config: %v", err)
+	}
+
+	fmt.Printf("pilot init: base dir %s\n", layout.Base)
+	if keyGenerated {
+		fmt.Printf("  generated host key   %s\n", layout.HostKey())
+		fmt.Printf("  wrote public key     %s  (submit to control plane for signing)\n", layout.HostPub())
+	} else {
+		fmt.Printf("  host key exists      %s  (left untouched)\n", layout.HostKey())
+	}
+	fmt.Printf("  rendered config      %s\n", layout.Config())
+	fmt.Printf("  still needed before start: %s (CA bundle) and %s (signed cert) — see enrollment (M3)\n",
+		layout.CABundle(), layout.HostCert())
+}
+
+func fatalf(format string, a ...any) {
+	fmt.Fprintf(os.Stderr, "pilot: "+format+"\n", a...)
+	os.Exit(1)
 }
 
 func cmdSupervise(args []string) {

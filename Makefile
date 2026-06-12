@@ -6,6 +6,7 @@ help:
 	@echo "build targets:"
 	@echo "  build        build pilot + harbor into bin/"
 	@echo "  test         go test ./..."
+	@echo "  m1-smoke     run the M1 acceptance (needs nebula + nebula-cert)"
 	@echo "  tidy         go mod tidy"
 	@echo
 	@echo "M0 spike targets:"
@@ -29,6 +30,10 @@ build:
 .PHONY: test
 test:
 	go test ./...
+
+.PHONY: m1-smoke
+m1-smoke:
+	go test -v -run TestPilotInitProducesConfigNebulaAccepts ./internal/integration
 
 .PHONY: tidy
 tidy:
