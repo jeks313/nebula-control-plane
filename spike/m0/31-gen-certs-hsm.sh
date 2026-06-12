@@ -18,18 +18,28 @@ export SOFTHSM2_CONF="${RUN}/softhsm2.conf"
 # PKCS#11 URI for the CA key in SoftHSM. RFC 7512 style.
 P11_URI="pkcs11:token=${SOFTHSM_TOKEN};object=${CA_KEY_LABEL};type=private?module-path=${PKCS11_MODULE}&pin-value=${SOFTHSM_PIN}"
 
-log "creating CA cert from the HSM-held P256 key (key stays in the token)..."
-# The CA private key is in the HSM, so we only get a ca.crt out (no ca.key file).
-"$CERT" ca -curve P256 -pkcs11 "$P11_URI" \
-  -name "Harbor M0 HSM CA" -out-crt "${RUN}/ca.crt"
+if [[ -f "${RUN}/ca.crt" ]]; then
+  log "ca.crt exists — skipping CA creation"
+else
+  log "creating CA cert from the HSM-held P256 key (key stays in the token)..."
+  # CA private key is in the HSM, so we only get a ca.crt out (no ca.key file).
+  # -curve selects the CA curve; sign() infers curve from the CA (no -curve there).
+  "$CERT" ca -curve P256 -pkcs11 "$P11_URI" \
+    -name "Harbor M0 HSM CA" -out-crt "${RUN}/ca.crt"
+fi
 
 sign() { # name overlay_ip groups
   local name="$1" ip="$2" groups="${3:-}"
+  if [[ -f "${RUN}/${name}.crt" ]]; then log "${name}.crt exists — skipping"; return; fi
+  # P1: the HOST keypair is generated locally (key never touches the CA/HSM).
+  log "keygen ${name} (host private key stays local)"
+  "$CERT" keygen -curve P256 -out-key "${RUN}/${name}.key" -out-pub "${RUN}/${name}.pub"
+  # The HSM-held CA signs the host's PUBLIC key only (-in-pub).
   log "HSM-signing ${name} (${ip}${groups:+ groups=$groups})"
-  "$CERT" sign -curve P256 -pkcs11 "$P11_URI" \
-    -ca-crt "${RUN}/ca.crt" \
+  "$CERT" sign -pkcs11 "$P11_URI" \
+    -ca-crt "${RUN}/ca.crt" -in-pub "${RUN}/${name}.pub" \
     -name "$name" -ip "$ip" ${groups:+-groups "$groups"} \
-    -out-crt "${RUN}/${name}.crt" -out-key "${RUN}/${name}.key"
+    -out-crt "${RUN}/${name}.crt"
 }
 
 sign lh "100.64.0.1/16"
