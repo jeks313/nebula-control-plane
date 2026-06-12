@@ -15,3 +15,6 @@ spike/m0/tools/
 # editor / OS
 .DS_Store
 *.swp
+
+# local SQLite dev databases
+*.db

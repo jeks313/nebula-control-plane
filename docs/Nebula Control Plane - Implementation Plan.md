@@ -116,6 +116,12 @@ Goal: the minimum Harbor that can mint a cert safely, **plus the platform plumbi
 
 > Demo: `harbor issue-cert` mints a KMS-signed cert with IPAM + validation + circuit-breaker + audit — the whole trust spine — and every action is observable, the audit is exported to WORM, and a privileged CLI action requires two approvers.
 
+**M2 progress (2026-06-12).**
+- **Data layer decision:** **GORM** with a one-line dialect swap — **SQLite** (pure-Go `glebarez`, cgo-free) for minimal-footprint local dev, **Postgres** (`gorm.io/driver/postgres`) slottable for prod. `internal/store` is the single data layer; schema is owned by versioned migrations, not AutoMigrate.
+- ✅ **2.1** — migrations + first tables (`keys`, `audit_log`). `internal/store/migrate` runs **gormigrate** over the GORM connection with **per-dialect SQL files** (sqlite/postgres), so up/down work on both backends. *(golang-migrate was rejected: its sqlite driver blank-imports modernc, colliding with the pure-Go GORM sqlite driver on the `"sqlite"` name.)* Timestamps are stored as integer nanoseconds for clean portability. `harbor migrate up|down`. **Acceptance:** test applies + rolls back, **and reopens a fresh connection** to prove the migration persisted to disk (guards against accidental in-memory DBs — a real bug caught during M2).
+- ✅ **2.2** — hash-chained audit log. Append-only; each row's SHA-256 commits to its seq, ts, actor/action/target/details, **and the previous row's hash** (length-prefixed fields, no concatenation ambiguity). Genesis row chains from 32 zero bytes. `AppendAudit` is serialized (single logical writer; HA multi-writer needs a DB advisory lock → tracked for M9.5). `VerifyAudit` walks the chain and fails at the first hash mismatch (tamper), broken link, or seq gap (deletion/reorder). `harbor audit add|verify`. **Acceptance proven (unit + CLI):** a clean chain verifies; mutating a row makes `audit verify` fail with `hash mismatch at seq N` and exit 1; deleting a middle row is caught as a gap. *(Truncating the latest rows is only catchable against the WORM anchor — 2.13.)*
+- **Still open in M2:** 2.3–2.8 (signer/KMS spine, template validation, circuit-breaker, IPAM, KMS isolation, `harbor issue-cert`) and 2.9–2.13 (observability, secrets, dual-control/RBAC, device-state, WORM export).
+
 ---
 
 ## Milestone 3 — First real join: token enrollment (gateway + core)
