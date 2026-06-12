@@ -29,6 +29,8 @@ var (
 	ErrUnknownSubRange = errors.New("ipam: unknown sub-range")
 	ErrNotAllocated    = errors.New("ipam: address is not allocated")
 	ErrContended       = errors.New("ipam: allocation contended, retries exhausted")
+	ErrAddrTaken       = errors.New("ipam: address already allocated")
+	ErrOutOfPool       = errors.New("ipam: address not in pool")
 )
 
 // Device is an enrolled host identity (minimal until the 2.12 lifecycle work).
@@ -128,6 +130,36 @@ func (a *Allocator) Allocate(ctx context.Context, deviceName, subRange string) (
 		return netip.Addr{}, fmt.Errorf("ipam: allocate: %w", err)
 	}
 	return netip.Addr{}, ErrContended
+}
+
+// AllocateSpecific leases a chosen address (e.g. a reserved lighthouse IP at
+// genesis). Returns ErrAddrTaken if it is already in use, ErrOutOfPool if it is
+// outside the pool.
+func (a *Allocator) AllocateSpecific(ctx context.Context, deviceName string, addr netip.Addr) error {
+	if !a.pool.Prefix.Contains(addr) {
+		return fmt.Errorf("%w: %s not in %s", ErrOutOfPool, addr, a.pool.Prefix)
+	}
+	dev, err := a.ensureDevice(ctx, deviceName)
+	if err != nil {
+		return err
+	}
+	if err := a.purgeExpiredQuarantine(ctx); err != nil {
+		return err
+	}
+	alloc := Allocation{
+		IP:          addr.String(),
+		DeviceID:    dev.ID,
+		State:       stateAllocated,
+		AllocatedAt: a.now().UnixNano(),
+	}
+	err = a.db.WithContext(ctx).Create(&alloc).Error
+	if errors.Is(err, gorm.ErrDuplicatedKey) {
+		return fmt.Errorf("%w: %s", ErrAddrTaken, addr)
+	}
+	if err != nil {
+		return fmt.Errorf("ipam: allocate specific: %w", err)
+	}
+	return nil
 }
 
 // Release returns an address to the pool. With a QuarantineTTL it is held

@@ -9,9 +9,11 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/jeks313/nebula-control-plane/internal/genesis"
 	"github.com/jeks313/nebula-control-plane/internal/ipam"
 	"github.com/jeks313/nebula-control-plane/internal/signer"
 	"github.com/jeks313/nebula-control-plane/internal/store"
@@ -34,6 +36,8 @@ func main() {
 		cmdAudit(os.Args[2:])
 	case "ipam":
 		cmdIPAM(os.Args[2:])
+	case "genesis":
+		cmdGenesis(os.Args[2:])
 	case "ca-init":
 		cmdCAInit(os.Args[2:])
 	case "issue-cert":
@@ -58,6 +62,7 @@ usage:
   harbor audit verify      [db flags]
   harbor ipam allocate     -device NAME [-range R] [-pool CIDR] [-quarantine D] [db flags]
   harbor ipam release      -ip ADDR [-pool CIDR] [-quarantine D] [db flags]
+  harbor genesis           -out DIR -operator-a A -operator-b B -lighthouse-pub PEM [...]
   harbor ca-init           -ca-cert OUT [-backend software|pkcs11] [-ca-key OUT] [...]
   harbor issue-cert        -name DEVICE -in-pub HOST.pub -ca-cert CA [-groups a,b] [...]
   harbor version
@@ -251,6 +256,129 @@ func (b *backendFlags) load() (signer.Backend, error) {
 		})
 	default:
 		return nil, fmt.Errorf("unknown backend %q (want software|pkcs11)", *b.kind)
+	}
+}
+
+func cmdGenesis(args []string) {
+	fs := flag.NewFlagSet("genesis", flag.ExitOnError)
+	driver, dsn := dbFlags(fs)
+	backend := fs.String("backend", "software", "CA/config-signing backend: software|pkcs11")
+	outDir := fs.String("out", "", "output directory for keys/certs/manifest (required)")
+	opA := fs.String("operator-a", "", "first ceremony operator (required)")
+	opB := fs.String("operator-b", "", "second ceremony operator (required, must differ)")
+	caName := fs.String("ca-name", "harbor-ca", "CA name")
+	poolStr := fs.String("pool", "100.64.0.0/16", "overlay pool CIDR")
+	lhName := fs.String("lighthouse-name", "lighthouse-1", "first lighthouse name")
+	lhIPStr := fs.String("lighthouse-ip", "100.64.0.1", "lighthouse overlay IP")
+	lhAddr := fs.String("lighthouse-addr", "", "lighthouse public underlay addr (host:port)")
+	lhPub := fs.String("lighthouse-pub", "", "lighthouse host public key PEM (from `pilot init`) (required)")
+	caLife := fs.Duration("ca-lifetime", 10*365*24*time.Hour, "CA validity")
+	certLife := fs.Duration("cert-lifetime", 365*24*time.Hour, "lighthouse cert validity")
+	// software key paths (default under -out)
+	caKeyPath := fs.String("ca-key", "", "software CA key out (default <out>/ca.key)")
+	cfgKeyPath := fs.String("config-key", "", "software config-signing key out (default <out>/config-signing.key)")
+	// pkcs11 labels
+	module := fs.String("pkcs11-module", "/usr/lib/softhsm/libsofthsm2.so", "PKCS#11 module")
+	token := fs.String("pkcs11-token", "", "PKCS#11 token label")
+	pin := fs.String("pkcs11-pin", "", "PKCS#11 PIN")
+	caLabel := fs.String("pkcs11-ca-key-label", "", "PKCS#11 CA key label")
+	cfgLabel := fs.String("pkcs11-config-key-label", "", "PKCS#11 config-signing key label")
+	_ = fs.Parse(args)
+
+	if *outDir == "" || *opA == "" || *opB == "" || *lhPub == "" {
+		fatalf("genesis: -out, -operator-a, -operator-b and -lighthouse-pub are required")
+	}
+	pool, err := netip.ParsePrefix(*poolStr)
+	if err != nil {
+		fatalf("genesis: bad -pool: %v", err)
+	}
+	lhIP, err := netip.ParseAddr(*lhIPStr)
+	if err != nil {
+		fatalf("genesis: bad -lighthouse-ip: %v", err)
+	}
+	lhPubPEM, err := os.ReadFile(*lhPub)
+	if err != nil {
+		fatalf("genesis: read -lighthouse-pub: %v", err)
+	}
+	if err := os.MkdirAll(*outDir, 0o700); err != nil {
+		fatalf("genesis: mkdir out: %v", err)
+	}
+	if *caKeyPath == "" {
+		*caKeyPath = filepath.Join(*outDir, "ca.key")
+	}
+	if *cfgKeyPath == "" {
+		*cfgKeyPath = filepath.Join(*outDir, "config-signing.key")
+	}
+
+	// Build the two backends.
+	var caB, cfgB signer.Backend
+	var caSoft, cfgSoft *signer.SoftwareBackend
+	switch *backend {
+	case "software":
+		if caSoft, err = signer.NewSoftwareBackend(); err != nil {
+			fatalf("%v", err)
+		}
+		if cfgSoft, err = signer.NewSoftwareBackend(); err != nil {
+			fatalf("%v", err)
+		}
+		caB, cfgB = caSoft, cfgSoft
+	case "pkcs11":
+		if caB, err = signer.NewPKCS11Backend(signer.PKCS11Config{ModulePath: *module, TokenLabel: *token, Pin: *pin, KeyLabel: *caLabel}); err != nil {
+			fatalf("genesis: CA backend: %v", err)
+		}
+		if cfgB, err = signer.NewPKCS11Backend(signer.PKCS11Config{ModulePath: *module, TokenLabel: *token, Pin: *pin, KeyLabel: *cfgLabel}); err != nil {
+			fatalf("genesis: config-signing backend: %v", err)
+		}
+	default:
+		fatalf("genesis: unknown backend %q", *backend)
+	}
+
+	s := openStore(*driver, *dsn)
+	defer s.Close()
+	if err := migrate.Up(s.DB); err != nil { // genesis is bootstrap: ensure schema
+		fatalf("genesis: migrate: %v", err)
+	}
+
+	res, err := genesis.Run(context.Background(), s, caB, cfgB, genesis.Params{
+		OperatorA: *opA, OperatorB: *opB, CAName: *caName, Pool: pool,
+		LighthouseName: *lhName, LighthouseIP: lhIP, LighthouseAddr: *lhAddr,
+		LighthousePub: lhPubPEM, CALifetime: *caLife, CertLifetime: *certLife,
+	})
+	if err != nil {
+		fatalf("%v", err)
+	}
+
+	// Persist software private keys (O_EXCL — never clobber a trust root).
+	if caSoft != nil {
+		writeKeyExcl(*caKeyPath, caSoft.PrivateKeyPEM())
+		writeKeyExcl(*cfgKeyPath, cfgSoft.PrivateKeyPEM())
+	}
+	writeOut(filepath.Join(*outDir, "ca.crt"), res.CACertPEM)
+	writeOut(filepath.Join(*outDir, "config-signing.pub"), res.ConfigSigningPubPEM)
+	writeOut(filepath.Join(*outDir, *lhName+".crt"), res.LighthouseCertPEM)
+	writeOut(filepath.Join(*outDir, "genesis.json"), res.ManifestJSON)
+
+	fmt.Printf("genesis complete (%s backend), operators: %s + %s\n", *backend, *opA, *opB)
+	fmt.Printf("  CA fingerprint:        %s\n", res.CAFingerprint)
+	fmt.Printf("  config-signing key id: %s\n", res.ConfigSigningKeyID)
+	fmt.Printf("  lighthouse %s @ %s, cert %s\n", *lhName, res.LighthouseIP, res.LighthouseFingerprint)
+	fmt.Printf("  wrote: %s/{ca.crt,config-signing.pub,%s.crt,genesis.json}\n", *outDir, *lhName)
+}
+
+func writeKeyExcl(path string, b []byte) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
+	if err != nil {
+		fatalf("genesis: write key %s: %v", path, err)
+	}
+	defer f.Close()
+	if _, err := f.Write(b); err != nil {
+		fatalf("genesis: write key %s: %v", path, err)
+	}
+}
+
+func writeOut(path string, b []byte) {
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		fatalf("genesis: write %s: %v", path, err)
 	}
 }
 
