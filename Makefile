@@ -36,6 +36,10 @@ test:
 m1-smoke:
 	go test -v -run TestPilotInitProducesConfigNebulaAccepts ./internal/integration
 
+.PHONY: signer-softhsm
+signer-softhsm:
+	CGO_ENABLED=1 go test -tags pkcs11 -run TestPKCS11SoftHSMEndToEnd -v ./internal/signer
+
 .PHONY: systemd-verify
 systemd-verify:
 	systemd-analyze verify packaging/systemd/pilot.service
