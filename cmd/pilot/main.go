@@ -55,7 +55,8 @@ commands:
   init        lay out the host dir, generate the host key (P256), and render
               config.yml. Does NOT overwrite an existing host key.
   supervise   run and supervise the nebula subprocess (restart w/ backoff,
-              clean shutdown on SIGINT/SIGTERM, optional binary digest check)
+              clean shutdown on SIGINT/SIGTERM, SIGHUP hot-reloads nebula on
+              Unix, optional binary digest check)
 `)
 }
 
@@ -157,6 +158,7 @@ func cmdSupervise(args []string) {
 		ConfigPath:     *configPath,
 		ExpectedSHA256: *sha,
 	}
+	installReload(ctx, sup) // SIGHUP -> hot reload nebula (Unix); no-op on Windows
 	if err := sup.Run(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "pilot: %v\n", err)
 		os.Exit(1)
