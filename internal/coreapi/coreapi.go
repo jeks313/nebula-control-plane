@@ -55,9 +55,14 @@ type Config struct {
 	ConfigKeyID   string
 	CABundlePEM   []byte
 	Lighthouses   []bundle.Lighthouse
-	Policy        *policy.Policy // central firewall (M6); nil -> Pilot's local default
-	Pool          netip.Prefix
-	CertLifetime  time.Duration
+	// LighthouseSource, if set, is consulted at bundle-build time so registry
+	// changes (6.8) propagate live; it overrides the static Lighthouses. On error
+	// Core falls back to Lighthouses (a transient registry read must never sever
+	// discovery in an issued bundle).
+	LighthouseSource func(context.Context) ([]bundle.Lighthouse, error)
+	Policy           *policy.Policy // central firewall (M6); nil -> Pilot's local default
+	Pool             netip.Prefix
+	CertLifetime     time.Duration
 	// RenewCommandThreshold: if a heartbeat reports a cert expiring within this
 	// window, Core replies with a `renew` command (a backstop to Pilot's own
 	// proactive renewal). 0 disables it.
@@ -86,6 +91,20 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/certs/renew", s.handleRenew)
 	mux.HandleFunc("POST /v1/heartbeat", s.handleHeartbeat)
 	return mux
+}
+
+// lighthouses returns the fleet's lighthouses for a bundle: the live registry
+// (6.8) when a source is configured, falling back to the static list on error
+// or when no source is set. A failed registry read must never sever discovery.
+func (s *Server) lighthouses(ctx context.Context) []bundle.Lighthouse {
+	if s.cfg.LighthouseSource == nil {
+		return s.cfg.Lighthouses
+	}
+	lhs, err := s.cfg.LighthouseSource(ctx)
+	if err != nil || len(lhs) == 0 {
+		return s.cfg.Lighthouses
+	}
+	return lhs
 }
 
 // device resolves the calling tunnel's identity from its source overlay IP
@@ -251,7 +270,7 @@ func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
 		Certificate:   string(certPEM),
 		CABundle:      []string{string(s.cfg.CABundlePEM)},
 		Firewall:      bundle.CompileFirewall(s.cfg.Policy, groups),
-		Lighthouses:   s.cfg.Lighthouses,
+		Lighthouses:   s.lighthouses(ctx),
 		NotAfter:      notAfter.UTC().Format(time.RFC3339),
 	}
 	bundleJWS, err := bundle.Sign(s.cfg.ConfigBackend, s.cfg.ConfigKeyID, b)
