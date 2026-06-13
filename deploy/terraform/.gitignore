@@ -17,5 +17,10 @@ override.tf.json
 *_override.tf
 *_override.tf.json
 
+# Lab artifacts pulled/written by bootstrap-genesis.sh (certs + the config-signing
+# pin). The pin is a public key (not secret), but lab output shouldn't be committed.
+config-signing.pub
+*.crt
+
 # NOTE: .terraform.lock.hcl is intentionally NOT ignored — commit it to pin
 # provider versions/hashes.

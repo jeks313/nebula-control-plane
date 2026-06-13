@@ -27,19 +27,22 @@ Nebula data plane is installed at /usr/local/bin/nebula (+ nebula-cert).
 This box has an IAM instance role + IMDSv2-only, so it is ready for M5 AWS
 sigv4 attestation: sts:GetCallerIdentity works with no extra permissions.
 
-The harbor / pilot / gateway binaries are NOT auto-installed — there is no public
-signed-release pipeline yet (implementation-plan 1.2). Install them one of these ways:
+The harbor / pilot / gateway binaries are NOT auto-installed (no public signed-
+release pipeline yet — impl-plan 1.2). The genesis bootstrap script
+(deploy/scripts/bootstrap-genesis.sh) builds them locally and scp's them up for
+you; or build+copy by hand:
+  GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/harbor  ./cmd/harbor
+  GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/pilot   ./cmd/pilot
+  GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/gateway ./cmd/gateway
+  scp /tmp/{harbor,pilot,gateway} ec2-user@<this-ip>:/tmp/ && \
+    sudo install -m0755 /tmp/{harbor,pilot,gateway} /usr/local/bin/
 
-  1) Build locally and copy up:
-       GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/harbor  ./cmd/harbor
-       GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/pilot   ./cmd/pilot
-       GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/gateway ./cmd/gateway
-       scp /tmp/{harbor,pilot,gateway} ec2-user@<this-ip>:/tmp/
-       sudo install -m 0755 /tmp/{harbor,pilot,gateway} /usr/local/bin/
-
-  2) Or bake an AMI with the binaries preinstalled, and reference it from main.tf.
-
-Then, on the harbor node: harbor genesis / migrate / core-api ...
-and on the pilot node:    pilot init && pilot enroll ...
+Role-specific next steps:
+  lighthouse -> pilot init -am-lighthouse; receive ca.crt + lighthouse cert from
+                genesis; run nebula. (handled by bootstrap-genesis.sh)
+  harbor     -> harbor migrate up; harbor genesis ...; run gateway + enroll
+                worker (+ core-api on the overlay). (handled by the script)
+  client     -> pilot enroll -gateway <harbor gw> -join-key <secret>
+                -config-pub <pin>; then pilot supervise.
 See docs/Nebula Control Plane - Genesis Runbook.md.
 EOF
