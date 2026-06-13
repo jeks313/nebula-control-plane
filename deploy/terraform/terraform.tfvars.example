@@ -10,5 +10,9 @@ instance_type       = "t3.micro"
 # Pin + verify the nebula download (recommended). Get the value from the release page.
 # nebula_sha256     = "<sha256 of nebula-linux-amd64.tar.gz for v1.10.3>"
 
-# Open the enrollment gateway port to your IP (optional).
-# open_gateway_port = 8443
+# Enrollment gateway exposure. The off-cloud iMac enrolls over this, so it must
+# reach your home IP. Default is open (the gateway is credential-less + rate-limited);
+# tighten if you want.
+# gateway_cidr      = "0.0.0.0/0"
+# gateway_port      = 8443
+# nebula_port       = 4242

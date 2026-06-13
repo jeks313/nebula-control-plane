@@ -1,10 +1,17 @@
 # Minimal AWS EC2 lab (Terraform)
 
-Two small EC2 nodes for trying the Nebula control plane: a **harbor** box
-(control plane + lighthouse) and a **pilot** box (mesh member). Both run Amazon
-Linux 2023, use **your personal SSH key**, get an **instance IAM role** (so
-they're ready for the M5 sigv4 attestation), are **IMDSv2-only**, and have
-**encrypted EBS**. SSH is locked to your IP.
+Three small EC2 nodes for trying the Nebula control plane end to end:
+
+- **lighthouse** — `nebula` with `am_lighthouse`; discovery + NAT hole-punch. Elastic IP.
+- **harbor** — control plane: enrollment **gateway** (public), **Core**, worker, DB, CA + config-signing keys. Elastic IP.
+- **client** — a `pilot` mesh member (cloud test node; future M5 sigv4 attestation target).
+
+Plus your **off-cloud iMac** (not managed here) which enrolls via a **join key
+with manual approval** — the off-cloud path. All nodes run Amazon Linux 2023, use
+**your personal SSH key**, get an **instance IAM role** (ready for M5 sigv4
+attestation), are **IMDSv2-only**, and have **encrypted EBS**. Security groups are
+**split by role**: only the lighthouse's UDP discovery and harbor's TCP gateway
+face the internet; Core's API (8444) is overlay-only. SSH is locked to your IP.
 
 ---
 
@@ -69,20 +76,33 @@ cp terraform.tfvars.example terraform.tfvars
 terraform init
 aws-vault exec nebula -- terraform apply     # (or Option B/C, then plain terraform apply)
 
-terraform output ssh                          # -> ssh ec2-user@<ip> per node
+terraform output                              # public_ips, ssh, lighthouse_addr, gateway_url
 ```
 
 `terraform destroy` tears it all down (these are billable resources — region
 `ca-central-1`).
 
+## Bootstrap the mesh (genesis)
+After `apply`, run the helper from your machine — it builds + uploads the
+binaries and runs genesis steps 1–4 (lighthouse init → CA/config-signing/
+lighthouse cert → lighthouse online → enrollment plane + join keys):
+```bash
+SSH_KEY=~/.ssh/absolute bash ../scripts/bootstrap-genesis.sh
+```
+It prints the gateway URL, the **config-signing pin** (`config-signing.pub`, which
+clients verify bundles against), the **join secrets**, and the exact enroll
+commands for the cloud client and the off-cloud iMac. (Re-run with `--skip-build`
+to skip rebuilding.) Bringing Harbor onto the mesh + `core-api` for renew/heartbeat
+is the documented lifecycle follow-on.
+
 ## What it creates
-- 2× `t3.micro` EC2 (Amazon Linux 2023), public IP, encrypted root volume, IMDSv2-only.
-- A security group: SSH + optional gateway port from your IP only; Nebula UDP/4242 open; all egress.
+- 3× `t3.micro` EC2 (Amazon Linux 2023), encrypted root volume, IMDSv2-only; Elastic IPs on lighthouse + harbor.
+- Three role-split security groups (lighthouse UDP, harbor gateway+UDP, client SSH-only; Core 8444 never exposed).
 - An EC2 key pair from your `~/.ssh/absolute.pub`.
 - A permission-less IAM role + instance profile (enough for `sts:GetCallerIdentity`).
 
-## Installing the harbor/pilot/gateway binaries
-Not auto-installed (no public signed-release pipeline yet — impl-plan 1.2). After
-`apply`, SSH in and read `/root/NEXT-STEPS.txt`: build the binaries locally
-(`GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build ./cmd/...`), `scp` them up, or
-bake an AMI. Then follow `docs/Nebula Control Plane - Genesis Runbook.md`.
+## Binaries
+The bootstrap script builds harbor/pilot/gateway for linux/amd64 and `scp`s them
+up for you (no public signed-release pipeline yet — impl-plan 1.2). Each box's
+`/root/NEXT-STEPS.txt` has the manual fallback. See also
+`docs/Nebula Control Plane - Genesis Runbook.md`.

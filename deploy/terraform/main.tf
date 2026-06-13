@@ -1,8 +1,9 @@
-# Minimal lab: two EC2 nodes (a Harbor/lighthouse box and a Pilot member) in the
-# default VPC, your personal SSH key, an instance IAM role (so they're ready for
-# M5 sigv4 attestation), IMDSv2-only, and encrypted EBS.
+# Test topology: a lighthouse, a harbor (control plane), and a test client in the
+# default VPC. Lighthouse + harbor get Elastic IPs (stable public addresses — the
+# lighthouse address is baked into every host's static_host_map, and harbor's is
+# the gateway URL pilots target). Security groups are split by role; the off-cloud
+# iMac is NOT managed here — it's your host, it just runs `pilot`.
 
-# Latest Amazon Linux 2023 AMI, resolved via SSM (no hard-coded AMI IDs).
 data "aws_ssm_parameter" "al2023" {
   name = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
 }
@@ -24,54 +25,111 @@ resource "aws_key_pair" "personal" {
   public_key = file(pathexpand(var.ssh_public_key_path))
 }
 
-resource "aws_security_group" "node" {
-  name_prefix = "${var.name_prefix}-node-"
-  description = "Nebula control-plane node: SSH (you), Nebula UDP, egress."
+# ── Security groups (split by role) ─────────────────────────────────────────
+# Only two things face the internet: the lighthouse's UDP discovery port and
+# harbor's TCP enrollment gateway. Core's API (8444) is bound to harbor's overlay
+# IP and is in NO security group — reachable only once you're on the mesh.
+
+resource "aws_security_group" "lighthouse" {
+  name_prefix = "${var.name_prefix}-lighthouse-"
+  description = "Lighthouse: public Nebula UDP discovery + admin SSH."
   vpc_id      = data.aws_vpc.default.id
 
   ingress {
-    description = "SSH from allowed_ssh_cidr only"
+    description = "SSH from you"
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
     cidr_blocks = [var.allowed_ssh_cidr]
   }
-
   ingress {
-    description = "Nebula overlay handshake / lighthouse (UDP 4242)"
-    from_port   = 4242
-    to_port     = 4242
+    description = "Nebula overlay handshake / lighthouse discovery"
+    from_port   = var.nebula_port
+    to_port     = var.nebula_port
     protocol    = "udp"
     cidr_blocks = ["0.0.0.0/0"]
   }
-
-  dynamic "ingress" {
-    for_each = var.open_gateway_port > 0 ? [1] : []
-    content {
-      description = "Enrollment gateway"
-      from_port   = var.open_gateway_port
-      to_port     = var.open_gateway_port
-      protocol    = "tcp"
-      cidr_blocks = [var.allowed_ssh_cidr]
-    }
-  }
-
   egress {
-    description = "All egress"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
-
   lifecycle {
     create_before_destroy = true
   }
 }
 
-# Instance role. Deliberately permission-less: a role still lets the instance
-# call sts:GetCallerIdentity, which is all the M5 sigv4 attestation needs. Add a
-# DescribeInstances policy here only on the Core/Harbor node if you wire 5.3.
+resource "aws_security_group" "harbor" {
+  name_prefix = "${var.name_prefix}-harbor-"
+  description = "Harbor: public enrollment gateway + Nebula UDP + admin SSH. Core API (8444) is overlay-only, NOT here."
+  vpc_id      = data.aws_vpc.default.id
+
+  ingress {
+    description = "SSH from you"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = [var.allowed_ssh_cidr]
+  }
+  ingress {
+    description = "Enrollment gateway (credential-less, rate-limited)"
+    from_port   = var.gateway_port
+    to_port     = var.gateway_port
+    protocol    = "tcp"
+    cidr_blocks = [var.gateway_cidr]
+  }
+  ingress {
+    description = "Nebula overlay (Harbor is itself a mesh node)"
+    from_port   = var.nebula_port
+    to_port     = var.nebula_port
+    protocol    = "udp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_security_group" "client" {
+  name_prefix = "${var.name_prefix}-client-"
+  description = "Test client: admin SSH + Nebula UDP; no control-plane exposure."
+  vpc_id      = data.aws_vpc.default.id
+
+  ingress {
+    description = "SSH from you"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = [var.allowed_ssh_cidr]
+  }
+  ingress {
+    description = "Nebula overlay (mesh responder / hole-punch)"
+    from_port   = var.nebula_port
+    to_port     = var.nebula_port
+    protocol    = "udp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+# ── Instance IAM role ───────────────────────────────────────────────────────
+# Permission-less: enough for sts:GetCallerIdentity (M5 sigv4 attestation). Add a
+# DescribeInstances policy to the harbor role only if/when you wire 5.3.
 data "aws_iam_policy_document" "ec2_assume" {
   statement {
     actions = ["sts:AssumeRole"]
@@ -92,11 +150,17 @@ resource "aws_iam_instance_profile" "node" {
   role        = aws_iam_role.node.name
 }
 
+# ── Nodes ───────────────────────────────────────────────────────────────────
 locals {
-  # Roles are just tags + bootstrap hints here; the box is otherwise identical.
   nodes = {
-    harbor = { role = "harbor" } # control plane + lighthouse
-    pilot  = { role = "pilot" }  # mesh member / agent
+    lighthouse = { role = "lighthouse", eip = true } # stable address for static_host_map
+    harbor     = { role = "harbor", eip = true }     # stable gateway URL
+    client     = { role = "client", eip = false }    # cloud test member
+  }
+  sg_for = {
+    lighthouse = aws_security_group.lighthouse.id
+    harbor     = aws_security_group.harbor.id
+    client     = aws_security_group.client.id
   }
 }
 
@@ -107,7 +171,7 @@ resource "aws_instance" "node" {
   instance_type               = var.instance_type
   subnet_id                   = element(data.aws_subnets.default.ids, 0)
   key_name                    = aws_key_pair.personal.key_name
-  vpc_security_group_ids      = [aws_security_group.node.id]
+  vpc_security_group_ids      = [local.sg_for[each.key]]
   iam_instance_profile        = aws_iam_instance_profile.node.name
   associate_public_ip_address = true
 
@@ -120,16 +184,25 @@ resource "aws_instance" "node" {
   metadata_options {
     http_endpoint               = "enabled"
     http_tokens                 = "required" # IMDSv2 only — matches awsattest.FetchInstanceCredentials
-    http_put_response_hop_limit = 2          # so a containerized Pilot can still reach IMDS
+    http_put_response_hop_limit = 2
   }
 
   root_block_device {
     volume_size = 16
-    encrypted   = true # EBS encrypted at rest
+    encrypted   = true
   }
 
   tags = {
     Name = "${var.name_prefix}-${each.key}"
     Role = each.value.role
   }
+}
+
+# Stable public addresses for the nodes that need them.
+resource "aws_eip" "node" {
+  for_each = { for k, v in local.nodes : k => v if v.eip }
+
+  instance = aws_instance.node[each.key].id
+  domain   = "vpc"
+  tags     = { Name = "${var.name_prefix}-${each.key}" }
 }

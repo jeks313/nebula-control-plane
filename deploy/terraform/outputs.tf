@@ -1,13 +1,34 @@
+locals {
+  # Prefer the Elastic IP where a node has one, else the auto-assigned public IP.
+  public_ip = { for k, n in aws_instance.node :
+  k => try(aws_eip.node[k].public_ip, n.public_ip) }
+}
+
 output "public_ips" {
-  description = "Public IPv4 per node."
-  value       = { for k, n in aws_instance.node : k => n.public_ip }
+  description = "Public IPv4 per node (Elastic IP where allocated)."
+  value       = local.public_ip
 }
 
 output "ssh" {
   description = "Ready-to-paste SSH commands (Amazon Linux user is ec2-user)."
-  value       = { for k, n in aws_instance.node : k => "ssh ec2-user@${n.public_ip}" }
+  value       = { for k, ip in local.public_ip : k => "ssh ec2-user@${ip}" }
 }
 
 output "instance_ids" {
   value = { for k, n in aws_instance.node : k => n.id }
+}
+
+output "lighthouse_addr" {
+  description = "Lighthouse underlay address for static_host_map / genesis -lighthouse-addr."
+  value       = "${local.public_ip["lighthouse"]}:${var.nebula_port}"
+}
+
+output "gateway_url" {
+  description = "Enrollment gateway URL pilots target."
+  value       = "http://${local.public_ip["harbor"]}:${var.gateway_port}"
+}
+
+output "bootstrap_hint" {
+  description = "How to run the genesis bootstrap."
+  value       = "bash ../scripts/bootstrap-genesis.sh   # reads these outputs via 'terraform output -json'"
 }

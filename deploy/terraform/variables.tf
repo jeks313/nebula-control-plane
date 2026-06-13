@@ -54,8 +54,25 @@ variable "nebula_sha256" {
   default     = ""
 }
 
-variable "open_gateway_port" {
-  description = "If > 0, also open this TCP port to allowed_ssh_cidr for the enrollment gateway (e.g. 8443). 0 = closed."
+variable "nebula_port" {
+  description = "UDP port the Nebula data plane / lighthouse listens on."
   type        = number
-  default     = 0
+  default     = 4242
+}
+
+variable "gateway_port" {
+  description = "Public TCP port for Harbor's enrollment gateway."
+  type        = number
+  default     = 8443
+}
+
+variable "gateway_cidr" {
+  description = <<-EOT
+    CIDR allowed to reach the enrollment gateway. The off-cloud iMac enrolls over
+    this, so it must cover your home IP. Default is open (the gateway is
+    credential-less and rate-limited by design); tighten to your IP for less
+    exposure.
+  EOT
+  type        = string
+  default     = "0.0.0.0/0"
 }
