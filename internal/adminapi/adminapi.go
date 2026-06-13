@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jeks313/nebula-control-plane/internal/cloudtrust"
@@ -213,6 +214,9 @@ func (s *Server) routeTable() []route {
 		{"GET", "/admin/v1/policy/active", s.handlePolicyActive},
 		{"POST", "/admin/v1/policy/propose", s.handlePolicyPropose},
 		{"POST", "/admin/v1/policy/compile", s.handlePolicyCompile},
+		{"POST", "/admin/v1/policy/reachability", s.handlePolicyReachability},
+		{"POST", "/admin/v1/policy/matrix", s.handlePolicyMatrix},
+		{"POST", "/admin/v1/policy/tests", s.handlePolicyTests},
 		// Cloud-attestation trust config (dual-control; approved via /approvals).
 		{"GET", "/admin/v1/cloudtrust/active", s.handleCloudTrustActive},
 		{"POST", "/admin/v1/cloudtrust/propose", s.handleCloudTrustPropose},
@@ -786,6 +790,104 @@ func (s *Server) handlePolicyCompile(w http.ResponseWriter, r *http.Request) {
 		Outbound []nebulaRule `json:"outbound"`
 	}{Inbound: toRules(c.Inbound), Outbound: toRules(c.Outbound)}
 	writeJSON(w, http.StatusOK, res)
+}
+
+// POST /admin/v1/policy/reachability — read-only analysis (A1): does `from` reach `to`
+// on proto/port under the draft policy + non-removable baseline? Returns the granting
+// rule, or default-deny with the nearest miss. No perm/step-up (a dry-run, like compile).
+func (s *Server) handlePolicyReachability(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Policy string `json:"policy"`
+		From   string `json:"from"`
+		To     string `json:"to"`
+		Proto  string `json:"proto"`
+		Port   string `json:"port"`
+	}
+	if !readJSON(w, r, &body) {
+		return
+	}
+	p, err := policy.Parse(body.Policy)
+	if err != nil {
+		writeProblem(w, http.StatusBadRequest, "invalid policy", err.Error())
+		return
+	}
+	from := strings.TrimPrefix(body.From, "group:")
+	to := strings.TrimPrefix(body.To, "group:")
+	if from == "" || to == "" {
+		writeProblem(w, http.StatusBadRequest, "bad query", "from and to are required")
+		return
+	}
+	proto := body.Proto
+	if proto == "" {
+		proto = "any"
+	}
+	port := body.Port
+	if port == "" {
+		port = "any"
+	}
+	if err := policy.ValidateQuery(proto, port); err != nil {
+		writeProblem(w, http.StatusBadRequest, "bad query", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, policy.Reachable(p, from, to, proto, port))
+}
+
+// POST /admin/v1/policy/matrix — read-only analysis (A1): the all-pairs group x group
+// reachability grid (policy-permitted flows; baseline flagged per cell).
+func (s *Server) handlePolicyMatrix(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Policy string   `json:"policy"`
+		Groups []string `json:"groups"`
+	}
+	if !readJSON(w, r, &body) {
+		return
+	}
+	// The matrix is O(groups^2 * rules); bound the caller-supplied set so an oversized
+	// `groups` array can't pin a worker / blow up memory (the default path derives groups
+	// from the policy and is bounded by the rule count).
+	const maxMatrixGroups = 256
+	if len(body.Groups) > maxMatrixGroups {
+		writeProblem(w, http.StatusBadRequest, "too many groups", fmt.Sprintf("matrix supports at most %d groups", maxMatrixGroups))
+		return
+	}
+	p, err := policy.Parse(body.Policy)
+	if err != nil {
+		writeProblem(w, http.StatusBadRequest, "invalid policy", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, policy.Matrix(p, body.Groups))
+}
+
+// POST /admin/v1/policy/tests — read-only analysis (A1): evaluate reachability assertions
+// against the policy (the test-authoring loop that gates publish).
+func (s *Server) handlePolicyTests(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Policy string `json:"policy"`
+		Tests  string `json:"tests"`
+	}
+	if !readJSON(w, r, &body) {
+		return
+	}
+	p, err := policy.Parse(body.Policy)
+	if err != nil {
+		writeProblem(w, http.StatusBadRequest, "invalid policy", err.Error())
+		return
+	}
+	asserts, terr := policy.ParseTests(body.Tests)
+	if terr != nil {
+		writeProblem(w, http.StatusBadRequest, "invalid tests", terr.Error())
+		return
+	}
+	results := policy.RunTests(p, asserts)
+	passed := 0
+	for _, res := range results {
+		if res.Pass {
+			passed++
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"results": results, "passed": passed, "failed": len(results) - passed, "ok": passed == len(results),
+	})
 }
 
 func toRules(in []nebulaconfig.Rule) []nebulaRule {
