@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react'
 import { NavLink } from 'react-router-dom'
 import { useMe } from '../api/hooks'
-import { logout } from '../api/client'
+import { logout } from '../api/auth'
 import { harborEnvironment, isProduction } from '../api/config'
 import { cx } from './ui'
 

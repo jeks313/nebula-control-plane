@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import { errorMessage } from '../api/errors'
 
 export function cx(...parts: Array<string | false | undefined | null>): string {
   return parts.filter(Boolean).join(' ')
@@ -36,4 +37,12 @@ export function StateBlock({ kind, message }: { kind: 'loading' | 'error' | 'emp
   return (
     <div className={cx('rounded-md border border-edge bg-mesh-1 px-4 py-8 text-center', tone)}>{message}</div>
   )
+}
+
+// ErrorState renders a query failure using the server's problem+json message (title/
+// detail) when present, falling back to a screen-appropriate line for opaque network
+// failures. Use this instead of hardcoding error copy — it surfaces server reasons
+// (e.g. a 403 "requires permission: …") honestly.
+export function ErrorState({ error, fallback }: { error: unknown; fallback?: string }) {
+  return <StateBlock kind="error" message={errorMessage(error, fallback)} />
 }

@@ -1,12 +1,12 @@
 import { useAudit } from '../api/hooks'
-import { Card, Page, StateBlock } from '../components/ui'
+import { Card, Page, StateBlock, ErrorState } from '../components/ui'
 
 export function Audit() {
   const q = useAudit()
   return (
     <Page title="Audit" subtitle="Hash-chained, append-only — newest first">
       {q.isLoading && <StateBlock kind="loading" message="Loading audit log…" />}
-      {q.isError && <StateBlock kind="error" message="Couldn't load the audit log." />}
+      {q.isError && <ErrorState error={q.error} fallback="Couldn't load the audit log." />}
       {q.data && (q.data.entries.length === 0
         ? <StateBlock kind="empty" message="No audit entries." />
         : (

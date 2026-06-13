@@ -1,5 +1,5 @@
 import { useFleetHealth, type FleetHealth } from '../api/hooks'
-import { Card, Page, StateBlock, cx } from '../components/ui'
+import { Card, Page, StateBlock, ErrorState, cx } from '../components/ui'
 
 const STATUS: Record<FleetHealth['status'], { label: string; dot: string; text: string }> = {
   healthy: { label: 'Healthy', dot: 'bg-permit', text: 'text-permit' },
@@ -19,7 +19,7 @@ export function Dashboard() {
   return (
     <Page title="Fleet" subtitle="Server-computed health for the whole mesh">
       {q.isLoading && <StateBlock kind="loading" message="Loading fleet health…" />}
-      {q.isError && <StateBlock kind="error" message="Couldn't reach Core — the mesh may be down (see the break-glass runbook)." />}
+      {q.isError && <ErrorState error={q.error} fallback="Couldn't reach Core — the mesh may be down (see the break-glass runbook)." />}
       {q.data && <Rollup h={q.data} />}
     </Page>
   )

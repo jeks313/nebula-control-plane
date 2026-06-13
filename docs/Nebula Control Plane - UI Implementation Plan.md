@@ -750,11 +750,33 @@ The v1 UI-0…UI-6 pretended the backend was done. Reframe as a **backend track*
     `Referrer-Policy: no-referrer`, and **HSTS over TLS**; hashed assets `immutable`,
     index `no-store`. Adversarially reviewed (9-agent): 4 low findings, all fixed +
     regression-tested.
-  - **Deferred to later UI-0 increments / UI-0b:** Storybook + the 3-comp **design gate**
-    (§5), the **⌘K** command palette, visx charts, the Tag Canvas / reachability
-    **matrix** hero (§4.2–4.3), the dual-control/preview/destructive-action component
-    primitives, build-time **style-src** hash tightening, and **real OIDC/MFA login**
-    (**UI-0b**, when 2.11's session auth is wired into the SPA).
+  - **Deferred to later UI-0 increments:** Storybook + the 3-comp **design gate** (§5),
+    the **⌘K** command palette, visx charts, the Tag Canvas / reachability **matrix**
+    hero (§4.2–4.3), the dual-control/preview/destructive-action component primitives,
+    and build-time **style-src** hash tightening.
+  - ✅ **UI-0b auth shell (2026-06-13).** Real session auth wired into the SPA,
+    replacing the dev-auth seam (frontend-only — the 2.11 backend already shipped).
+    **AuthGate**: the console renders the authed chrome ONLY for a live session, driven
+    entirely by `/me` (the server is the source of truth; never inferred from the URL) —
+    killing the redirect-flash. New **Login** screen discovers methods from
+    `/admin/v1/auth/providers` and starts the server's OIDC/SAML/GitHub flow with a
+    sanitized same-origin `return_to`. **Typed problem+json error model** (`errors.ts`:
+    `ApiError` + `isUnauthenticated`/`isStepUpRequired`/`isForbidden`) so the three 403s
+    (step-up vs RBAC vs CSRF) are distinguishable and pages render the server's
+    `title`/`detail` instead of hardcoded copy. **Session lifecycle:** a mid-use 401 on
+    any query *removes* cached `/me` so the gate flips to login immediately — never paints
+    stale data behind a dead session. **CSRF:** an openapi-fetch middleware auto-attaches
+    `X-CSRF-Token` (from the JS-readable `harbor_csrf` cookie) to every mutation, so
+    future typed writes are CSRF-correct by construction. **Step-up MFA primitive:**
+    `redirectToStepUp` + the `step_up_required` classifier — the re-auth/retry hook UI-1
+    plugs into. **Zero authority (P-UI-1)** preserved: no tokens in JS; every authz
+    decision stays server-enforced. Added **Vitest** with 18 unit tests over the
+    security-critical pure logic (problem parsing, `return_to` sanitization, CSRF/login
+    URL building). Adversarially reviewed (6-agent): 2 low findings, both fixed +
+    regression-tested.
+  - **Deferred to UI-1:** client-side RBAC control-hiding (defense-in-depth; there is no
+    privileged control to hide yet), the step-up prompt/modal UX, and surfacing MFA
+    freshness in the header — all land with the first privileged action.
 - **UI-1 — Enrollment** *(M3):* approval queue, join keys (auto-issue warned),
   conflict/admit inbox, funnel, quotas; console onboarding checklist + empty-states.
 - **UI-2 — Fleet health** *(M4):* expiry/cliff + lighthouse-availability + trust-

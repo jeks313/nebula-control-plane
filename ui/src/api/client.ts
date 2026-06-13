@@ -1,28 +1,40 @@
-import createClient from 'openapi-fetch'
+import createClient, { type Middleware } from 'openapi-fetch'
 import type { paths } from './schema'
+import { ApiError, parseProblem } from './errors'
+import { csrfToken } from './auth'
 
-// Same-origin typed client for /admin/v1 (the SPA is served by Core via go:embed;
-// in `vite dev` the dev server proxies /admin to a local admin-api). Mutations will
-// carry the double-submit CSRF header (added when we build write actions).
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
+
+// Attach the double-submit CSRF token to every mutating request automatically, so
+// future typed mutations (api.POST/PUT/DELETE) are CSRF-correct by construction. The
+// server compares the X-CSRF-Token header (constant-time) against the server-side
+// session secret — NOT against the cookie — so mirroring the JS-readable harbor_csrf
+// cookie into the header is the correct (and required) client behavior. Safe methods
+// carry no token (and the server exempts them).
+const csrfMiddleware: Middleware = {
+  onRequest({ request }) {
+    if (!SAFE_METHODS.has(request.method.toUpperCase())) {
+      const token = csrfToken()
+      if (token) request.headers.set('X-CSRF-Token', token)
+    }
+    return request
+  },
+}
+
+// Same-origin typed client for /admin/v1 (the SPA is served by Core via go:embed; in
+// `vite dev` the dev server proxies /admin to a local admin-api).
 export const api = createClient<paths>({ baseUrl: window.location.origin })
+api.use(csrfMiddleware)
 
-// The SPA holds no authority: on 401 it hands off to the server's session login
-// (OIDC/SAML/mock IdP → httpOnly cookie), returning to where the user was.
-export function loginRedirect(): void {
-  const here = window.location.pathname + window.location.search
-  window.location.href = `/admin/v1/auth/login?return_to=${encodeURIComponent(here)}`
-}
-
-export function logout(): void {
-  const csrf = readCookie('harbor_csrf')
-  void fetch('/admin/v1/auth/logout', {
-    method: 'POST',
-    headers: csrf ? { 'X-CSRF-Token': csrf } : {},
-    credentials: 'same-origin',
-  }).finally(() => loginRedirect())
-}
-
-function readCookie(name: string): string {
-  const m = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'))
-  return m ? decodeURIComponent(m[1]) : ''
+// unwrap turns an openapi-fetch result into data, or throws a typed ApiError (parsing
+// problem+json, incl. the step-up `code`). Used by both reads and future mutations so
+// every error is uniform. It does NOT redirect on 401 — the AuthGate owns auth state,
+// so a lost session surfaces as the login screen, not a surprise full-page nav.
+export async function unwrap<T>(
+  call: Promise<{ data?: T; error?: unknown; response: Response }>,
+): Promise<T> {
+  const { data, response } = await call
+  if (!response.ok) throw await parseProblem(response)
+  if (data === undefined) throw new ApiError(response.status, 'empty response')
+  return data
 }
