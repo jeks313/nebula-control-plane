@@ -16,6 +16,10 @@ export type RolloutHost = components['schemas']['RolloutHost']
 export type AuditVerify = components['schemas']['AuditVerify']
 export type ActivePolicy = components['schemas']['ActivePolicy']
 export type Change = components['schemas']['Change']
+export type Signoff = components['schemas']['Signoff']
+export type ApprovalDetail = components['schemas']['ApprovalDetail']
+export type PolicyRule = components['schemas']['PolicyRule']
+export type CompileResult = components['schemas']['CompileResult']
 
 export type EnrollmentStatus = 'pending' | 'issued' | 'denied'
 
@@ -120,6 +124,62 @@ export function useCloudTrust() {
   return useQuery({
     queryKey: ['cloudtrust'],
     queryFn: () => unwrap(api.GET('/admin/v1/cloudtrust/active')),
+  })
+}
+
+// --- UI-4 dual-control publish pipeline ---
+
+export function useApproval(id: number) {
+  return useQuery({
+    queryKey: ['approval', id],
+    queryFn: () => unwrap(api.GET('/admin/v1/approvals/{id}', { params: { path: { id } } })),
+  })
+}
+
+// approve/deny/propose: the MutationCache (main.tsx) centrally handles 401 (→ login) and
+// 403 step_up_required (→ re-auth + retry); callers handle the action-specific outcomes.
+// onSettled refetches the inbox + this change + the active policy (a commit publishes).
+
+export function useApproveChange() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: number) => unwrap(api.POST('/admin/v1/approvals/{id}/approve', { params: { path: { id } } })),
+    onSettled: (_d, _e, id) => {
+      void qc.invalidateQueries({ queryKey: ['approvals'] })
+      void qc.invalidateQueries({ queryKey: ['approval', id] })
+      void qc.invalidateQueries({ queryKey: ['policy-active'] })
+      void qc.invalidateQueries({ queryKey: ['cloudtrust'] })
+    },
+  })
+}
+
+export function useDenyChange() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, reason }: { id: number; reason?: string }) =>
+      unwrap(api.POST('/admin/v1/approvals/{id}/deny', { params: { path: { id } }, body: { reason: reason ?? '' } })),
+    onSettled: (_d, _e, vars) => {
+      void qc.invalidateQueries({ queryKey: ['approvals'] })
+      void qc.invalidateQueries({ queryKey: ['approval', vars.id] })
+    },
+  })
+}
+
+export function useProposePolicy() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: { policy: string; description?: string }) =>
+      unwrap(api.POST('/admin/v1/policy/propose', { body })),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['approvals'] }),
+  })
+}
+
+// compile is a read-only dry-run (no perm/step-up); a mutation since it POSTs a draft.
+// It returns 200 even on a parse error (valid:false) — branch on result.valid.
+export function useCompilePolicy() {
+  return useMutation({
+    mutationFn: (body: { policy: string; groups?: string[] }) =>
+      unwrap(api.POST('/admin/v1/policy/compile', { body })),
   })
 }
 
