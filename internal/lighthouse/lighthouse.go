@@ -127,6 +127,7 @@ func (r *Registry) Replace(ctx context.Context, overlayIP string, addrs []string
 // retire the last active one (the discovery-never-lost invariant) — to swap the
 // final lighthouse, Add its replacement first.
 func (r *Registry) Remove(ctx context.Context, overlayIP, actor string) error {
+	changed := false
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var row Row
 		if err := tx.First(&row, "overlay_ip = ?", overlayIP).Error; err != nil {
@@ -136,7 +137,7 @@ func (r *Registry) Remove(ctx context.Context, overlayIP, actor string) error {
 			return err
 		}
 		if row.State == StateRemoved {
-			return nil // idempotent
+			return nil // idempotent: already removed, nothing to do
 		}
 		var activeCount int64
 		if err := tx.Model(&Row{}).Where("state = ?", StateActive).Count(&activeCount).Error; err != nil {
@@ -145,13 +146,16 @@ func (r *Registry) Remove(ctx context.Context, overlayIP, actor string) error {
 		if activeCount <= 1 {
 			return ErrLastActive
 		}
+		changed = true
 		return tx.Model(&Row{}).Where("overlay_ip = ?", overlayIP).
 			Updates(map[string]any{"state": StateRemoved, "updated_at": r.now().UTC().UnixNano()}).Error
 	})
 	if err != nil {
 		return err
 	}
-	r.recordAudit(ctx, actor, "lighthouse-remove", overlayIP, "")
+	if changed { // don't audit the idempotent no-op (already-removed) path
+		r.recordAudit(ctx, actor, "lighthouse-remove", overlayIP, "")
+	}
 	return nil
 }
 

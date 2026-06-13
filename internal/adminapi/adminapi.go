@@ -108,6 +108,14 @@ func New(cfg Config) *Server {
 			return e
 		}
 		s.dc = dualcontrol.New(dualcontrol.Config{DB: cfg.Store.DB, Audit: audit})
+		// Default the fleet engines from the store so the mutation handlers always
+		// have them (no 501 "not configured" path); a caller may still inject its own.
+		if s.cfg.Rollout == nil {
+			s.cfg.Rollout = rollout.New(cfg.Store.DB, audit)
+		}
+		if s.cfg.Lighthouses == nil {
+			s.cfg.Lighthouses = lighthouse.New(cfg.Store.DB, audit)
+		}
 		// Policy-publish committer: re-validate at commit (defense in depth; the
 		// active policy is the latest committed change of this kind).
 		s.dc.Register(policy.PublishKind, func(_ context.Context, ch dualcontrol.Change) error {
@@ -159,6 +167,17 @@ func (s *Server) routeTable() []route {
 		{"GET", "/admin/v1/policy/active", s.handlePolicyActive},
 		{"POST", "/admin/v1/policy/propose", s.handlePolicyPropose},
 		{"POST", "/admin/v1/policy/compile", s.handlePolicyCompile},
+		// A0.4 fleet-management mutations (pure-DB).
+		{"POST", "/admin/v1/lighthouses", s.handleLighthouseAdd},
+		{"PUT", "/admin/v1/lighthouses/{ip}", s.handleLighthouseReplace},
+		{"DELETE", "/admin/v1/lighthouses/{ip}", s.handleLighthouseRemove},
+		{"GET", "/admin/v1/rollouts/current", s.handleRolloutCurrent},
+		{"POST", "/admin/v1/rollouts", s.handleRolloutStart},
+		{"POST", "/admin/v1/rollouts/current/step", s.handleRolloutStep},
+		{"POST", "/admin/v1/rollouts/current/abort", s.handleRolloutAbort},
+		{"GET", "/admin/v1/joinkeys", s.handleJoinKeys},
+		{"POST", "/admin/v1/joinkeys", s.handleJoinKeyCreate},
+		{"POST", "/admin/v1/joinkeys/{name}/revoke", s.handleJoinKeyRevoke},
 	}
 }
 
