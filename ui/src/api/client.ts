@@ -22,8 +22,10 @@ const csrfMiddleware: Middleware = {
 }
 
 // Same-origin typed client for /admin/v1 (the SPA is served by Core via go:embed; in
-// `vite dev` the dev server proxies /admin to a local admin-api).
-export const api = createClient<paths>({ baseUrl: window.location.origin })
+// `vite dev` the dev server proxies /admin to a local admin-api). Guard `window` so the
+// module is import-safe outside a browser (unit tests run in a node environment).
+const baseUrl = typeof window !== 'undefined' ? window.location.origin : ''
+export const api = createClient<paths>({ baseUrl })
 api.use(csrfMiddleware)
 
 // unwrap turns an openapi-fetch result into data, or throws a typed ApiError (parsing

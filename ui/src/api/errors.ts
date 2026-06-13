@@ -61,6 +61,13 @@ export function isForbidden(e: unknown): boolean {
   return isApiError(e) && e.status === 403 && e.code !== 'step_up_required'
 }
 
+// True when the global MutationCache handler (main.tsx) already owns this error —
+// a lost session (401) or a step-up requirement — and is redirecting. A per-call
+// onError must NOT also surface a toast for these, or it flashes over the login/re-auth.
+export function isCentrallyHandled(e: unknown): boolean {
+  return isUnauthenticated(e) || isStepUpRequired(e)
+}
+
 // A human message for inline rendering: prefer the server's detail, then its title,
 // then a caller fallback (used for opaque network failures with no problem body).
 export function errorMessage(e: unknown, fallback = 'Something went wrong.'): string {

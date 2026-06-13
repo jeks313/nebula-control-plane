@@ -7,7 +7,9 @@ import { cx } from './ui'
 
 const NAV = [
   { to: '/', label: 'Dashboard', end: true },
+  { to: '/enrollments', label: 'Enrollments', end: false },
   { to: '/devices', label: 'Devices', end: false },
+  { to: '/joinkeys', label: 'Join Keys', end: false },
   { to: '/audit', label: 'Audit', end: false },
 ]
 

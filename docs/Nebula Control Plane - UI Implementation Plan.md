@@ -779,6 +779,36 @@ The v1 UI-0…UI-6 pretended the backend was done. Reframe as a **backend track*
     freshness in the header — all land with the first privileged action.
 - **UI-1 — Enrollment** *(M3):* approval queue, join keys (auto-issue warned),
   conflict/admit inbox, funnel, quotas; console onboarding checklist + empty-states.
+  - ✅ **UI-1 enrollment + join keys (2026-06-13).** The first **mutating** screens, and
+    the first real consumers of the UI-0b CSRF middleware + RBAC seam. **Enrollments**
+    (`pages/Enrollments.tsx`): the approval queue with Pending/Approved/Denied tabs,
+    **keyset pagination** (real `next_after` paging — no silent cap), and **approve /
+    deny** actions. Approve is a one-click issue (server allocates the IP, shown back);
+    deny opens a dialog for an optional reason surfaced to the rejected host. **Join
+    Keys** (`pages/JoinKeys.tsx`): list (groups, auto-issue/ephemeral mode, used/max,
+    rate/hr, expiry, state) + **create** + **revoke**. Create warns loudly when
+    **auto-issue** is on (skips per-device approval), and the **one-time secret** is
+    shown in a **non-routable, ack-gated modal** (copy + download-as-file; the secret
+    lives only in transient mutation state — never the query cache/URL/logs — and
+    `reset()` discards it on close, per §8 secret-once). **RBAC defense-in-depth
+    (first consumer):** new `api/perms.ts` mirrors the server matrix
+    (admin=*, operator, viewer, break-glass) and hides actions a role can't use —
+    the server still enforces (P-UI-1). New primitives: `Button`/`Chip`, a minimal
+    `Dialog`, a dependency-free `Toast`, and a `MutationCache` that centrally handles
+    auth/step-up on every write. Mutations are CSRF-correct (UI-0b middleware), disable
+    in-flight, and `onSettled`-refetch so a **409 "not pending"** / **404 "already
+    revoked"** / **501 "read-only"** reconcile cleanly. Vitest now 28 tests (added the
+    RBAC matrix + formatters). Verified end-to-end against a live binary (secret-once
+    shape, dup→409, revoke→404, approve-read-only→501). Adversarially reviewed
+    (7-agent): 2 low findings, both fixed (no error toast over the login redirect;
+    friendly RBAC-403 copy).
+  - **Deferred (no backend data yet — confirmed absent):** the enrollment **funnel**
+    (no aggregate/stats endpoint; `count` is page-size only), the **quota-usage**
+    dashboard (`quota_per_hour`/`max_uses` are config, no usage endpoint), and the
+    **conflict/admit inbox** (no such status — only the pending queue + a transient 409
+    race). Also deferred: the formal **onboarding checklist** (strong empty-states
+    shipped), bulk approve/deny, server-side search/total-count, and Radix-izing the
+    Dialog. These need new backend endpoints before a screen.
 - **UI-2 — Fleet health** *(M4):* expiry/cliff + lighthouse-availability + trust-
   integrity cards, version landscape, heartbeat detail, **topology map v1**
   (policy-permitted). Live via A2 or polling.
