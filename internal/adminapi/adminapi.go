@@ -109,17 +109,50 @@ type ctxKey int
 
 const identityKey ctxKey = 0
 
+type route struct {
+	Method, Path string
+	h            http.HandlerFunc
+}
+
+// routes is the single source of truth for the admin surface — both the mux and
+// the OpenAPI contract test (Routes) derive from it, so the spec can't silently
+// drift from the implementation.
+func (s *Server) routeTable() []route {
+	return []route{
+		{"GET", "/admin/v1/me", s.handleMe},
+		{"GET", "/admin/v1/fleet/health", s.handleFleetHealth},
+		{"GET", "/admin/v1/devices", s.handleDevices},
+		{"GET", "/admin/v1/audit", s.handleAudit},
+		{"GET", "/admin/v1/audit/verify", s.handleAuditVerify},
+		{"GET", "/admin/v1/lighthouses", s.handleLighthouses},
+	}
+}
+
+// Routes returns "METHOD /path" for every admin endpoint — the contract test
+// asserts this set equals the documented OpenAPI operations.
+func (s *Server) Routes() []string {
+	rt := s.routeTable()
+	out := make([]string, len(rt))
+	for i, r := range rt {
+		out[i] = r.Method + " " + r.Path
+	}
+	return out
+}
+
 // Handler returns the routed, auth-wrapped admin API. Mesh-only: bind it to
-// Core's overlay IP in production (never the public ENI).
+// Core's overlay IP in production (never the public ENI). The OpenAPI document is
+// served unauthenticated (it is the public contract, carries no fleet data).
 func (s *Server) Handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /admin/v1/me", s.handleMe)
-	mux.HandleFunc("GET /admin/v1/fleet/health", s.handleFleetHealth)
-	mux.HandleFunc("GET /admin/v1/devices", s.handleDevices)
-	mux.HandleFunc("GET /admin/v1/audit", s.handleAudit)
-	mux.HandleFunc("GET /admin/v1/audit/verify", s.handleAuditVerify)
-	mux.HandleFunc("GET /admin/v1/lighthouses", s.handleLighthouses)
-	return s.authMiddleware(mux)
+	inner := http.NewServeMux()
+	for _, r := range s.routeTable() {
+		inner.HandleFunc(r.Method+" "+r.Path, r.h)
+	}
+	authed := s.authMiddleware(inner)
+
+	top := http.NewServeMux()
+	top.HandleFunc("GET /admin/v1/openapi.yaml", s.handleOpenAPI)
+	top.Handle("/", authed)
+	return top
 }
 
 // authMiddleware resolves the admin identity (the dev-auth seam) and rejects
