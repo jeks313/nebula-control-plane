@@ -1170,6 +1170,12 @@ func cmdAdminAPI(args []string) {
 		log.Info("admin-api read-only mode", "enroll_approve", "disabled (pass -ca-cert/-config-key/-queue-* to enable)")
 	}
 	defer s.Close()
+	// Fail fast on an unmigrated/stale DB (a common footgun: pointing -dsn at a fresh
+	// file). The console's session auth needs the sessions table (migration 000009);
+	// without this, login fails later with a cryptic "no such table: sessions" 500.
+	if !s.DB.Migrator().HasTable("sessions") {
+		fatalf("admin-api: database has no schema (no 'sessions' table) — run 'harbor migrate up' against this -dsn first (or 'harbor seed-demo' for a demo)")
+	}
 	audit := func(c context.Context, a, ac, t, d string) error { _, e := s.AppendAudit(c, a, ac, t, d); return e }
 
 	// Authentication. Real session auth (OIDC / GitHub / mock IdP) takes precedence;

@@ -12,6 +12,7 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/joinkey"
 	"github.com/jeks313/nebula-control-plane/internal/lighthouse"
 	"github.com/jeks313/nebula-control-plane/internal/rollout"
+	"github.com/jeks313/nebula-control-plane/internal/store/migrate"
 	"gorm.io/gorm/clause"
 )
 
@@ -20,12 +21,11 @@ import (
 // cert-expiry, versions and bundle versions can't be created through the admin API
 // (they arrive from agents), so this writes them straight into the store, alongside
 // lighthouses, join keys, pending enrollments, an active rollout, and a valid audit
-// chain. DEV/DEMO ONLY. Run against a freshly migrated DB, then point admin-api at the
-// same DSN:
+// chain. DEV/DEMO ONLY. It migrates the DB itself, so the whole demo is two commands
+// against ONE -dsn (use the SAME -dsn for admin-api or the console sees an empty DB):
 //
-//	harbor migrate up   -driver sqlite -dsn demo.db
-//	harbor seed-demo    -driver sqlite -dsn demo.db
-//	harbor admin-api    -driver sqlite -dsn demo.db -dev-auth
+//	harbor seed-demo  -driver sqlite -dsn demo.db
+//	harbor admin-api  -driver sqlite -dsn demo.db -mock-idp
 func cmdSeedDemo(args []string) {
 	fs := flag.NewFlagSet("seed-demo", flag.ExitOnError)
 	driver, dsn := dbFlags(fs)
@@ -36,6 +36,12 @@ func cmdSeedDemo(args []string) {
 	ctx := context.Background()
 	now := time.Now()
 	audit := func(c context.Context, a, ac, t, d string) error { _, e := s.AppendAudit(c, a, ac, t, d); return e }
+
+	// Migrate first so the demo is self-contained (one DSN, no separate migrate step to
+	// accidentally point at a different DB). migrate.Up is idempotent.
+	if err := migrate.Up(s.DB); err != nil {
+		fatalf("seed-demo: migrate: %v", err)
+	}
 
 	// Fail fast on an already-populated store: the seeder is only partly idempotent
 	// (lighthouse/join-key/rollout creation would fatal mid-run on a re-run), and it's
