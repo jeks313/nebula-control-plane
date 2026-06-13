@@ -6,6 +6,7 @@ help:
 	@echo "build targets:"
 	@echo "  build        build pilot + harbor + gateway into bin/"
 	@echo "  test         go test ./..."
+	@echo "  demo         full walkthrough: enrollment spine (m3) + control plane (M5/M6)"
 	@echo "  m1-smoke     run the M1 acceptance (needs nebula + nebula-cert)"
 	@echo "  m3-demo      run the M3 end-to-end enrollment harness (genesis->join)"
 	@echo "  m4-chaos     run the M4.9 P3 chaos drill (Harbor down -> data plane up)"
@@ -42,6 +43,14 @@ m1-smoke:
 .PHONY: signer-softhsm
 signer-softhsm:
 	CGO_ENABLED=1 go test -tags pkcs11 -run TestPKCS11SoftHSMEndToEnd -v ./internal/signer
+
+.PHONY: demo
+demo: m3-demo
+	@bash spike/demo/walkthrough.sh
+
+.PHONY: demo-cp
+demo-cp:
+	@bash spike/demo/walkthrough.sh
 
 .PHONY: m3-demo
 m3-demo:
