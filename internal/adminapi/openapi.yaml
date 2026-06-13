@@ -94,6 +94,25 @@ paths:
               schema: { $ref: "#/components/schemas/LighthouseList" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "500": { $ref: "#/components/responses/Problem" }
+    post:
+      summary: Register a lighthouse.
+      operationId: addLighthouse
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LighthouseAdd" }
+      responses:
+        "201":
+          description: The registered lighthouse.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Lighthouse" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
   /admin/v1/approvals:
     get:
       summary: The dual-control approvals inbox (all kinds).
@@ -212,6 +231,162 @@ paths:
               schema: { $ref: "#/components/schemas/CompileResult" }
         "400": { $ref: "#/components/responses/Problem" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+  /admin/v1/lighthouses/{ip}:
+    put:
+      summary: Re-address (and re-activate) a lighthouse.
+      operationId: replaceLighthouse
+      parameters:
+        - { name: ip, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LighthouseReplace" }
+      responses:
+        "200":
+          description: The updated lighthouse.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Lighthouse" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+    delete:
+      summary: Retire a lighthouse (refuses the last active one).
+      operationId: removeLighthouse
+      parameters:
+        - { name: ip, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Removed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [overlay_ip, removed]
+                properties:
+                  overlay_ip: { type: string }
+                  removed: { type: boolean }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+  /admin/v1/rollouts/current:
+    get:
+      summary: The current staged rollout + per-host wave status.
+      operationId: getCurrentRollout
+      responses:
+        "200":
+          description: The current rollout, or {active:false} when none.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RolloutStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "500": { $ref: "#/components/responses/Problem" }
+  /admin/v1/rollouts:
+    post:
+      summary: Start a staged canary rollout.
+      operationId: startRollout
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RolloutStart" }
+      responses:
+        "201":
+          description: The started rollout.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RolloutView" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+  /admin/v1/rollouts/current/step:
+    post:
+      summary: Force one rollout evaluation (cron/ops).
+      operationId: stepRollout
+      responses:
+        "200":
+          description: Whether the state changed, plus the current status.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RolloutStepResult" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+  /admin/v1/rollouts/current/abort:
+    post:
+      summary: Abort the active rollout (touched hosts revert to prev).
+      operationId: abortRollout
+      responses:
+        "200":
+          description: Aborted.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [aborted]
+                properties: { aborted: { type: boolean } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+  /admin/v1/joinkeys:
+    get:
+      summary: List join keys (secrets never returned).
+      operationId: listJoinKeys
+      responses:
+        "200":
+          description: All join keys.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JoinKeyList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "500": { $ref: "#/components/responses/Problem" }
+    post:
+      summary: Create a join key; the secret is returned ONCE.
+      operationId: createJoinKey
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/JoinKeyCreate" }
+      responses:
+        "201":
+          description: The created key + its one-time secret.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JoinKeyCreated" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
+  /admin/v1/joinkeys/{name}/revoke:
+    post:
+      summary: Revoke a join key by name.
+      operationId: revokeJoinKey
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Revoked.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [name, revoked]
+                properties:
+                  name: { type: string }
+                  revoked: { type: boolean }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "500": { $ref: "#/components/responses/Problem" }
 components:
   securitySchemes:
     DevActor:
@@ -430,3 +605,102 @@ components:
           properties:
             inbound: { type: array, items: { $ref: "#/components/schemas/CompiledRule" } }
             outbound: { type: array, items: { $ref: "#/components/schemas/CompiledRule" } }
+    LighthouseAdd:
+      type: object
+      required: [overlay_ip, public_addrs]
+      properties:
+        overlay_ip: { type: string }
+        hostname: { type: string }
+        public_addrs: { type: array, items: { type: string } }
+    LighthouseReplace:
+      type: object
+      required: [public_addrs]
+      properties:
+        public_addrs: { type: array, items: { type: string } }
+    RolloutView:
+      type: object
+      required: [id, target_version, prev_version, state, active_wave, wave_size, min_healthy, created_at]
+      properties:
+        id: { type: integer, format: int64 }
+        description: { type: string }
+        target_version: { type: integer }
+        prev_version: { type: integer }
+        state: { type: string, description: "canary | widening | completed | rolledback (operator-abort lands as rolledback)" }
+        active_wave: { type: integer }
+        wave_size: { type: integer }
+        min_healthy: { type: integer }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        note: { type: string }
+    RolloutHost:
+      type: object
+      required: [overlay_ip, wave, status]
+      properties:
+        overlay_ip: { type: string }
+        wave: { type: integer }
+        status: { type: string, description: "waiting | converged | failed | reverted" }
+    RolloutStatus:
+      type: object
+      required: [active, hosts]
+      properties:
+        active: { type: boolean }
+        rollout: { $ref: "#/components/schemas/RolloutView" }
+        hosts: { type: array, items: { $ref: "#/components/schemas/RolloutHost" } }
+    RolloutStart:
+      type: object
+      required: [target_version, hosts]
+      properties:
+        target_version: { type: integer }
+        prev_version: { type: integer }
+        hosts: { type: array, items: { type: string } }
+        canary_size: { type: integer }
+        wave_size: { type: integer }
+        min_healthy: { type: integer }
+        observe_seconds: { type: integer }
+        missing_after_seconds: { type: integer }
+        description: { type: string }
+    RolloutStepResult:
+      type: object
+      required: [changed, status]
+      properties:
+        changed: { type: boolean }
+        status: { $ref: "#/components/schemas/RolloutStatus" }
+    JoinKey:
+      type: object
+      required: [name, groups, max_uses, used_count, auto_issue, ephemeral, quota_per_hour, state, created_at]
+      properties:
+        name: { type: string }
+        groups: { type: array, items: { type: string } }
+        sub_range: { type: string }
+        max_uses: { type: integer }
+        used_count: { type: integer }
+        auto_issue: { type: boolean }
+        ephemeral: { type: boolean }
+        quota_per_hour: { type: integer }
+        expires_at: { type: string, format: date-time }
+        state: { type: string }
+        created_at: { type: string, format: date-time }
+    JoinKeyList:
+      type: object
+      required: [joinkeys, count]
+      properties:
+        joinkeys: { type: array, items: { $ref: "#/components/schemas/JoinKey" } }
+        count: { type: integer }
+    JoinKeyCreate:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        groups: { type: array, items: { type: string } }
+        sub_range: { type: string }
+        max_uses: { type: integer }
+        ttl_seconds: { type: integer }
+        auto_issue: { type: boolean }
+        ephemeral: { type: boolean }
+        quota_per_hour: { type: integer }
+    JoinKeyCreated:
+      type: object
+      required: [secret, joinkey]
+      properties:
+        secret: { type: string, description: "the join-key secret — shown ONCE" }
+        joinkey: { $ref: "#/components/schemas/JoinKey" }

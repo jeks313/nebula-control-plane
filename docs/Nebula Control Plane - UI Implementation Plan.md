@@ -580,10 +580,22 @@ The v1 UI-0…UI-6 pretended the backend was done. Reframe as a **backend track*
     (Postgres double-commit race; SQLite was masking it) — with a `-race`
     regression test; plus `ErrCommit`→422, empty-body tolerance, `rules`/contract
     `[]`-not-null, compile un-gated for viewers, and 400-doc fixes.
-  - ⬜ **A0.4+** — remaining mutating endpoints (enroll approve/deny, join keys,
-    lighthouse add/replace/remove, rollout start/step/abort); generate the **TS
-    client** (once `ui/` exists); refactor the `harbor` CLI onto the API; CI test
-    that the **CLI ⊆ the OpenAPI surface**.
+  - ✅ **A0.4 (2026-06-13)** — fleet-management mutations (pure-DB): **lighthouse**
+    `POST/PUT {ip}/DELETE {ip}` (+ existing GET), **rollout** `GET current / POST
+    start / POST current/step / POST current/abort`, **join keys** `GET / POST
+    (secret once) / POST {name}/revoke`. All require the admin role, bind to the
+    authenticated principal (audited), and reuse the existing engines. OpenAPI +
+    contract test extended; proven over HTTP (lighthouse swap incl. last-active
+    block; rollout start/step/abort/restart; join-key create/list/revoke/dup-409;
+    viewer-403 on every mutation). Adversarially reviewed (10-agent): fixed a real
+    **`active:true` lie** for finished rollouts (derive from state), removed the
+    undocumented 501 path (engines now default in `New`), added step-audit
+    attribution, fixed the unreachable `aborted` enum, and stopped a spurious
+    audit row on idempotent lighthouse-remove.
+  - ⬜ **A0.5+** — enrollment **approve/deny** (approve needs the signer/CA wired
+    into admin-api — its own slice); generate the **TS client** (once `ui/`
+    exists); refactor the `harbor` CLI onto the API; CI test that the **CLI ⊆ the
+    OpenAPI surface**.
 - **A1 — Policy analysis engine** (gates UI-4): reachability query → flow-diff/blast-
   radius → assertions + publish gate, snapshotted into approvals.
 - **A2 — SSE change emitter** (upgrades UI-2+ live views; polling until then).
