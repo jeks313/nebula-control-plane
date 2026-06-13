@@ -1,12 +1,12 @@
 import { useDevices } from '../api/hooks'
-import { Card, Page, StateBlock, cx } from '../components/ui'
+import { Card, Page, StateBlock, ErrorState, cx } from '../components/ui'
 
 export function Devices() {
   const q = useDevices()
   return (
     <Page title="Devices" subtitle="Hosts reporting in over the mesh">
       {q.isLoading && <StateBlock kind="loading" message="Loading devices…" />}
-      {q.isError && <StateBlock kind="error" message="Couldn't load devices." />}
+      {q.isError && <ErrorState error={q.error} fallback="Couldn't load devices." />}
       {q.data && (q.data.devices.length === 0
         ? <StateBlock kind="empty" message="No devices yet." />
         : (
