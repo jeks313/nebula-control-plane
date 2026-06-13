@@ -10,6 +10,7 @@ import (
 	"errors"
 	"net/netip"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -275,6 +276,72 @@ func TestEnrollPerKeyQuota(t *testing.T) {
 	for _, k := range keys {
 		if k.Name == "q" && k.UsedCount != 2 {
 			t.Fatalf("used_count = %d, want 2 (blocked attempt must not consume)", k.UsedCount)
+		}
+	}
+}
+
+// TestEnrollApproveDenyRace is the A0.5 concurrency-safety acceptance (the
+// admin-API now exposes approve AND deny on the same pending row to concurrent
+// operators). Whichever wins, the compare-and-set guarantees the loser sees
+// ErrNotPending and — critically — a DENIED host never keeps an issued cert.
+// Run with -race.
+func TestEnrollApproveDenyRace(t *testing.T) {
+	for i := 0; i < 25; i++ {
+		e := setupEnroll(t)
+		ctx := context.Background()
+		secret, _, _ := joinkey.Create(ctx, e.store, joinkey.Params{Name: "rk", Groups: []string{"web"}, MaxUses: 1}, time.Now())
+		if _, err := e.cons.Process(ctx, e.candidate(t, secret, "host-rc")); err != nil {
+			t.Fatalf("process: %v", err)
+		}
+
+		type out struct {
+			status string
+			err    error
+		}
+		var apr, dny out
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			r, err := e.cons.Approve(ctx, "eid-host-rc", "admin-a")
+			apr = out{r.Status, err}
+		}()
+		go func() {
+			defer wg.Done()
+			r, err := e.cons.Deny(ctx, "eid-host-rc", "admin-b", "veto")
+			dny = out{r.Status, err}
+		}()
+		wg.Wait()
+
+		// Exactly one mutator wins; the loser gets ErrNotPending (never a silent success).
+		aprWon := apr.err == nil
+		dnyWon := dny.err == nil
+		if aprWon == dnyWon {
+			t.Fatalf("iter %d: exactly one must win, got approve(err=%v) deny(err=%v)", i, apr.err, dny.err)
+		}
+		if loser := apr.err; !aprWon && !errors.Is(loser, enrollment.ErrNotPending) {
+			t.Fatalf("iter %d: losing approve err = %v, want ErrNotPending", i, loser)
+		}
+		if loser := dny.err; !dnyWon && !errors.Is(loser, enrollment.ErrNotPending) {
+			t.Fatalf("iter %d: losing deny err = %v, want ErrNotPending", i, loser)
+		}
+
+		// The durable row must match the winner — and a denied host must hold NO cert.
+		var row enrollment.Enrollment
+		if err := e.store.DB.WithContext(ctx).Where("enrollment_id = ?", "eid-host-rc").First(&row).Error; err != nil {
+			t.Fatalf("iter %d: reload: %v", i, err)
+		}
+		if dnyWon {
+			if row.Status != enrollment.StatusDenied {
+				t.Fatalf("iter %d: deny won but row status = %s", i, row.Status)
+			}
+			if len(row.CertPEM) != 0 || row.OverlayIP != "" {
+				t.Fatalf("iter %d: DENIED host kept a cert/IP (cert=%dB ip=%q) — CAS failed", i, len(row.CertPEM), row.OverlayIP)
+			}
+		} else {
+			if row.Status != enrollment.StatusIssued || len(row.CertPEM) == 0 {
+				t.Fatalf("iter %d: approve won but row status=%s cert=%dB", i, row.Status, len(row.CertPEM))
+			}
 		}
 	}
 }
