@@ -244,6 +244,112 @@ Verdict-first, single scannable column:
 - Everything else per the Admin UI Plan, with §5's design language and §8's
   dual-control/preview patterns applied uniformly.
 
+> ⬜ **Planned change — device provenance + scope filters (requested 2026-06-13):**
+> The **Devices list** should show, per host, **how it joined the mesh** — its
+> *enrollment provenance*:
+> - **Cloud-attested hosts:** the attesting **site** = provider + account (e.g. `AWS ·
+>   111122223333`, `Azure · <subscription>`), optionally with region. (Provider-agnostic,
+>   per the M5.3 evidence shape: `attest_provider` / `attest_account` /
+>   `attest_principal` / `attest_region`.)
+> - **Token-enrolled hosts:** the **join-key name** they enrolled with (the join key's
+>   name *is* its description — there is no separate description field today).
+>
+> And the list must be **filterable down to those scopes** — narrow Devices to a single
+> attestation provider/account, or to a single join key (e.g. "show every host that came
+> in via `laptops-2026`", or "every host attested from AWS account 1111…").
+>
+> **Backend dependency (the real work):** the Devices list is *heartbeat-sourced* and
+> carries **no provenance today** — no groups, no join-key link, no attestation fields.
+> The provenance lives on the **enrollment record** (M5.3: the evidence columns +
+> `join_key_id` + `groups`). So this needs either (a) a **device→enrollment join** keyed
+> on `overlay_ip` (issued enrollments carry the allocated IP) — or `pubkey_hash` — that
+> surfaces provenance on the `Device` view, plus join-key **name** via `join_keys`
+> (the row only has `join_key_id`); or (b) an **extended `GET /admin/v1/devices`** that
+> returns the provenance fields and accepts filter params (e.g. `?provider=`,
+> `?attest_account=`, `?join_key=`). Caveat: a device can outlive/re-enroll, so define
+> which enrollment is authoritative (latest issued for that overlay IP). Until this lands
+> the column/filter have no data — A0/A1-style backend predecessor first, then the UI.
+
+> ⬜ **Planned change — editable join keys (requested 2026-06-13):**
+> The **Join Keys screen** needs an **Edit** action (today it is create + revoke only).
+> An "Edit" on each *active* key opens a dialog **pre-filled** with the current values and
+> lets an admin change: **groups** (add/remove), **max uses**, **TTL / expiry**,
+> **rate/hour quota**, **auto-issue**, **ephemeral**, **sub-range**.
+> - **Immutable (never editable):** the **secret** (it is hashed + shown once — editing
+>   it is "regenerate", a separate revoke-and-reissue) and the **name** (the key's
+>   identity / unique handle — renaming = a new key).
+> - **Semantics to get right:** toggling **auto-issue** is *authority-affecting* (it
+>   skips per-device approval) — keep the create-form warning on the edit form and audit
+>   the change loudly. Lowering **max_uses below the current used_count** simply exhausts
+>   the key — a useful *soft stop* short of full revoke; allow it. The edit must update
+>   only the config columns and **never clobber `used_count`** (the enroll path mutates
+>   it concurrently), so the write is a targeted column update, not a row replace; and
+>   it applies to **active keys only** (a revoked key is terminal).
+>
+> **Backend dependency:** there is **no update endpoint** today — only
+> `POST /admin/v1/joinkeys` (create, secret-once) and `POST /admin/v1/joinkeys/{name}/revoke`.
+> This needs a new `PUT`/`PATCH /admin/v1/joinkeys/{name}` (perm `joinkey:manage`,
+> audited, active-only, config-columns-only) before the UI Edit dialog can ship.
+
+> ⬜ **Planned change — editable Cloud Trust (requested 2026-06-13):**
+> The **Cloud Trust screen** is read-only today — no way to **add** a trusted account or
+> **edit** an existing one (e.g. change the groups granted). It needs add + edit.
+> - **Model — whole-config republish (not per-entry PATCH):** the active config is one
+>   document (`default_groups` + `aws[]`); "add/edit" = propose a *new version* of the
+>   whole config (the latest committed becomes active — same shape as policy publish).
+>   The form pre-fills from the active config, the admin changes it, and **Propose** opens
+>   a dual-control change reviewed in **Approvals**.
+> - **Backend already exists (this is UI-only):** unlike the two notes above,
+>   `POST /admin/v1/cloudtrust/propose` is built (M5.3) — dual-control (`cloudtrust:propose`,
+>   admin-only) + **step-up MFA**, committed via the generic `/approvals` flow with the
+>   committer re-validating. So the UI just needs the propose/edit form (gate the controls
+>   on `can('cloudtrust:propose')`); no new endpoint.
+> - **Open decision (up in the air):** whether the form lets you edit the **scope** (which
+>   accounts / ARN patterns may attest) and **admission** (`auto_issue`), or restricts the
+>   easy path to **groups-only** and treats scope/admission as more deliberate. Note: by
+>   construction *any* change to this config — groups, scope, or admission — already goes
+>   through **two-person approval + step-up** (it is a `cloudtrust.publish` change), so the
+>   safety is enforced regardless; the question is purely how much the form exposes vs.
+>   how loudly it warns. Changing scope/admission widens who can join the mesh — treat it
+>   as the highest-stakes edit (extra confirmation + a prominent diff in the approval).
+
+> ⬜ **Planned change — show the join-key name on Enrollments (requested 2026-06-13):**
+> On the **Enrollments screen**, a token-method enrollment shows just `token` in the
+> Method column — show the **name of the join key** it used instead (e.g. `token ·
+> laptops-2026`), mirroring how attested rows already show `AWS · <account>`.
+> - **Backend dependency (small):** `EnrollmentView` carries `join_key_id` (a number) but
+>   **not the name**, and the join-keys list doesn't expose its `id` either — so the
+>   client can't map id→name today. Cheapest fix: add **`join_key_name`** to
+>   `EnrollmentView` (server-side join `enrollments.join_key_id → join_keys.name`).
+>   Revoked keys keep their row so the name still resolves; fall back to `token` (or
+>   `token (#id)`) if the key is gone.
+> - **Shares the device-provenance note above:** that `enrollment → join_key` linkage is
+>   the same one the Devices-list join-key column needs — build it once and reuse it.
+
+> ⬜ **Planned change — drill-down from dashboard "Why" reasons (requested 2026-06-13):**
+> Each **"Why" reason** on the Fleet dashboard should be a **link to the relevant detail,
+> pre-filtered to that condition** — e.g. "2 certs expiring within 168h" → the **Devices**
+> view showing exactly those expiring hosts. Reason-code → destination:
+> - `CERTS_EXPIRING` / `CERTS_EXPIRED` / `HOSTS_STALE` / `CLOCK_SKEWED` / `HOSTS_UNHEALTHY`
+>   → **Devices**, filtered to the matching hosts.
+> - `AUDIT_CHAIN_BROKEN` / `AUDIT_CHECK_UNAVAILABLE` → **Audit** / trust-integrity tile.
+> - `ROLLOUT_ROLLEDBACK` / `ROLLOUT_IN_PROGRESS` → the rollout / active-ops view (no
+>   dedicated rollout page yet — links there when it exists).
+> - **Backend dependency:** the `Reason` schema already has an optional **`link`** field —
+>   recommend the **server populate it** with the deep-link (server-driven; the client
+>   just renders an anchor, no client-side code→route map). Crucially, the **Devices
+>   endpoint has no filter params today** (only `limit`/`after`); it needs a server-side
+>   filter (e.g. `?condition=expiring|expired|stale|clock_skewed|unhealthy`) computed with
+>   the **same fleet thresholds** the health rollup uses — the client does **not** know
+>   those thresholds (`-expiry-within`/`-stale-after`/`-clock-skew-ms` are server config),
+>   so client-side filtering would drift from the verdict. Server-computed keeps the
+>   drill-down consistent with the "Why" (P-UI-1).
+> - **Devices page** then honors the filter (a filter chip + a clear-filter affordance).
+> - **Same Devices-filter surface as the provenance note above:** the provenance scope
+>   filters (provider/account/join-key) and these health-condition filters are one general
+>   **Devices filtering** mechanism — design the `/devices` filter params + the UI filter
+>   bar to cover both.
+
 ---
 
 ## 4. The Policy & Group-Tag Designer (the centerpiece)
