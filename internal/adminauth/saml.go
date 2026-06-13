@@ -93,13 +93,19 @@ type samlLoginState struct {
 func (a *SAMLAuthenticator) cookieName() string { return "harbor_saml_login_" + a.name }
 
 // StartLogin issues an AuthnRequest (HTTP-Redirect binding) and stores the state.
-func (a *SAMLAuthenticator) StartLogin(w http.ResponseWriter, r *http.Request, returnTo string) {
+// When forceReauth is set (step-up MFA), it marks the request ForceAuthn so the
+// IdP re-authenticates the user (re-applying its MFA policy) rather than SSO-ing.
+func (a *SAMLAuthenticator) StartLogin(w http.ResponseWriter, r *http.Request, returnTo string, forceReauth bool) {
 	authReq, err := a.sp.MakeAuthenticationRequest(
 		a.sp.GetSSOBindingLocation(saml.HTTPRedirectBinding),
 		saml.HTTPRedirectBinding, saml.HTTPPostBinding)
 	if err != nil {
 		problem(w, http.StatusInternalServerError, "saml", "could not build authentication request")
 		return
+	}
+	if forceReauth {
+		yes := true
+		authReq.ForceAuthn = &yes
 	}
 	relay, err := randToken()
 	if err != nil {

@@ -672,10 +672,22 @@ The v1 UI-0…UI-6 pretended the backend was done. Reframe as a **backend track*
     chosen one enabled replay — so login-state cookies (SAML **and** OIDC) are now
     **HMAC-signed** (tamper-evident), the ACS rejects an empty request id, and
     `AllowIDPInitiated` is explicitly off.
-  - ⬜ **2.11+ deferred:** **step-up MFA *enforcement*** (`mfa_satisfied_at` is surfaced,
-    gating privileged actions on it is not yet wired); SAML **SLO** (single logout) +
-    **encrypted assertions**; the **CLI→HTTP refactor (A0.7)** can now proceed since
-    real session auth exists.
+  - ✅ **2.11 step-up MFA enforcement (2026-06-13).** The authority-GRANTING dual-control
+    actions (`approve`, policy `propose`) now require RECENT MFA: `requireStepUp` checks
+    the session's `mfa_satisfied_at` against `MFAFreshness` (default **15m**, 0 disables);
+    stale/absent → a distinguishable **403 `step_up_required`** so the console can force a
+    re-auth and retry. **Deny is deliberately NOT gated** — vetoing is the fail-closed
+    direction; a bad change must always be stoppable. The re-auth path is `?step_up=1` →
+    OIDC `prompt=login&max_age=0`, SAML `ForceAuthn` → a fresh login mints a new session
+    with a fresh `mfa_satisfied_at`. GitHub surfaces no MFA, so a GitHub session can never
+    satisfy step-up (by design). Wired into `harbor admin-api -mfa-freshness`; the dev seam
+    asserts MFA so local dogfooding still works. Adversarially reviewed (15-agent; 2
+    confirmed + fixed): a **future-dated** `mfa_satisfied_at` defeated freshness (one-sided
+    check, never expired) → symmetric bound with a small clock-skew tolerance (mirrors
+    `internal/nonce`); and `mfaFromClaims` **fell back to the token `iat`** when `auth_time`
+    was absent, making a cached MFA look fresh → now requires `auth_time` (fail closed).
+  - ⬜ **2.11+ deferred:** SAML **SLO** (single logout) + **encrypted assertions**; the
+    **CLI→HTTP refactor (A0.7)** can now proceed since real session auth exists.
 
 **UI track (each phase front-to-back, no screen before its data):**
 - **UI-0 — Foundation + design gate** *(needs A0):* design system + Storybook + the

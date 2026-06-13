@@ -53,6 +53,7 @@ type IdentityProvider interface {
 // harbor command gates it behind an explicit -dev-auth flag + a loud warning).
 type DevHeaderProvider struct {
 	Roles []string // roles granted to the dev actor (default ["admin"])
+	MFA   bool     // assert fresh MFA (so the dev seam satisfies step-up enforcement)
 }
 
 // Identify implements IdentityProvider.
@@ -65,7 +66,12 @@ func (d DevHeaderProvider) Identify(r *http.Request) (Identity, bool) {
 	if len(roles) == 0 {
 		roles = []string{"admin"}
 	}
-	return Identity{Principal: actor, Roles: roles}, true
+	id := Identity{Principal: actor, Roles: roles}
+	if d.MFA {
+		now := time.Now()
+		id.MFAAt = &now
+	}
+	return id, true
 }
 
 // Config builds a Server.
@@ -80,8 +86,12 @@ type Config struct {
 	Enrollment *enrollment.Consumer
 	CanIssue   bool
 	Thresholds fleet.Thresholds // health thresholds (sensible defaults if zero)
-	Now        func() time.Time
-	Logger     *slog.Logger // server-side error log (default slog.Default())
+	// MFAFreshness gates the most privileged actions (dual-control approve, policy
+	// publish) on recent MFA: the session's mfa_satisfied_at must be within this
+	// window. Zero disables step-up enforcement (dev / no-IdP).
+	MFAFreshness time.Duration
+	Now          func() time.Time
+	Logger       *slog.Logger // server-side error log (default slog.Default())
 }
 
 // Server is the admin API.
@@ -528,6 +538,9 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	if !s.requirePerm(w, id, PermApprovalDecide) {
 		return
 	}
+	if !s.requireStepUp(w, id) { // approving grants authority → require fresh MFA
+		return
+	}
 	cid, ok := pathID(w, r)
 	if !ok {
 		return
@@ -595,6 +608,9 @@ func (s *Server) handlePolicyActive(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handlePolicyPropose(w http.ResponseWriter, r *http.Request) {
 	id := identityFrom(r.Context())
 	if !s.requirePerm(w, id, PermPolicyPropose) {
+		return
+	}
+	if !s.requireStepUp(w, id) { // publishing policy is privileged → require fresh MFA
 		return
 	}
 	var body struct {
