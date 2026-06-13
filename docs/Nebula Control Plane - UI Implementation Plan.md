@@ -812,6 +812,35 @@ The v1 UI-0…UI-6 pretended the backend was done. Reframe as a **backend track*
 - **UI-2 — Fleet health** *(M4):* expiry/cliff + lighthouse-availability + trust-
   integrity cards, version landscape, heartbeat detail, **topology map v1**
   (policy-permitted). Live via A2 or polling.
+  - ✅ **UI-2 fleet dashboard (2026-06-13) — demo-able unit.** Rebuilt the Dashboard
+    into the §3.3 verdict-first layout, every tile backed by REAL data (no dataless
+    tiles): a plain-language **masthead** (authoritative `FleetHealth.totals.total`,
+    status, audit, active policy — no region count, that field doesn't exist); the
+    **health verdict** + severity-ordered reasons; an **active-operations strip**
+    (`rollouts/current` + pending `approvals`, polled, collapses when idle, auto-
+    rollback called out); and six focused cards — **convergence gauge**, **renewal
+    cliff** (expiry buckets + soonest, read-only — no force-renew endpoint), **version
+    landscape**, **trust integrity** (`audit/verify`, honestly distinguishing
+    verified / tampered / unavailable), **lighthouse registry** (labeled — liveness
+    pending), **recent activity**. The convergence/cliff/landscape tiles are computed
+    **client-side** from the devices page (all fields confirmed on `Device`); a "first
+    200 hosts" hint shows whenever the page is truncated (no silent fleet-wide claim).
+    New `lib/fleet.ts` aggregations are pure + unit-tested (Vitest now 37). Polling
+    stands in for live until A2/SSE.
+  - ✅ **Synthetic demo harness (2026-06-13).** New `harbor seed-demo` (DEV-ONLY,
+    classified in the no-UI-backdoor guard) writes a believable ~14-host fleet straight
+    into the store — heartbeats (version/cert/bundle spread, one each of expiring/stale/
+    skewed/unhealthy), 3 lighthouses, 3 join keys, 3 pending enrollments, an active v43
+    canary rollout, and a valid (verifiable) audit chain — so the **whole console**
+    (UI-0…UI-2) demos end-to-end with real API responses, no live agents:
+    `migrate up → seed-demo → admin-api -dev-auth`. Fails fast on a non-fresh DB.
+  - Adversarially reviewed (7-agent): 2 low + 1 info confirmed, the lows fixed (rollout
+    wave fraction is now 1-based/count-correct; seed-demo guards a populated DB).
+  - **Deferred (no backend data — confirmed absent):** the **topology map** (no
+    reachability-graph endpoint), **drift sparkline**, **force-renew** action,
+    lighthouse **liveness/cert-expiry** (registry only until lighthouses heartbeat),
+    region count, and a **device-detail** drill-down (no `GET /devices/{ip}`; the list
+    row is the only per-host data). Each needs a new backend endpoint first.
 - **UI-3 — Identity facts** *(M5):* group-map editor + cloud-trust settings;
   attestation evidence on device detail.
 - **UI-4 — Policy & Group-Tag Designer** *(M6 + A1) — the headline:* matrix-default

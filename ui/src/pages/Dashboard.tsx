@@ -1,5 +1,15 @@
 import { useFleetHealth, type FleetHealth } from '../api/hooks'
 import { Card, Page, StateBlock, ErrorState, cx } from '../components/ui'
+import {
+  Masthead,
+  ActiveOps,
+  ConvergenceCard,
+  RenewalCliffCard,
+  VersionLandscapeCard,
+  TrustIntegrityCard,
+  LighthousesCard,
+  RecentActivityCard,
+} from '../components/fleet'
 
 const STATUS: Record<FleetHealth['status'], { label: string; dot: string; text: string }> = {
   healthy: { label: 'Healthy', dot: 'bg-permit', text: 'text-permit' },
@@ -18,19 +28,33 @@ export function Dashboard() {
 
   return (
     <Page title="Fleet" subtitle="Server-computed health for the whole mesh">
+      <Masthead />
       {q.isLoading && <StateBlock kind="loading" message="Loading fleet health…" />}
-      {q.isError && <ErrorState error={q.error} fallback="Couldn't reach Core — the mesh may be down (see the break-glass runbook)." />}
-      {q.data && <Rollup h={q.data} />}
+      {q.isError && (
+        <ErrorState error={q.error} fallback="Couldn't reach Core — the mesh may be down (see the break-glass runbook)." />
+      )}
+      {q.data && <HealthVerdict h={q.data} />}
+
+      <ActiveOps />
+
+      {/* The focused cards — every tile is backed by real data (§3.3). */}
+      <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+        <ConvergenceCard />
+        <RenewalCliffCard />
+        <VersionLandscapeCard />
+        <TrustIntegrityCard />
+        <LighthousesCard />
+        <RecentActivityCard />
+      </div>
     </Page>
   )
 }
 
-function Rollup({ h }: { h: FleetHealth }) {
+// HealthVerdict — the 3-second answer: one big status chip + severity-ordered reasons.
+function HealthVerdict({ h }: { h: FleetHealth }) {
   const s = STATUS[h.status]
-  const t = h.totals
   return (
     <div className="flex flex-col gap-4">
-      {/* Hero: the one status answer, not a wall of gauges (§3.2). */}
       <Card className="mesh-grid overflow-hidden">
         <div className="flex items-center justify-between gap-6 p-6">
           <div className="flex items-center gap-3">
@@ -38,28 +62,16 @@ function Rollup({ h }: { h: FleetHealth }) {
             <div>
               <div className={cx('text-[24px] font-semibold tracking-[-0.02em]', s.text)}>{s.label}</div>
               <div className="text-ink-dim">
-                <span className="nums text-ink">{t.total}</span> hosts in the fleet
+                <span className="nums text-ink">{h.totals.total}</span> hosts in the fleet
               </div>
             </div>
           </div>
         </div>
       </Card>
 
-      {/* Totals — tabular, domain-named, drilldown-ready later. */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
-        <Metric label="Total" value={t.total} />
-        <Metric label="Expiring" value={t.expiring} tone={t.expiring > 0 ? 'warn' : undefined} />
-        <Metric label="Expired" value={t.expired} tone={t.expired > 0 ? 'danger' : undefined} />
-        <Metric label="Stale" value={t.stale} tone={t.stale > 0 ? 'warn' : undefined} />
-        <Metric label="Clock-skewed" value={t.clock_skewed} tone={t.clock_skewed > 0 ? 'warn' : undefined} />
-      </div>
-
-      {/* Reasons — why the status is what it is (provenance by default). */}
-      <Card>
-        <div className="border-b border-edge px-4 py-2 text-[12px] text-ink-faint">Why</div>
-        {h.reasons.length === 0 ? (
-          <div className="px-4 py-6 text-center text-ink-faint">Nothing needs attention.</div>
-        ) : (
+      {h.reasons.length > 0 && (
+        <Card>
+          <div className="border-b border-edge px-4 py-2 text-[12px] text-ink-faint">Why</div>
           <ul className="divide-y divide-edge">
             {h.reasons.map((r) => (
               <li key={r.code} className="flex items-center gap-3 px-4 py-2.5">
@@ -69,18 +81,8 @@ function Rollup({ h }: { h: FleetHealth }) {
               </li>
             ))}
           </ul>
-        )}
-      </Card>
+        </Card>
+      )}
     </div>
-  )
-}
-
-function Metric({ label, value, tone }: { label: string; value: number; tone?: 'warn' | 'danger' }) {
-  const text = tone === 'danger' ? 'text-danger' : tone === 'warn' ? 'text-warn' : 'text-ink'
-  return (
-    <Card className="px-4 py-3">
-      <div className="text-[11px] uppercase tracking-wide text-ink-faint">{label}</div>
-      <div className={cx('nums mt-1 text-[22px]', text)}>{value}</div>
-    </Card>
   )
 }
