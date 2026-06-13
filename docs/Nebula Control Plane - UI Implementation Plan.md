@@ -552,6 +552,17 @@ The v1 UI-0…UI-6 pretended the backend was done. Reframe as a **backend track*
 **Backend track (predecessor):**
 - **A0 — Admin API + dev-auth seam** (gates everything): `/admin/v1` read endpoints,
   OpenAPI, CLI refactor + contract test, `AdminIdentity` seam, `me`, `fleet/health`.
+  - ✅ **A0.1 (2026-06-13)** — `internal/adminapi` + `harbor admin-api` (mesh-only):
+    the **dev-auth seam** (`IdentityProvider` / `DevHeaderProvider`, env-gated),
+    read endpoints `me` · `fleet/health` · `devices` · `audit`(+`/verify`) ·
+    `lighthouses`, the **server-computed health rollup** `fleet.Rollup` (§3.2,
+    healthy/degraded/critical + reason codes), keyset pagination, problem+json.
+    Adversarially reviewed (14-agent workflow): fixed audit "couldn't-check" vs
+    "tampered" conflation (new `store.ErrAuditTampered`), error-string leakage,
+    `reasons: null`, `/devices` cursor, 401-not-503, role-null. Tested + live-smoked.
+  - ⬜ **A0.2+** — OpenAPI spec + generated TS client; mutating endpoints
+    (approvals/policy/joinkeys/lighthouse/rollout); refactor `harbor` CLI onto the
+    API; CI contract test (OpenAPI = only admin surface, CLI ⊆ it).
 - **A1 — Policy analysis engine** (gates UI-4): reachability query → flow-diff/blast-
   radius → assertions + publish gate, snapshotted into approvals.
 - **A2 — SSE change emitter** (upgrades UI-2+ live views; polling until then).
