@@ -112,11 +112,15 @@ JOIN="$(rsh "$HB_IP" "set -e
   [ -f hmac.b64 ]  || openssl rand 32 | basenc --base64url | tr -d '=' > hmac.b64
   [ -f queue.b64 ] || openssl rand 32 | basenc --base64url | tr -d '=' > queue.b64
   LH="$LH_OVERLAY=$LH_ADDR"
-  # (re)start the enrollment plane as transient systemd units
+  # (re)start the enrollment plane as transient systemd units, running AS
+  # ec2-user (neither gateway nor worker needs root). This keeps harbor.db +
+  # queue.db ec2-user-owned, so a plain (non-sudo) 'harbor enroll approve' can
+  # write the issued-bundle result. --uid/--gid set the process user; sudo is
+  # only to create the system transient unit.
   sudo systemctl reset-failed ncp-gateway ncp-worker 2>/dev/null || true
-  sudo systemd-run --unit ncp-gateway --collect /usr/local/bin/gateway \
+  sudo systemd-run --uid=$SSH_USER --gid=$SSH_USER --unit ncp-gateway --collect /usr/local/bin/gateway \
     -addr 0.0.0.0:${GW_URL##*:} -hmac-key ~/ncp/hmac.b64 -queue-dsn \$QDSN -queue-key ~/ncp/queue.b64 >/dev/null
-  sudo systemd-run --unit ncp-worker --collect /usr/local/bin/harbor enroll worker -pool '$POOL' \
+  sudo systemd-run --uid=$SSH_USER --gid=$SSH_USER --unit ncp-worker --collect /usr/local/bin/harbor enroll worker -pool '$POOL' \
     -dsn \$DSN -ca-cert \$G/ca.crt -ca-key \$G/ca.key -config-key \$G/config-signing.key \
     -hmac-key ~/ncp/hmac.b64 -queue-dsn \$QDSN -queue-key ~/ncp/queue.b64 -lighthouse \"\$LH\" >/dev/null
   # join keys (idempotent-ish: ignore 'already exists')
@@ -150,15 +154,14 @@ cat <<EOF
  Enroll the OFF-CLOUD iMac (waits for manual approval):
    pilot enroll -dir ~/.nebula -gateway $GW_URL \\
      -join-key ${IMAC_KEY:-<imac-key>} -config-pub deploy/terraform/config-signing.pub -name imac
-   # then APPROVE it on harbor. NOTE: the gateway/worker run as root (sudo
-   # systemd-run), so queue.db is root-owned — the approve must run as root too,
-   # with absolute paths (sudo HOME=/root), or its result write is silently denied.
+   # then APPROVE it on harbor (plain ec2-user; the worker runs as ec2-user so
+   # queue.db is ec2-user-owned and the issued-bundle result writes cleanly):
    ssh -i $SSH_KEY $SSH_USER@$HB_IP \\
-     'B=/home/$SSH_USER/ncp; EID=\$(harbor enroll pending -dsn \$B/harbor.db | awk "/ imac/{print \\\$1}"); \\
-      sudo harbor enroll approve \$EID -approver alice -dsn \$B/harbor.db \\
-        -ca-cert \$B/genesis/ca.crt -ca-key \$B/genesis/ca.key \\
-        -config-key \$B/genesis/config-signing.key \\
-        -hmac-key \$B/hmac.b64 -queue-dsn \$B/queue.db -queue-key \$B/queue.b64 \\
+     'EID=\$(harbor enroll pending -dsn ~/ncp/harbor.db | awk "/imac/{print \\\$1}"); \\
+      harbor enroll approve \$EID -approver alice -dsn ~/ncp/harbor.db \\
+        -ca-cert ~/ncp/genesis/ca.crt -ca-key ~/ncp/genesis/ca.key \\
+        -config-key ~/ncp/genesis/config-signing.key \\
+        -hmac-key ~/ncp/hmac.b64 -queue-dsn ~/ncp/queue.db -queue-key ~/ncp/queue.b64 \\
         -pool $POOL -lighthouse "$LH_OVERLAY=$LH_ADDR"'
    # the iMac re-runs the same enroll to fetch the bundle, then: sudo nebula -config /etc/nebula/config.yml
 
