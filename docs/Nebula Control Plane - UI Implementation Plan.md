@@ -654,10 +654,28 @@ The v1 UI-0…UI-6 pretended the backend was done. Reframe as a **backend track*
   + 1 fixed): **open-redirect** `\`-bypass in `return_to`, **mock-idp** not mutually
   exclusive with real auth, GitHub **unverified-email** as audit principal, and
   CSRF **bound to the session** (not a bare cookie). This unblocks **UI-0b**.
-  - ⬜ **2.11+ deferred:** **SAML 2.0** (AD FS / Entra) — the next authenticator behind
-    the same seam; **step-up MFA *enforcement*** (`mfa_satisfied_at` is surfaced, gating
-    privileged actions on it is not yet wired); the **CLI→HTTP refactor (A0.7)** can now
-    proceed since real session auth exists.
+  - ✅ **2.11 SAML 2.0 (2026-06-13).** The enterprise AD path, added behind the same
+    `FlowAuthenticator` seam (SAML is not OAuth-shaped — a signed XML assertion by
+    HTTP-POST to an ACS, not a `?code=` callback). `internal/adminauth/saml.go`:
+    SP-initiated AuthnRequest → IdP → ACS validation via `crewjam/saml` + `goxmldsig`
+    (signature against the IdP metadata cert, audience == SP entity id, conditions,
+    **InResponseTo bound to our AuthnRequest**), NameID → principal, attribute →
+    groups → the shared `RoleMapper`; an SP-metadata endpoint; AD FS/Entra MFA via
+    AuthnContextClassRef. Standard lib only (no hand-rolled XML-dsig); `golang-jwt`/
+    `samlsp` kept OUT of the shipped binary. Tested end-to-end against a **full
+    in-process mock SAML IdP** (`internal/adminauth/samlmock`, test-only) that signs
+    real assertions, plus replay/forgery rejection. Wired into `harbor admin-api`
+    (`-saml-idp-metadata-url/-file`, `-saml-sp-cert/-key`, `-saml-groups-attr`);
+    `-mock-idp` is fail-closed mutually exclusive with it. Adversarially reviewed
+    (9-agent; 1 confirmed + fixed): the login-state cookie was forgeable — an empty
+    `InResponseTo` would have admitted unsolicited/IdP-initiated assertions, and a
+    chosen one enabled replay — so login-state cookies (SAML **and** OIDC) are now
+    **HMAC-signed** (tamper-evident), the ACS rejects an empty request id, and
+    `AllowIDPInitiated` is explicitly off.
+  - ⬜ **2.11+ deferred:** **step-up MFA *enforcement*** (`mfa_satisfied_at` is surfaced,
+    gating privileged actions on it is not yet wired); SAML **SLO** (single logout) +
+    **encrypted assertions**; the **CLI→HTTP refactor (A0.7)** can now proceed since
+    real session auth exists.
 
 **UI track (each phase front-to-back, no screen before its data):**
 - **UI-0 — Foundation + design gate** *(needs A0):* design system + Storybook + the
