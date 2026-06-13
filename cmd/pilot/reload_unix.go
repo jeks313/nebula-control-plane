@@ -4,7 +4,7 @@ package main
 
 import (
 	"context"
-	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -15,7 +15,7 @@ import (
 // installReload makes SIGHUP to pilot trigger a hot-reload of nebula (M1.8).
 // This is the operator/-policy path for firewall/lighthouse/PKI changes that
 // Nebula can apply in place without dropping tunnels.
-func installReload(ctx context.Context, sup *supervisor.Supervisor) {
+func installReload(ctx context.Context, sup *supervisor.Supervisor, log *slog.Logger) {
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGHUP)
 	go func() {
@@ -26,9 +26,9 @@ func installReload(ctx context.Context, sup *supervisor.Supervisor) {
 				return
 			case <-ch:
 				if err := sup.Reload(); err != nil {
-					fmt.Fprintf(os.Stderr, "pilot: reload: %v\n", err)
+					log.Error("nebula reload failed (SIGHUP)", "err", err)
 				} else {
-					fmt.Fprintln(os.Stderr, "pilot: reloaded nebula (SIGHUP)")
+					log.Info("nebula reloaded (SIGHUP)")
 				}
 			}
 		}

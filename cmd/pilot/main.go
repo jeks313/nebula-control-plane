@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jeks313/nebula-control-plane/internal/clilog"
 	"github.com/jeks313/nebula-control-plane/internal/clock"
 	"github.com/jeks313/nebula-control-plane/internal/drift"
 	"github.com/jeks313/nebula-control-plane/internal/enrollclient"
@@ -30,6 +31,8 @@ import (
 var version = "dev"
 
 func main() {
+	// Baseline structured logger (env-tunable); `supervise` refines it via flags.
+	clilog.Setup(clilog.Options{Format: os.Getenv("PILOT_LOG_FORMAT"), Level: os.Getenv("PILOT_LOG_LEVEL")})
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
@@ -301,7 +304,10 @@ func cmdSupervise(args []string) {
 	dir := fs.String("dir", "", "host directory (for auto-renew; default: platform-specific)")
 	core := fs.String("core", "", "Core API base URL (enables proactive renewal)")
 	configPub := fs.String("config-pub", "", "pinned config-signing public key PEM (required with -core)")
+	logFormat := fs.String("log-format", "auto", "log format: auto (text on a TTY, JSON as a service) | text | json")
+	logLevel := fs.String("log-level", "info", "log level: debug | info | warn | error")
 	_ = fs.Parse(args)
+	log := clilog.Setup(clilog.Options{Format: *logFormat, Level: *logLevel})
 
 	if *configPath == "" {
 		fmt.Fprintln(os.Stderr, "pilot supervise: -config is required")
@@ -317,7 +323,8 @@ func cmdSupervise(args []string) {
 		ConfigPath:     *configPath,
 		ExpectedSHA256: *sha,
 	}
-	installReload(ctx, sup) // SIGHUP -> hot reload nebula (Unix); no-op on Windows
+	installReload(ctx, sup, log) // SIGHUP -> hot reload nebula (Unix); no-op on Windows
+	log.Info("pilot supervise starting", "config", *configPath, "nebula", *nebulaPath, "version", version)
 
 	if *core != "" {
 		if *configPub == "" {
@@ -352,10 +359,12 @@ func cmdSupervise(args []string) {
 		// Drift detection (M6.7): re-assert the signed config over any local edit.
 		dm := drift.New(drift.Config{Layout: layout, PinnedConfigPub: pinned, Reload: sup.Reload})
 		go func() { _ = dm.Run(ctx) }()
+		log.Info("pilot background tasks enabled", "renew", true, "heartbeat", true, "drift", true, "core", *core)
 	}
 
 	if err := sup.Run(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "pilot: %v\n", err)
+		log.Error("pilot supervise exited", "err", err)
 		os.Exit(1)
 	}
+	log.Info("pilot supervise stopped")
 }

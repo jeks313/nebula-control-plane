@@ -9,12 +9,14 @@ import (
 	"encoding/base64"
 	"flag"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/jeks313/nebula-control-plane/internal/clilog"
 	"github.com/jeks313/nebula-control-plane/internal/gateway"
 	"github.com/jeks313/nebula-control-plane/internal/nonce"
 	"github.com/jeks313/nebula-control-plane/internal/queue"
@@ -38,7 +40,10 @@ func main() {
 	burst := fs.Int("burst", 20, "edge rate-limit burst")
 	queueDSN := fs.String("queue-dsn", "", "durable queue SQLite DSN (default: in-memory dev queue)")
 	queueKeyPath := fs.String("queue-key", "", "gateway<->Core queue HMAC key (base64url, >=16 bytes)")
+	logFormat := fs.String("log-format", "auto", "log format: auto (text on a TTY, JSON as a service) | text | json")
+	logLevel := fs.String("log-level", "info", "log level: debug | info | warn | error")
 	_ = fs.Parse(os.Args[1:])
+	log := clilog.Setup(clilog.Options{Format: *logFormat, Level: *logLevel})
 
 	keys, err := loadKeys(*keyPath, *prevPath)
 	if err != nil {
@@ -80,15 +85,17 @@ func main() {
 	defer stop()
 	go func() {
 		<-ctx.Done()
+		log.Info("gateway shutting down", "reason", "signal")
 		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutCtx)
 	}()
 
-	fmt.Fprintf(os.Stderr, "gateway %s listening on %s\n", version, *addr)
+	log.Info("gateway listening", "addr", *addr, "version", version, "access", "public/credential-less")
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		fatalf("%v", err)
 	}
+	log.Info("gateway stopped")
 }
 
 // loadKeys reads the primary (and optional previous) nonce key. For dev
@@ -102,7 +109,7 @@ func loadKeys(keyPath, prevPath string) ([][]byte, error) {
 		if _, err := rand.Read(eph); err != nil {
 			return nil, err
 		}
-		fmt.Fprintln(os.Stderr, "gateway: WARNING: no -hmac-key; using an ephemeral key (dev only)")
+		slog.Warn("gateway: no -hmac-key; using an ephemeral key (dev only) — restart invalidates outstanding nonces")
 		return [][]byte{eph}, nil
 	}
 	k, err := readKey(keyPath)
@@ -125,7 +132,7 @@ func loadKeys(keyPath, prevPath string) ([][]byte, error) {
 // it is queue-only (no CA/devices/audit), preserving least privilege (P3).
 func openQueue(dsn, keyPath string) (queue.Queue, error) {
 	if dsn == "" {
-		fmt.Fprintln(os.Stderr, "gateway: WARNING: no -queue-dsn; using an in-memory queue (dev only)")
+		slog.Warn("gateway: no -queue-dsn; using an in-memory queue (dev only) — enrollments are not durable")
 		return queue.NewMemory(), nil
 	}
 	if keyPath == "" {

@@ -13,6 +13,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/big"
 	"net"
 	"net/http"
@@ -118,7 +119,7 @@ func buildAdminAuth(ctx context.Context, af adminAuthFlags, addr string, db *gor
 			fatalf("admin-api: mock-idp oidc: %v", err)
 		}
 		auths = append(auths, oidc)
-		fmt.Fprintf(os.Stderr, "harbor admin-api: WARNING mock IdP at %s — DEV ONLY (never in production)\n", issuer)
+		slog.Warn("admin-api: mock IdP enabled — DEV ONLY, never in production", "issuer", issuer)
 	}
 
 	if *af.oidcIssuer != "" {
@@ -130,14 +131,14 @@ func buildAdminAuth(ctx context.Context, af adminAuthFlags, addr string, db *gor
 			fatalf("admin-api: oidc: %v", err)
 		}
 		auths = append(auths, oidc)
-		fmt.Fprintf(os.Stderr, "harbor admin-api: OIDC login via %s\n", *af.oidcIssuer)
+		slog.Info("admin-api: OIDC login enabled", "issuer", *af.oidcIssuer)
 	}
 
 	if *af.ghClientID != "" {
 		auths = append(auths, adminauth.NewGitHub(adminauth.GitHubOptions{
 			ClientID: *af.ghClientID, ClientSecret: *af.ghClientSecret, RedirectURL: redirect,
 		}))
-		fmt.Fprintln(os.Stderr, "harbor admin-api: GitHub login enabled")
+		slog.Info("admin-api: GitHub login enabled")
 	}
 
 	if samlOn {
@@ -151,7 +152,7 @@ func buildAdminAuth(ctx context.Context, af adminAuthFlags, addr string, db *gor
 			fatalf("admin-api: saml: %v", err)
 		}
 		flows = append(flows, sa)
-		fmt.Fprintf(os.Stderr, "harbor admin-api: SAML login enabled (SP metadata at %s/admin/v1/auth/saml/metadata)\n", base)
+		slog.Info("admin-api: SAML login enabled", "sp_metadata", base+"/admin/v1/auth/saml/metadata")
 	}
 
 	if len(auths) == 0 && len(flows) == 0 {
@@ -172,7 +173,7 @@ func buildAdminAuth(ctx context.Context, af adminAuthFlags, addr string, db *gor
 		}
 	}
 	if !*af.secure {
-		fmt.Fprintln(os.Stderr, "harbor admin-api: WARNING cookies are not Secure (-auth-secure off) — only for local http")
+		slog.Warn("admin-api: session cookies are not Secure (-auth-secure off) — local http only")
 	}
 	svc := adminauth.New(adminauth.Config{
 		Store:              adminauth.NewSessionStore(db, nil),
@@ -285,7 +286,7 @@ func loadOrGenSPKeypair(keyPath, certPath string) (*rsa.PrivateKey, *x509.Certif
 		}
 		return key, leaf
 	}
-	fmt.Fprintln(os.Stderr, "harbor admin-api: WARNING SAML SP using an ephemeral self-signed cert (set -saml-sp-cert/-saml-sp-key for a stable SP identity)")
+	slog.Warn("admin-api: SAML SP using an ephemeral self-signed cert; set -saml-sp-cert/-saml-sp-key for a stable identity")
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		fatalf("admin-api: gen SAML SP key: %v", err)

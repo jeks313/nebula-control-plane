@@ -4,6 +4,12 @@
 *.out
 coverage*
 
+# locally built command binaries (from `go build ./cmd/...`)
+/harbor
+/pilot
+/pilot.exe
+/gateway
+
 # M0 spike runtime artifacts (generated certs, keys, configs, logs, pids)
 spike/m0/run/
 # locally built tools (e.g. pkcs11-enabled nebula-cert)
