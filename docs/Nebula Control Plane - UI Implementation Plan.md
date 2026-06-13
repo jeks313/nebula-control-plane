@@ -566,9 +566,24 @@ The v1 UI-0…UI-6 pretended the backend was done. Reframe as a **backend track*
     and a **contract test** (kin-openapi, test-only dep) that fails on drift:
     the spec validates, documented operations **exactly equal** the served routes
     (both directions), and **every live 200 body is validated against its schema**.
-  - ⬜ **A0.3+** — generate the **TS client** (once `ui/` exists); **mutating
-    endpoints** (approvals/policy/joinkeys/lighthouse/rollout); refactor the
-    `harbor` CLI onto the API; CI test that the **CLI ⊆ the OpenAPI surface**.
+  - ✅ **A0.3 (2026-06-13)** — first **mutating endpoints**, the dual-control
+    publish showcase: `POST /policy/propose`, `POST /policy/compile` (read-only
+    live analysis), `GET /policy/active`, `GET /approvals`, `GET /approvals/{id}`,
+    `POST /approvals/{id}/approve`, `POST /approvals/{id}/deny`. Mutations **bind to
+    the authenticated principal** (never a body field) and require the admin role
+    (the RBAC seam); dual-control sentinels mapped to HTTP (409 self-approve /
+    duplicate / not-pending, 422 commit-rejected, 404). OpenAPI + contract test
+    extended; proven over HTTP (propose → self-approve 409 → distinct approver
+    commits → active). Adversarially reviewed (14-agent): **hardened the
+    `internal/dualcontrol` engine with a compare-and-set commit claim** so the
+    committer runs exactly once even with concurrent distinct approvers
+    (Postgres double-commit race; SQLite was masking it) — with a `-race`
+    regression test; plus `ErrCommit`→422, empty-body tolerance, `rules`/contract
+    `[]`-not-null, compile un-gated for viewers, and 400-doc fixes.
+  - ⬜ **A0.4+** — remaining mutating endpoints (enroll approve/deny, join keys,
+    lighthouse add/replace/remove, rollout start/step/abort); generate the **TS
+    client** (once `ui/` exists); refactor the `harbor` CLI onto the API; CI test
+    that the **CLI ⊆ the OpenAPI surface**.
 - **A1 — Policy analysis engine** (gates UI-4): reachability query → flow-diff/blast-
   radius → assertions + publish gate, snapshotted into approvals.
 - **A2 — SSE change emitter** (upgrades UI-2+ live views; polling until then).

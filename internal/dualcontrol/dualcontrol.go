@@ -28,10 +28,11 @@ import (
 type State string
 
 const (
-	StatePending   State = "pending"
-	StateCommitted State = "committed"
-	StateDenied    State = "denied"
-	StateFailed    State = "failed" // quorum reached but the committer errored
+	StatePending    State = "pending"
+	StateCommitting State = "committing" // transient: an approver won the commit claim and is running the committer
+	StateCommitted  State = "committed"
+	StateDenied     State = "denied"
+	StateFailed     State = "failed" // quorum reached but the committer errored
 )
 
 // Decision is one admin's vote on a change.
@@ -48,6 +49,9 @@ var (
 	ErrDuplicateActor = errors.New("dualcontrol: this actor has already signed off on the change")
 	ErrNoProposer     = errors.New("dualcontrol: a proposer identity is required")
 	ErrNoActor        = errors.New("dualcontrol: an actor identity is required")
+	// ErrCommit wraps a committer's business failure (quorum was reached but the
+	// effect was rejected/failed) so callers can distinguish it from infra errors.
+	ErrCommit = errors.New("dualcontrol: commit failed")
 )
 
 // Change is one privileged change awaiting (or past) dual control.
@@ -213,14 +217,29 @@ func (c *Controller) Approve(ctx context.Context, id int64, actor string) (Chang
 		return c.reload(ctx, id)
 	}
 
-	// Quorum reached: run the committer, then record the terminal state. The
-	// change is only marked committed if the effect actually applied.
+	// Quorum reached. Atomically CLAIM the commit so exactly one approver runs the
+	// committer even if two reach quorum concurrently: a compare-and-set on the
+	// pending->committing transition. Dialect-agnostic (no FOR UPDATE needed; the
+	// SQLite path is single-writer anyway, the Postgres path serializes on this
+	// UPDATE). The committer runs outside the signoff tx so a commit failure still
+	// leaves the sign-off durable + the change marked failed.
+	claim := c.cfg.DB.WithContext(ctx).Model(&Change{}).
+		Where("id = ? AND state = ?", id, string(StatePending)).
+		Update("state", string(StateCommitting))
+	if claim.Error != nil {
+		return Change{}, fmt.Errorf("dualcontrol: claim commit: %w", claim.Error)
+	}
+	if claim.RowsAffected == 0 {
+		// Another approver already won the race (committing/committed). Not an error.
+		return c.reload(ctx, id)
+	}
+
 	if fn := c.committer(ch.Kind); fn != nil {
 		if cerr := fn(ctx, ch); cerr != nil {
 			c.finalize(ctx, id, StateFailed)
 			c.audit(ctx, actor, "dualcontrol-commit-failed", c.target(ch), cerr.Error())
 			out, _ := c.reload(ctx, id)
-			return out, fmt.Errorf("dualcontrol: commit %s: %w", ch.Kind, cerr)
+			return out, fmt.Errorf("%w: %v", ErrCommit, cerr)
 		}
 	}
 	c.finalize(ctx, id, StateCommitted)

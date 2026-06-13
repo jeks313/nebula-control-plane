@@ -818,8 +818,9 @@ func cmdPolicy(args []string) {
 }
 
 // KindPolicyPublish is the dual-control change kind for firewall policy publish
-// (6.5). The active fleet policy is the latest committed change of this kind.
-const KindPolicyPublish = "policy.publish"
+// (6.5); shared with the admin API via internal/policy so both write the same
+// dual-control records.
+const KindPolicyPublish = policy.PublishKind
 
 // newPolicyController builds the dual-control controller wired to the audit log,
 // with a committer that re-validates the policy payload at commit time (defense

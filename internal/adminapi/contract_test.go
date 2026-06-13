@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -122,6 +123,11 @@ func TestResponsesConformToSpec(t *testing.T) {
 
 	for _, r := range srv.Routes() {
 		method, path := splitRoute(r)
+		// Generic conformance covers GET endpoints with no path params; POST
+		// (mutations) and parameterized paths are exercised by dedicated flow tests.
+		if method != "GET" || strings.Contains(path, "{") {
+			continue
+		}
 		t.Run(r, func(t *testing.T) {
 			schema := responseSchema(t, doc, method, path, 200)
 
