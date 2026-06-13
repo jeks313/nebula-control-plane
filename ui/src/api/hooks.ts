@@ -111,6 +111,18 @@ export function useActivePolicy() {
   })
 }
 
+// --- UI-3 cloud-attestation trust config ---
+
+export type CloudTrust = components['schemas']['CloudTrustActive']
+export type CloudTrustAccount = components['schemas']['CloudTrustAccount']
+
+export function useCloudTrust() {
+  return useQuery({
+    queryKey: ['cloudtrust'],
+    queryFn: () => unwrap(api.GET('/admin/v1/cloudtrust/active')),
+  })
+}
+
 // --- mutations ---
 // All use onSettled (not onSuccess) to refetch: a 409 "not pending" or a 404
 // "already revoked" still means the list moved, so we always reconcile. Auth/step-up

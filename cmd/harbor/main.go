@@ -23,6 +23,7 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/adminauth"
 	"github.com/jeks313/nebula-control-plane/internal/adminui"
 	"github.com/jeks313/nebula-control-plane/internal/bundle"
+	"github.com/jeks313/nebula-control-plane/internal/cloudtrust"
 	"github.com/jeks313/nebula-control-plane/internal/coreapi"
 	"github.com/jeks313/nebula-control-plane/internal/dualcontrol"
 	"github.com/jeks313/nebula-control-plane/internal/enrollment"
@@ -419,6 +420,7 @@ type coreFlags struct {
 	lighthouseDB                         *bool
 	policyFile                           *string
 	policyDB                             *bool
+	cloudTrustDB                         *bool
 }
 
 func addCoreFlags(fs *flag.FlagSet) *coreFlags {
@@ -443,6 +445,7 @@ func addCoreFlags(fs *flag.FlagSet) *coreFlags {
 	cf.lighthouseDB = fs.Bool("lighthouse-db", false, "source lighthouses from the DB registry (6.8) instead of -lighthouse")
 	cf.policyFile = fs.String("policy", "", "central firewall policy file (M6); omit for Pilot's local default")
 	cf.policyDB = fs.Bool("policy-db", false, "use the dual-control published policy from the DB (6.5) instead of -policy")
+	cf.cloudTrustDB = fs.Bool("cloudtrust-db", false, "enable AWS SigV4 attestation using the dual-control published cloud-trust config from the DB (M5)")
 	return cf
 }
 
@@ -464,6 +467,21 @@ func (cf *coreFlags) policy(s *store.Store) *policy.Policy {
 	}
 	p := loadPolicy(*cf.policyFile)
 	return &p
+}
+
+// cloudTrust resolves the active cloud-attestation trust config (M5). With
+// -cloudtrust-db it reads the latest committed cloudtrust.publish change; nil means
+// aws-sigv4 attestation stays disabled (fail closed). Read once at startup, like policy.
+func (cf *coreFlags) cloudTrust(s *store.Store) *cloudtrust.Config {
+	if !*cf.cloudTrustDB {
+		return nil
+	}
+	c, ok := activeCloudTrust(context.Background(), s)
+	if !ok {
+		fmt.Fprintln(os.Stderr, "harbor: -cloudtrust-db set but no cloud-trust config has been published yet; aws-sigv4 attestation disabled")
+		return nil
+	}
+	return &c
 }
 
 // lighthouseSource returns the live registry source when -lighthouse-db is set,
@@ -514,12 +532,14 @@ func (cf *coreFlags) build() (*enrollment.Consumer, *queue.Durable, *store.Store
 		fatalf("enroll: queue: %v", err)
 	}
 	cfgPub, _ := cfgB.PublicKey()
+	ct := cf.cloudTrust(s) // nil unless -cloudtrust-db && a config is published
 	cons := enrollment.New(enrollment.Config{
 		Store: s, Nonces: ring, Replay: replay.New(2 * time.Minute),
 		Signer: sg, Allocator: alloc, Pool: pool, CertLifetime: *cf.certLifetime,
 		ConfigBackend: cfgB, ConfigKeyID: wire.PubkeyHash(cfgPub),
 		CABundlePEM: caPEM, Lighthouses: parseLighthouses(*cf.lighthouse), LighthouseSource: cf.lighthouseSource(s), Policy: cf.policy(s),
 		Results: q, ResultTTL: time.Hour,
+		CloudTrust: ct, AWSSigV4Enabled: ct != nil,
 	})
 	return cons, q, s
 }
@@ -849,7 +869,30 @@ func newPolicyController(s *store.Store) *dualcontrol.Controller {
 		}
 		return policy.CheckInvariants(p)
 	})
+	// Cloud-trust-publish committer so the CLI approve path commits these changes too.
+	dc.Register(cloudtrust.PublishKind, func(_ context.Context, ch dualcontrol.Change) error {
+		_, err := cloudtrust.Parse(ch.Payload)
+		return err
+	})
 	return dc
+}
+
+// activeCloudTrust returns the currently published cloud-trust config (latest committed
+// cloudtrust.publish), if any.
+func activeCloudTrust(ctx context.Context, s *store.Store) (cloudtrust.Config, bool) {
+	dc := newPolicyController(s)
+	ch, ok, err := dc.LatestCommitted(ctx, cloudtrust.PublishKind)
+	if err != nil {
+		fatalf("cloudtrust: read active: %v", err)
+	}
+	if !ok {
+		return cloudtrust.Config{}, false
+	}
+	c, err := cloudtrust.Parse(ch.Payload)
+	if err != nil {
+		fatalf("cloudtrust: active config #%d is unparseable: %v", ch.ID, err)
+	}
+	return c, true
 }
 
 // activePolicy returns the currently published policy (latest committed

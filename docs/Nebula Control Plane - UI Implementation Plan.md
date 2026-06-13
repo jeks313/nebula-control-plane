@@ -843,6 +843,36 @@ The v1 UI-0…UI-6 pretended the backend was done. Reframe as a **backend track*
     row is the only per-host data). Each needs a new backend endpoint first.
 - **UI-3 — Identity facts** *(M5):* group-map editor + cloud-trust settings;
   attestation evidence on device detail.
+  - ✅ **M5.3 attestation backend predecessor (2026-06-13).** UI-3 was backend-blocked
+    (attestation unwired/gated-off; no cloud-trust store; no evidence fields), so this
+    built the predecessor that makes its data exist — **AWS SigV4 instance attestation
+    end-to-end**, provider-agnostic by shape (Azure/GCP slot in later). New
+    `internal/cloudtrust`: a **dual-control-published** trust config
+    (`cloudtrust.publish`, mirroring `policy.publish`) — `{default_groups, aws:[{account,
+    arn_patterns, groups, auto_issue}]}` — proposed with `cloudtrust:propose` + step-up
+    and approved through the generic `/approvals` flow (no-self-approve, quorum-2). The
+    **enroll consumer** now accepts `aws-sigv4`: re-verifies the SigV4 STS attestation
+    (`awsattest.Verify`) **bound to the same single-use nonce + host pubkey** the JWS
+    verify already consumed, enforces the cloud-trust allowlist (`MatchAWS`), derives
+    groups (default ∪ matched account), and auto-issues or queues per the account's
+    posture — **fail-closed** when disabled/unconfigured/untrusted. **Provider-agnostic
+    evidence** (provider/account/principal/region/verified_at) is captured from the
+    STS-vouched identity (never the host), persisted (migration 000011), and exposed on
+    `EnrollmentView`. New endpoints `GET /admin/v1/cloudtrust/active` +
+    `POST /admin/v1/cloudtrust/propose` (`-cloudtrust-db` loads the active config into
+    Core). **Read-only UI** shipped: a **Cloud Trust** page (active trusted accounts +
+    default groups) and **attestation evidence** surfaced on the Enrollments rows.
+    Tests: cloudtrust unit + the attested enroll path end-to-end (auto-issue+evidence,
+    pending, untrusted-denied, binding-mismatch-denied, STS-unavailable-denied,
+    disabled-denied) via a mock STS. Adversarially reviewed (6-agent): 3 confirmed
+    (1 medium + 2 low), all fixed — STS-unavailable now **denies cleanly** (the host
+    re-enrolls with a fresh nonce) instead of nacking into a replay-loop, and STS
+    429/5xx are classified unavailable rather than a rejection.
+  - **Deferred to UI-3b / later:** the dual-control cloud-trust **editor** (propose/
+    approve UI — read-only today), **Azure/GCP** attestation providers, the full **5.5
+    immutable-fact group map** (per-account default groups stand in for now), live
+    hot-reload of the cloud-trust config (startup-read today, like `-policy-db`), and a
+    device-detail drill-down (needs a `GET /devices/{ip}` endpoint).
 - **UI-4 — Policy & Group-Tag Designer** *(M6 + A1) — the headline:* matrix-default
   + canvas + DSL, the analysis rail (reachability/tests/diff/blast-radius),
   single-admin-aware dual-control publish, canary monitor, drift panel; Network/IPAM.

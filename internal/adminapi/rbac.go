@@ -21,12 +21,13 @@ const mfaClockSkew = 2 * time.Minute
 type Permission string
 
 const (
-	PermLighthouseManage Permission = "lighthouse:manage" // add/replace/remove lighthouses
-	PermRolloutControl   Permission = "rollout:control"   // start/step/abort rollouts
-	PermJoinKeyManage    Permission = "joinkey:manage"    // create/revoke join keys
-	PermEnrollDecide     Permission = "enroll:decide"     // approve/deny enrollments
-	PermPolicyPropose    Permission = "policy:propose"    // open a policy-publish change
-	PermApprovalDecide   Permission = "approval:decide"   // approve/deny a dual-control change
+	PermLighthouseManage  Permission = "lighthouse:manage"  // add/replace/remove lighthouses
+	PermRolloutControl    Permission = "rollout:control"    // start/step/abort rollouts
+	PermJoinKeyManage     Permission = "joinkey:manage"     // create/revoke join keys
+	PermEnrollDecide      Permission = "enroll:decide"      // approve/deny enrollments
+	PermPolicyPropose     Permission = "policy:propose"     // open a policy-publish change
+	PermApprovalDecide    Permission = "approval:decide"    // approve/deny a dual-control change
+	PermCloudTrustPropose Permission = "cloudtrust:propose" // open a cloud-trust-publish change
 )
 
 // RoleAdmin, RoleOperator, RoleViewer, RoleBreakGlass are the named roles. They
