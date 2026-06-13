@@ -641,11 +641,24 @@ The v1 UI-0…UI-6 pretended the backend was done. Reframe as a **backend track*
     pipelines/`jq` are unaffected. Adversarially reviewed (4-agent; 1 confirmed + fixed):
     the pilot SIGHUP reload handler still used raw `fmt`, breaking the JSON stream — now
     routed through the logger. No secret leakage; stdout/stderr discipline verified.
-  - ⬜ **A0.8 — runtime CLI⊆API parity:** add **admin API tokens** (non-interactive
-    machine auth — the admin API only accepts human OIDC/SAML sessions today), then
-    refactor the operator `harbor` commands to consume `/admin/v1` over HTTP, upgrading
-    the A0.6 static-subset guardrail into runtime parity. Generate the **TS client**
-    once `ui/` exists.
+  - ✅ **A0.8 admin API tokens (2026-06-13).** Non-interactive machine auth for
+    `/admin/v1` (the human path is an IdP session; automation/CI/curl/the future TS
+    client present `Authorization: Bearer`). `internal/adminauth/token.go`:
+    `harbor_`-prefixed tokens (32 random bytes, scanner-friendly), **stored only as a
+    SHA-256** (a DB read yields no usable credential), with scoped roles + expiry +
+    revocation; `TokenProvider` resolves the bearer header on the existing
+    `Identify(r)` seam, and an `adminapi.ChainProvider` runs it **before** the
+    session/dev provider so tokens and human sessions coexist. **Security rule:** a
+    token's `mfa_satisfied_at` is always nil, so a token can run operator ops but is
+    refused the **step-up-gated** dual-control actions (approve / policy publish) —
+    machine approval of two-person control is impossible by construction. `harbor
+    admin-token create|list|revoke` (LOCAL bootstrap — they create the auth, so can't
+    require it; audited; token printed once, never logged); classified break-glass in
+    the A0.6 catalog (whose extractor now parses the whole package, not just main.go).
+    Migration `000010`. Adversarially reviewed (3-agent): **no findings**.
+  - ⬜ **A0.8b — runtime CLI⊆API parity:** refactor the operator `harbor` commands to
+    consume `/admin/v1` over HTTP (using a token), upgrading the A0.6 static-subset
+    guardrail into runtime parity. Generate the **TS client** once `ui/` exists.
 - **A1 — Policy analysis engine** (gates UI-4): reachability query → flow-diff/blast-
   radius → assertions + publish gate, snapshotted into approvals.
 - **A2 — SSE change emitter** (upgrades UI-2+ live views; polling until then).
@@ -701,7 +714,7 @@ The v1 UI-0…UI-6 pretended the backend was done. Reframe as a **backend track*
     `internal/nonce`); and `mfaFromClaims` **fell back to the token `iat`** when `auth_time`
     was absent, making a cached MFA look fresh → now requires `auth_time` (fail closed).
   - ⬜ **2.11+ deferred:** SAML **SLO** (single logout) + **encrypted assertions**; the
-    **CLI→HTTP refactor (A0.8)** can now proceed since real session auth exists.
+    **CLI→HTTP refactor (A0.8b)** can now proceed (admin tokens landed in A0.8).
 
 **UI track (each phase front-to-back, no screen before its data):**
 - **UI-0 — Foundation + design gate** *(needs A0):* design system + Storybook + the

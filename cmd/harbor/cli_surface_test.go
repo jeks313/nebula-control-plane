@@ -23,6 +23,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -67,20 +68,23 @@ var cliSurface = map[string]surfaceEntry{
 	"policy active":      {op: "getActivePolicy"},
 
 	// ── break-glass / local: deliberately NOT on the API ──────────────────────
-	"migrate up":      {why: "DB schema migration — infra/ops, runs before any server is up"},
-	"migrate down":    {why: "DB schema rollback — infra/ops"},
-	"ipam allocate":   {why: "low-level IP management; normal allocation flows through enrollment, not an operator surface"},
-	"ipam release":    {why: "low-level IP management; break-glass"},
-	"enroll worker":   {why: "the queue-draining daemon — a long-running service, not an operator action"},
-	"audit add":       {why: "manual audit annotation; deliberately NOT an API capability — the console must never inject audit rows (integrity)"},
-	"policy validate": {why: "local policy-file lint, touches no server state; compilePolicy is the API superset"},
-	"genesis":         {why: "cluster bootstrap — runs offline before any server/CA exists"},
-	"ca-init":         {why: "CA / HSM bootstrap — offline key ceremony"},
-	"issue-cert":      {why: "break-glass direct cert issuance (decision 10: CLI-only break-glass path)"},
-	"core-api":        {why: "server launcher, not an operation"},
-	"admin-api":       {why: "server launcher, not an operation"},
-	"version":         {why: "meta"},
-	"help":            {why: "meta"},
+	"admin-token create": {why: "mints a machine token for the admin API; local bootstrap — it creates the auth, so it cannot require it"},
+	"admin-token list":   {why: "lists admin API tokens; local store inspection"},
+	"admin-token revoke": {why: "revokes an admin API token; local break-glass (works even if the API is down)"},
+	"migrate up":         {why: "DB schema migration — infra/ops, runs before any server is up"},
+	"migrate down":       {why: "DB schema rollback — infra/ops"},
+	"ipam allocate":      {why: "low-level IP management; normal allocation flows through enrollment, not an operator surface"},
+	"ipam release":       {why: "low-level IP management; break-glass"},
+	"enroll worker":      {why: "the queue-draining daemon — a long-running service, not an operator action"},
+	"audit add":          {why: "manual audit annotation; deliberately NOT an API capability — the console must never inject audit rows (integrity)"},
+	"policy validate":    {why: "local policy-file lint, touches no server state; compilePolicy is the API superset"},
+	"genesis":            {why: "cluster bootstrap — runs offline before any server/CA exists"},
+	"ca-init":            {why: "CA / HSM bootstrap — offline key ceremony"},
+	"issue-cert":         {why: "break-glass direct cert issuance (decision 10: CLI-only break-glass path)"},
+	"core-api":           {why: "server launcher, not an operation"},
+	"admin-api":          {why: "server launcher, not an operation"},
+	"version":            {why: "meta"},
+	"help":               {why: "meta"},
 }
 
 // TestCLISurfaceSubsetOfOpenAPI is the A0.6 enforcement.
@@ -164,29 +168,46 @@ func openAPIOperationIDs(t *testing.T) map[string]bool {
 func parseCLICommands(t *testing.T) []string {
 	t.Helper()
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "main.go", nil, 0)
+	// Parse the WHOLE command package, not just main.go: command handlers may live
+	// in any file (e.g. admintoken.go), and the extractor must see them or it would
+	// mistake a command for a leaf and miss its sub-actions (fail-open).
+	var files []*ast.File
+	entries, err := os.ReadDir(".")
 	if err != nil {
-		t.Fatalf("parse main.go: %v", err)
+		t.Fatalf("read command dir: %v", err)
 	}
-	paths, problems := extractCommands(fset, f)
+	for _, e := range entries {
+		n := e.Name()
+		if e.IsDir() || !strings.HasSuffix(n, ".go") || strings.HasSuffix(n, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, n, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", n, err)
+		}
+		files = append(files, f)
+	}
+	paths, problems := extractCommands(fset, files)
 	for _, p := range problems {
-		t.Error(p) // a fail-closed violation: an un-modeled dispatch shape in main.go
+		t.Error(p) // a fail-closed violation: an un-modeled dispatch shape in the package
 	}
 	return paths
 }
 
-// extractCommands is the pure (testable) core of the extractor: it walks an
-// already-parsed file and returns the command tree plus any FAIL-CLOSED problems
-// (un-modeled dispatch shapes). parseCLICommands feeds it main.go; the self-test
-// TestExtractorFailsClosed feeds it synthetic sources to prove each dangerous shape
-// is caught rather than silently dropped.
-func extractCommands(fset *token.FileSet, f *ast.File) (paths, problems []string) {
+// extractCommands is the pure (testable) core of the extractor: it walks the parsed
+// package files and returns the command tree plus any FAIL-CLOSED problems
+// (un-modeled dispatch shapes). parseCLICommands feeds it the harbor package; the
+// self-test TestExtractorFailsClosed feeds it synthetic sources to prove each
+// dangerous shape is caught rather than silently dropped.
+func extractCommands(fset *token.FileSet, files []*ast.File) (paths, problems []string) {
 	addf := func(format string, a ...any) { problems = append(problems, fmt.Sprintf(format, a...)) }
 
 	funcs := map[string]*ast.FuncDecl{}
-	for _, d := range f.Decls {
-		if fn, ok := d.(*ast.FuncDecl); ok && fn.Recv == nil {
-			funcs[fn.Name.Name] = fn
+	for _, f := range files {
+		for _, d := range f.Decls {
+			if fn, ok := d.(*ast.FuncDecl); ok && fn.Recv == nil {
+				funcs[fn.Name.Name] = fn
+			}
 		}
 	}
 	main, ok := funcs["main"]
@@ -381,7 +402,7 @@ func TestExtractorFailsClosed(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parse synthetic source: %v\n%s", err, src)
 		}
-		return extractCommands(fset, f)
+		return extractCommands(fset, []*ast.File{f})
 	}
 
 	// A canonical, well-formed CLI parses cleanly and yields the expected tree.
