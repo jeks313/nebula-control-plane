@@ -2,7 +2,6 @@ package adminauth
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -55,22 +54,46 @@ type Authenticator interface {
 	Exchange(ctx context.Context, code, nonce, verifier string) (Subject, error)
 }
 
+// FlowAuthenticator is a login provider whose protocol does NOT fit the OAuth
+// authorization-code shape (a GET callback carrying ?code=). SAML is the first:
+// the IdP returns a signed XML assertion by HTTP-POST to a provider-specific ACS
+// endpoint. Such a provider owns its own login redirect and its own callback
+// route(s) and finishes by calling the supplied CompleteFunc — so session policy
+// (role mapping, minting, cookies) stays centralized in the Service.
+type FlowAuthenticator interface {
+	Name() string
+	// StartLogin begins an SP-initiated login: it sets its own short-lived login
+	// cookie and redirects the browser to the IdP.
+	StartLogin(w http.ResponseWriter, r *http.Request, returnTo string)
+	// Register mounts the provider's callback route(s) (e.g. saml/acs, saml/metadata)
+	// onto the shared auth mux. complete finishes a successful login.
+	Register(mux *http.ServeMux, complete CompleteFunc)
+}
+
+// CompleteFunc maps a Subject to roles, mints a session + cookies, and redirects
+// to returnTo. FlowAuthenticators call it from their callback route.
+type CompleteFunc func(w http.ResponseWriter, r *http.Request, idp string, subj Subject, returnTo string)
+
 // Config builds the auth Service.
 type Config struct {
-	Store          *SessionStore
-	Authenticators []Authenticator // login providers; the first is the default
-	RoleMapper     *RoleMapper
-	SessionTTL     time.Duration // absolute session cap (default 12h)
-	Secure         bool          // set Secure on cookies (true in prod/https)
-	Now            func() time.Time
-	Logger         *slog.Logger
+	Store              *SessionStore
+	Authenticators     []Authenticator     // OAuth code-flow providers (OIDC, GitHub, mock)
+	FlowAuthenticators []FlowAuthenticator // non-code-flow providers (SAML)
+	RoleMapper         *RoleMapper
+	SessionTTL         time.Duration // absolute session cap (default 12h)
+	Secure             bool          // set Secure on cookies (true in prod/https)
+	Now                func() time.Time
+	Logger             *slog.Logger
 }
 
 // Service drives the login/callback/logout flow and yields the SessionProvider
 // the admin API authenticates against.
 type Service struct {
-	cfg    Config
-	byName map[string]Authenticator
+	cfg       Config
+	byName    map[string]Authenticator
+	flows     map[string]FlowAuthenticator
+	providers []string     // ordered provider names (the first is the default)
+	signer    cookieSigner // signs the login-state cookie (tamper-evident)
 }
 
 // New builds the auth Service.
@@ -87,11 +110,25 @@ func New(cfg Config) *Service {
 	if cfg.RoleMapper == nil {
 		cfg.RoleMapper = &RoleMapper{} // fail-closed: no groups map to roles
 	}
-	byName := make(map[string]Authenticator, len(cfg.Authenticators))
-	for _, a := range cfg.Authenticators {
-		byName[a.Name()] = a
+	signer, err := newCookieSigner()
+	if err != nil {
+		panic(err) // crypto/rand failure at startup is unrecoverable
 	}
-	return &Service{cfg: cfg, byName: byName}
+	s := &Service{
+		cfg:    cfg,
+		byName: make(map[string]Authenticator, len(cfg.Authenticators)),
+		flows:  make(map[string]FlowAuthenticator, len(cfg.FlowAuthenticators)),
+		signer: signer,
+	}
+	for _, a := range cfg.Authenticators {
+		s.byName[a.Name()] = a
+		s.providers = append(s.providers, a.Name())
+	}
+	for _, f := range cfg.FlowAuthenticators {
+		s.flows[f.Name()] = f
+		s.providers = append(s.providers, f.Name())
+	}
+	return s
 }
 
 // Provider returns the per-request IdentityProvider the admin API plugs in.
@@ -118,23 +155,31 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("GET /admin/v1/auth/callback", s.handleCallback)
 	mux.HandleFunc("POST /admin/v1/auth/logout", s.handleLogout)
 	mux.HandleFunc("GET /admin/v1/auth/providers", s.handleProviders)
+	for _, f := range s.cfg.FlowAuthenticators {
+		f.Register(mux, s.CompleteLogin) // e.g. POST saml/acs, GET saml/metadata
+	}
 	return mux
 }
 
 // GET /admin/v1/auth/providers — the configured login providers (so the SPA can
 // render a "Sign in with …" button per provider without hard-coding them).
 func (s *Service) handleProviders(w http.ResponseWriter, r *http.Request) {
-	names := make([]string, 0, len(s.cfg.Authenticators))
-	for _, a := range s.cfg.Authenticators {
-		names = append(names, a.Name())
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"providers": names})
+	writeJSON(w, http.StatusOK, map[string]any{"providers": s.providers})
 }
 
-// GET /admin/v1/auth/login?provider=oidc&return_to=/ — start a login.
+// GET /admin/v1/auth/login?provider=oidc&return_to=/ — start a login. A SAML (flow)
+// provider owns its own redirect; OAuth providers use the shared code flow.
 func (s *Service) handleLogin(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("provider")
-	auth := s.pick(name)
+	if name == "" && len(s.providers) > 0 {
+		name = s.providers[0]
+	}
+	returnTo := safeReturnTo(r.URL.Query().Get("return_to"))
+	if f := s.flows[name]; f != nil {
+		f.StartLogin(w, r, returnTo)
+		return
+	}
+	auth := s.byName[name]
 	if auth == nil {
 		problem(w, http.StatusBadRequest, "unknown provider", "no such login provider")
 		return
@@ -148,7 +193,7 @@ func (s *Service) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	ls := loginState{
 		Provider: auth.Name(), State: state, Nonce: nonce, Verifier: verifier,
-		ReturnTo: safeReturnTo(r.URL.Query().Get("return_to")),
+		ReturnTo: returnTo,
 	}
 	s.setLoginCookie(w, ls)
 	http.Redirect(w, r, auth.AuthURL(state, nonce, verifier), http.StatusFound)
@@ -183,14 +228,21 @@ func (s *Service) handleCallback(w http.ResponseWriter, r *http.Request) {
 		problem(w, http.StatusUnauthorized, "login failed", "could not complete authentication")
 		return
 	}
+	s.CompleteLogin(w, r, auth.Name(), subj, ls.ReturnTo)
+}
+
+// CompleteLogin is the shared tail of every login flow (OAuth and SAML): map the
+// Subject's groups to roles, mint a session + cookies, and redirect to returnTo
+// (re-validated same-origin). FlowAuthenticators call this from their callback.
+func (s *Service) CompleteLogin(w http.ResponseWriter, r *http.Request, idp string, subj Subject, returnTo string) {
 	roles := s.cfg.RoleMapper.Roles(subj.Groups)
-	token, csrf, err := s.cfg.Store.Mint(r.Context(), subj, auth.Name(), roles, s.cfg.SessionTTL)
+	token, csrf, err := s.cfg.Store.Mint(r.Context(), subj, idp, roles, s.cfg.SessionTTL)
 	if err != nil {
 		s.fail(w, "login: mint session", err)
 		return
 	}
 	s.setSessionCookies(w, token, csrf)
-	http.Redirect(w, r, ls.ReturnTo, http.StatusFound)
+	http.Redirect(w, r, safeReturnTo(returnTo), http.StatusFound)
 }
 
 // POST /admin/v1/auth/logout — revoke the session and clear cookies.
@@ -201,16 +253,6 @@ func (s *Service) handleLogout(w http.ResponseWriter, r *http.Request) {
 	s.clearCookie(w, SessionCookie)
 	s.clearCookie(w, CSRFCookie)
 	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *Service) pick(name string) Authenticator {
-	if name == "" {
-		if len(s.cfg.Authenticators) > 0 {
-			return s.cfg.Authenticators[0]
-		}
-		return nil
-	}
-	return s.byName[name]
 }
 
 // ── cookies ───────────────────────────────────────────────────────────────────
@@ -230,9 +272,12 @@ func (s *Service) setSessionCookies(w http.ResponseWriter, token, csrf string) {
 }
 
 func (s *Service) setLoginCookie(w http.ResponseWriter, ls loginState) {
-	b, _ := json.Marshal(ls)
+	val, err := s.signer.encode(ls) // signed: the nonce/PKCE verifier must not be forgeable
+	if err != nil {
+		return
+	}
 	http.SetCookie(w, &http.Cookie{
-		Name: loginCookie, Value: base64.RawURLEncoding.EncodeToString(b), Path: "/admin/v1/auth/",
+		Name: loginCookie, Value: val, Path: "/admin/v1/auth/",
 		MaxAge: 600, HttpOnly: true, Secure: s.cfg.Secure, SameSite: http.SameSiteLaxMode,
 	})
 }
@@ -242,12 +287,8 @@ func (s *Service) readLoginCookie(r *http.Request) (loginState, bool) {
 	if err != nil {
 		return loginState{}, false
 	}
-	raw, err := base64.RawURLEncoding.DecodeString(c.Value)
-	if err != nil {
-		return loginState{}, false
-	}
 	var ls loginState
-	if err := json.Unmarshal(raw, &ls); err != nil {
+	if !s.signer.decode(c.Value, &ls) {
 		return loginState{}, false
 	}
 	return ls, true
