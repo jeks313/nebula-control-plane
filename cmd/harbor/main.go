@@ -1118,6 +1118,7 @@ func cmdAdminAPI(args []string) {
 	addr := fs.String("addr", ":8445", "listen address (bind to Core's overlay IP in production)")
 	devAuth := fs.Bool("dev-auth", false, "DEV ONLY: trust the X-Harbor-Dev-Actor header for identity (never in prod)")
 	devRole := fs.String("dev-role", "admin", "role granted to the dev actor")
+	mfaFreshness := fs.Duration("mfa-freshness", 15*time.Minute, "require MFA within this window for privileged actions (dual-control approve, policy publish); 0 disables step-up")
 	af := addAdminAuthFlags(fs) // OIDC / GitHub / mock-IdP session auth (2.11)
 	expiryWithin := fs.Duration("expiry-within", 7*24*time.Hour, "cert-expiry health window")
 	staleAfter := fs.Duration("stale-after", 5*time.Minute, "stale-host health window")
@@ -1162,7 +1163,7 @@ func cmdAdminAPI(args []string) {
 		fmt.Fprintln(os.Stderr, "harbor admin-api: session auth enabled (sign in at /admin/v1/auth/login)")
 	case *devAuth:
 		fmt.Fprintln(os.Stderr, "harbor admin-api: WARNING dev-auth enabled — trusting X-Harbor-Dev-Actor (NEVER enable in production)")
-		idp = adminapi.DevHeaderProvider{Roles: []string{*devRole}}
+		idp = adminapi.DevHeaderProvider{Roles: []string{*devRole}, MFA: *mfaFreshness > 0}
 	default:
 		fmt.Fprintln(os.Stderr, "harbor admin-api: no identity provider (all requests 401; use -oidc-issuer/-github-client-id/-mock-idp, or -dev-auth for local dogfooding)")
 	}
@@ -1171,7 +1172,8 @@ func cmdAdminAPI(args []string) {
 		Store: s, Identity: idp,
 		Rollout: rollout.New(s.DB, audit), Lighthouses: lighthouse.New(s.DB, audit),
 		Enrollment: consumer, CanIssue: canIssue,
-		Thresholds: fleet.Thresholds{ExpiryWindow: *expiryWithin, StaleAfter: *staleAfter, ClockSkewMs: *clockSkew},
+		Thresholds:   fleet.Thresholds{ExpiryWindow: *expiryWithin, StaleAfter: *staleAfter, ClockSkewMs: *clockSkew},
+		MFAFreshness: *mfaFreshness,
 	})
 
 	// Compose: auth routes (unauthenticated) + the CSRF-guarded admin API.

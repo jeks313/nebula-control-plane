@@ -55,9 +55,16 @@ func NewOIDC(ctx context.Context, opts OIDCOptions) (*OIDCAuthenticator, error) 
 // Name implements Authenticator.
 func (a *OIDCAuthenticator) Name() string { return a.name }
 
-// AuthURL builds the authorize redirect with a PKCE S256 challenge + nonce.
-func (a *OIDCAuthenticator) AuthURL(state, nonce, verifier string) string {
-	return a.oauth.AuthCodeURL(state, oauth2.S256ChallengeOption(verifier), oidc.Nonce(nonce))
+// AuthURL builds the authorize redirect with a PKCE S256 challenge + nonce. When
+// forceReauth is set (step-up MFA), it requests prompt=login + max_age=0 so the
+// IdP re-authenticates the user (and re-applies its MFA policy) rather than
+// silently SSO-ing — yielding a fresh auth_time/amr in the next ID token.
+func (a *OIDCAuthenticator) AuthURL(state, nonce, verifier string, forceReauth bool) string {
+	opts := []oauth2.AuthCodeOption{oauth2.S256ChallengeOption(verifier), oidc.Nonce(nonce)}
+	if forceReauth {
+		opts = append(opts, oauth2.SetAuthURLParam("prompt", "login"), oauth2.SetAuthURLParam("max_age", "0"))
+	}
+	return a.oauth.AuthCodeURL(state, opts...)
 }
 
 // Exchange swaps the code (with the PKCE verifier) for tokens, verifies the ID
@@ -87,13 +94,17 @@ func (a *OIDCAuthenticator) Exchange(ctx context.Context, code, nonce, verifier 
 		Email:  stringClaim(claims, "email"),
 		Name:   stringClaim(claims, "name"),
 		Groups: stringSliceClaim(claims, a.groupsClaim),
-		MFAAt:  mfaFromClaims(claims, idt.IssuedAt),
+		MFAAt:  mfaFromClaims(claims),
 	}, nil
 }
 
 // mfaFromClaims reports MFA satisfaction conservatively: only when the IdP asserts
-// it via the `amr` (auth methods) claim. We do NOT infer MFA from a bare login.
-func mfaFromClaims(claims map[string]any, issuedAt time.Time) *time.Time {
+// it via the `amr` (auth methods) claim AND provides `auth_time` (the actual
+// authentication instant). We do NOT fall back to the token `iat` — iat is
+// mint-time, not auth-time, and would make a cached/old MFA look fresh on every
+// silent SSO. Missing auth_time => nil (fail closed); the step-up flow requests
+// max_age=0, which forces the IdP to emit a fresh auth_time.
+func mfaFromClaims(claims map[string]any) *time.Time {
 	amr := stringSliceClaim(claims, "amr")
 	mfa := false
 	for _, m := range amr {
@@ -107,10 +118,6 @@ func mfaFromClaims(claims map[string]any, issuedAt time.Time) *time.Time {
 	}
 	if at, ok := claims["auth_time"].(float64); ok && at > 0 {
 		t := time.Unix(int64(at), 0).UTC()
-		return &t
-	}
-	if !issuedAt.IsZero() {
-		t := issuedAt.UTC()
 		return &t
 	}
 	return nil

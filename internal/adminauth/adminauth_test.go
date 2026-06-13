@@ -343,6 +343,34 @@ func TestCSRF(t *testing.T) {
 	}
 }
 
+// TestOIDCStepUpAuthURL: step-up login forces a fresh authentication
+// (prompt=login + max_age=0) so the IdP re-applies its MFA policy; a normal login
+// does not.
+func TestOIDCStepUpAuthURL(t *testing.T) {
+	idp, err := mockidp.New(mockidp.DefaultUsers(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idpSrv := httptest.NewServer(idp)
+	defer idpSrv.Close()
+	idp.SetIssuer(idpSrv.URL)
+
+	oidc, err := adminauth.NewOIDC(context.Background(), adminauth.OIDCOptions{
+		Issuer: idpSrv.URL, ClientID: "c", ClientSecret: "s", RedirectURL: "http://h/admin/v1/auth/callback",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	normal := oidc.AuthURL("st", "no", "vf", false)
+	if strings.Contains(normal, "prompt=login") || strings.Contains(normal, "max_age=0") {
+		t.Fatalf("normal login must not force re-auth: %s", normal)
+	}
+	stepUp := oidc.AuthURL("st", "no", "vf", true)
+	if !strings.Contains(stepUp, "prompt=login") || !strings.Contains(stepUp, "max_age=0") {
+		t.Fatalf("step-up login must force re-auth (prompt=login&max_age=0): %s", stepUp)
+	}
+}
+
 func mustGet(t *testing.T, hc *http.Client, url string, cookies []*http.Cookie) *http.Response {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodGet, url, nil)

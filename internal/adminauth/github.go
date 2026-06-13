@@ -61,8 +61,10 @@ func NewGitHub(opts GitHubOptions) *GitHubAuthenticator {
 func (a *GitHubAuthenticator) Name() string { return a.name }
 
 // AuthURL builds the GitHub authorize redirect. GitHub has no ID-token nonce; the
-// random state value protects the flow.
-func (a *GitHubAuthenticator) AuthURL(state, nonce, verifier string) string {
+// random state value protects the flow. forceReauth is ignored: GitHub OAuth does
+// not surface an MFA signal, so a GitHub session never satisfies step-up MFA
+// anyway (its Subject.MFAAt is always nil) — by design, not a silent gap.
+func (a *GitHubAuthenticator) AuthURL(state, nonce, verifier string, forceReauth bool) string {
 	return a.oauth.AuthCodeURL(state)
 }
 

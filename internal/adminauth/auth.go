@@ -46,8 +46,9 @@ type Authenticator interface {
 	Name() string
 	// AuthURL returns the IdP authorization redirect for this attempt. nonce and
 	// PKCE verifier are provided by the Service; providers that don't use them
-	// (GitHub has no ID token) ignore them.
-	AuthURL(state, nonce, verifier string) string
+	// (GitHub has no ID token) ignore them. forceReauth requests a fresh
+	// authentication (step-up MFA) rather than a silent SSO.
+	AuthURL(state, nonce, verifier string, forceReauth bool) string
 	// Exchange consumes the callback (the authorization code) and returns the
 	// Subject. nonce + verifier from the login-state cookie are passed back for
 	// ID-token / PKCE verification.
@@ -63,8 +64,9 @@ type Authenticator interface {
 type FlowAuthenticator interface {
 	Name() string
 	// StartLogin begins an SP-initiated login: it sets its own short-lived login
-	// cookie and redirects the browser to the IdP.
-	StartLogin(w http.ResponseWriter, r *http.Request, returnTo string)
+	// cookie and redirects the browser to the IdP. forceReauth requests a fresh
+	// authentication (step-up MFA, e.g. SAML ForceAuthn).
+	StartLogin(w http.ResponseWriter, r *http.Request, returnTo string, forceReauth bool)
 	// Register mounts the provider's callback route(s) (e.g. saml/acs, saml/metadata)
 	// onto the shared auth mux. complete finishes a successful login.
 	Register(mux *http.ServeMux, complete CompleteFunc)
@@ -175,8 +177,10 @@ func (s *Service) handleLogin(w http.ResponseWriter, r *http.Request) {
 		name = s.providers[0]
 	}
 	returnTo := safeReturnTo(r.URL.Query().Get("return_to"))
+	// step_up forces a fresh authentication (MFA re-prompt) for privileged actions.
+	forceReauth := r.URL.Query().Get("step_up") == "1" || r.URL.Query().Get("step_up") == "true"
 	if f := s.flows[name]; f != nil {
-		f.StartLogin(w, r, returnTo)
+		f.StartLogin(w, r, returnTo, forceReauth)
 		return
 	}
 	auth := s.byName[name]
@@ -196,7 +200,7 @@ func (s *Service) handleLogin(w http.ResponseWriter, r *http.Request) {
 		ReturnTo: returnTo,
 	}
 	s.setLoginCookie(w, ls)
-	http.Redirect(w, r, auth.AuthURL(state, nonce, verifier), http.StatusFound)
+	http.Redirect(w, r, auth.AuthURL(state, nonce, verifier, forceReauth), http.StatusFound)
 }
 
 // GET /admin/v1/auth/callback — finish a login: verify state, exchange the code,
