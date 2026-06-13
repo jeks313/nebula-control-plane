@@ -40,7 +40,7 @@ func (s *Server) mapLighthouseErr(w http.ResponseWriter, r *http.Request, err er
 // POST /admin/v1/lighthouses — register a lighthouse.
 func (s *Server) handleLighthouseAdd(w http.ResponseWriter, r *http.Request) {
 	id := identityFrom(r.Context())
-	if !s.requireRole(w, id, "admin") {
+	if !s.requirePerm(w, id, PermLighthouseManage) {
 		return
 	}
 	var b struct {
@@ -62,7 +62,7 @@ func (s *Server) handleLighthouseAdd(w http.ResponseWriter, r *http.Request) {
 // PUT /admin/v1/lighthouses/{ip} — re-address (and re-activate) a lighthouse.
 func (s *Server) handleLighthouseReplace(w http.ResponseWriter, r *http.Request) {
 	id := identityFrom(r.Context())
-	if !s.requireRole(w, id, "admin") {
+	if !s.requirePerm(w, id, PermLighthouseManage) {
 		return
 	}
 	var b struct {
@@ -82,7 +82,7 @@ func (s *Server) handleLighthouseReplace(w http.ResponseWriter, r *http.Request)
 // DELETE /admin/v1/lighthouses/{ip} — retire a lighthouse (never the last active).
 func (s *Server) handleLighthouseRemove(w http.ResponseWriter, r *http.Request) {
 	id := identityFrom(r.Context())
-	if !s.requireRole(w, id, "admin") {
+	if !s.requirePerm(w, id, PermLighthouseManage) {
 		return
 	}
 	ip := r.PathValue("ip")
@@ -167,7 +167,7 @@ func (s *Server) handleRolloutCurrent(w http.ResponseWriter, r *http.Request) {
 // POST /admin/v1/rollouts — start a staged rollout.
 func (s *Server) handleRolloutStart(w http.ResponseWriter, r *http.Request) {
 	id := identityFrom(r.Context())
-	if !s.requireRole(w, id, "admin") {
+	if !s.requirePerm(w, id, PermRolloutControl) {
 		return
 	}
 	var b struct {
@@ -211,7 +211,7 @@ func (s *Server) handleRolloutStart(w http.ResponseWriter, r *http.Request) {
 // POST /admin/v1/rollouts/current/step — force one evaluation (cron/ops).
 func (s *Server) handleRolloutStep(w http.ResponseWriter, r *http.Request) {
 	id := identityFrom(r.Context())
-	if !s.requireRole(w, id, "admin") {
+	if !s.requirePerm(w, id, PermRolloutControl) {
 		return
 	}
 	changed, err := s.cfg.Rollout.Evaluate(r.Context())
@@ -237,7 +237,7 @@ func (s *Server) handleRolloutStep(w http.ResponseWriter, r *http.Request) {
 // POST /admin/v1/rollouts/current/abort — cancel the active rollout.
 func (s *Server) handleRolloutAbort(w http.ResponseWriter, r *http.Request) {
 	id := identityFrom(r.Context())
-	if !s.requireRole(w, id, "admin") {
+	if !s.requirePerm(w, id, PermRolloutControl) {
 		return
 	}
 	if err := s.cfg.Rollout.Abort(r.Context(), id.Principal); err != nil {
@@ -293,7 +293,7 @@ func (s *Server) handleJoinKeys(w http.ResponseWriter, r *http.Request) {
 // POST /admin/v1/joinkeys — create a key; the secret is returned ONCE.
 func (s *Server) handleJoinKeyCreate(w http.ResponseWriter, r *http.Request) {
 	id := identityFrom(r.Context())
-	if !s.requireRole(w, id, "admin") {
+	if !s.requirePerm(w, id, PermJoinKeyManage) {
 		return
 	}
 	var b struct {
@@ -334,7 +334,7 @@ func (s *Server) handleJoinKeyCreate(w http.ResponseWriter, r *http.Request) {
 // POST /admin/v1/joinkeys/{name}/revoke — revoke a key by name.
 func (s *Server) handleJoinKeyRevoke(w http.ResponseWriter, r *http.Request) {
 	id := identityFrom(r.Context())
-	if !s.requireRole(w, id, "admin") {
+	if !s.requirePerm(w, id, PermJoinKeyManage) {
 		return
 	}
 	name := r.PathValue("name")

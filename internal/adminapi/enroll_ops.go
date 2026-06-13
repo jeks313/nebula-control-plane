@@ -95,7 +95,7 @@ type EnrollDecision struct {
 // 501 when the admin-api was not started with the signing config (CanIssue).
 func (s *Server) handleEnrollApprove(w http.ResponseWriter, r *http.Request) {
 	id := identityFrom(r.Context())
-	if !s.requireRole(w, id, "admin") {
+	if !s.requirePerm(w, id, PermEnrollDecide) {
 		return
 	}
 	if !s.cfg.CanIssue {
@@ -115,7 +115,7 @@ func (s *Server) handleEnrollApprove(w http.ResponseWriter, r *http.Request) {
 // POST /admin/v1/enrollments/{id}/deny — reject a pending host (no signing).
 func (s *Server) handleEnrollDeny(w http.ResponseWriter, r *http.Request) {
 	id := identityFrom(r.Context())
-	if !s.requireRole(w, id, "admin") {
+	if !s.requirePerm(w, id, PermEnrollDecide) {
 		return
 	}
 	var body struct {

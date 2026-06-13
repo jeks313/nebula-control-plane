@@ -1118,6 +1118,7 @@ func cmdAdminAPI(args []string) {
 	addr := fs.String("addr", ":8445", "listen address (bind to Core's overlay IP in production)")
 	devAuth := fs.Bool("dev-auth", false, "DEV ONLY: trust the X-Harbor-Dev-Actor header for identity (never in prod)")
 	devRole := fs.String("dev-role", "admin", "role granted to the dev actor")
+	af := addAdminAuthFlags(fs) // OIDC / GitHub / mock-IdP session auth (2.11)
 	expiryWithin := fs.Duration("expiry-within", 7*24*time.Hour, "cert-expiry health window")
 	staleAfter := fs.Duration("stale-after", 5*time.Minute, "stale-host health window")
 	clockSkew := fs.Int("clock-skew-ms", 5000, "clock-skew health threshold (ms)")
@@ -1144,12 +1145,26 @@ func cmdAdminAPI(args []string) {
 	defer s.Close()
 	audit := func(c context.Context, a, ac, t, d string) error { _, e := s.AppendAudit(c, a, ac, t, d); return e }
 
+	// Authentication. Real session auth (OIDC / GitHub / mock IdP) takes precedence;
+	// otherwise the -dev-auth header seam; otherwise every request is 401.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	sessionIdP, authHandler, csrfWrap, authCleanup := buildAdminAuth(ctx, af, *addr, s.DB)
+	defer authCleanup()
+
 	var idp adminapi.IdentityProvider
-	if *devAuth {
-		fmt.Fprintln(os.Stderr, "harbor admin-api: WARNING dev-auth enabled — trusting X-Harbor-Dev-Actor (NEVER enable in production; replace with OIDC at 2.11)")
+	switch {
+	case sessionIdP != nil:
+		idp = sessionIdP
+		if *devAuth {
+			fmt.Fprintln(os.Stderr, "harbor admin-api: NOTE -dev-auth ignored — real session auth is configured")
+		}
+		fmt.Fprintln(os.Stderr, "harbor admin-api: session auth enabled (sign in at /admin/v1/auth/login)")
+	case *devAuth:
+		fmt.Fprintln(os.Stderr, "harbor admin-api: WARNING dev-auth enabled — trusting X-Harbor-Dev-Actor (NEVER enable in production)")
 		idp = adminapi.DevHeaderProvider{Roles: []string{*devRole}}
-	} else {
-		fmt.Fprintln(os.Stderr, "harbor admin-api: no identity provider (all requests 401 until OIDC lands; use -dev-auth for local dogfooding)")
+	default:
+		fmt.Fprintln(os.Stderr, "harbor admin-api: no identity provider (all requests 401; use -oidc-issuer/-github-client-id/-mock-idp, or -dev-auth for local dogfooding)")
 	}
 
 	api := adminapi.New(adminapi.Config{
@@ -1158,13 +1173,24 @@ func cmdAdminAPI(args []string) {
 		Enrollment: consumer, CanIssue: canIssue,
 		Thresholds: fleet.Thresholds{ExpiryWindow: *expiryWithin, StaleAfter: *staleAfter, ClockSkewMs: *clockSkew},
 	})
+
+	// Compose: auth routes (unauthenticated) + the CSRF-guarded admin API.
+	var handler http.Handler = api.Handler()
+	if authHandler != nil {
+		if csrfWrap != nil {
+			handler = csrfWrap(handler)
+		}
+		mux := http.NewServeMux()
+		mux.Handle("/admin/v1/auth/", authHandler)
+		mux.Handle("/", handler)
+		handler = mux
+	}
+
 	srv := &http.Server{
-		Addr: *addr, Handler: api.Handler(),
+		Addr: *addr, Handler: handler,
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second,
 		WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 8 << 10,
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 	go func() {
 		<-ctx.Done()
 		sc, cancel := context.WithTimeout(context.Background(), 5*time.Second)

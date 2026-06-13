@@ -525,7 +525,7 @@ func (s *Server) handleApproval(w http.ResponseWriter, r *http.Request) {
 // (never a body field). The dual-control engine enforces distinct-approver.
 func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	id := identityFrom(r.Context())
-	if !s.requireRole(w, id, "admin") {
+	if !s.requirePerm(w, id, PermApprovalDecide) {
 		return
 	}
 	cid, ok := pathID(w, r)
@@ -543,7 +543,7 @@ func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 // POST /admin/v1/approvals/{id}/deny — a single deny vetoes (fail-closed).
 func (s *Server) handleDeny(w http.ResponseWriter, r *http.Request) {
 	id := identityFrom(r.Context())
-	if !s.requireRole(w, id, "admin") {
+	if !s.requirePerm(w, id, PermApprovalDecide) {
 		return
 	}
 	cid, ok := pathID(w, r)
@@ -594,7 +594,7 @@ func (s *Server) handlePolicyActive(w http.ResponseWriter, r *http.Request) {
 // dual-control change. Proposer = the authenticated principal.
 func (s *Server) handlePolicyPropose(w http.ResponseWriter, r *http.Request) {
 	id := identityFrom(r.Context())
-	if !s.requireRole(w, id, "admin") {
+	if !s.requirePerm(w, id, PermPolicyPropose) {
 		return
 	}
 	var body struct {
@@ -681,18 +681,6 @@ func toRules(in []nebulaconfig.Rule) []nebulaRule {
 		out[i] = nebulaRule{Proto: r.Proto, Port: r.Port, Host: r.Host, Group: r.Group}
 	}
 	return out
-}
-
-// requireRole enforces the RBAC seam (real roles arrive with 2.11; the dev seam
-// grants the configured -dev-role). 403 if the principal lacks the role.
-func (s *Server) requireRole(w http.ResponseWriter, id Identity, role string) bool {
-	for _, r := range id.Roles {
-		if r == role {
-			return true
-		}
-	}
-	writeProblem(w, http.StatusForbidden, "forbidden", "requires role: "+role)
-	return false
 }
 
 // mapDCErr maps dual-control sentinels to HTTP; unknown errors are 500 (logged).
