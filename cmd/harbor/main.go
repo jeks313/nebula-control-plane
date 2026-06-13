@@ -20,6 +20,7 @@ import (
 	"net/http"
 
 	"github.com/jeks313/nebula-control-plane/internal/adminapi"
+	"github.com/jeks313/nebula-control-plane/internal/adminauth"
 	"github.com/jeks313/nebula-control-plane/internal/bundle"
 	"github.com/jeks313/nebula-control-plane/internal/coreapi"
 	"github.com/jeks313/nebula-control-plane/internal/dualcontrol"
@@ -66,6 +67,8 @@ func main() {
 		cmdCoreAPI(os.Args[2:])
 	case "admin-api":
 		cmdAdminAPI(os.Args[2:])
+	case "admin-token":
+		cmdAdminToken(os.Args[2:])
 	case "fleet":
 		cmdFleet(os.Args[2:])
 	case "lighthouse":
@@ -1165,20 +1168,24 @@ func cmdAdminAPI(args []string) {
 	sessionIdP, authHandler, csrfWrap, authCleanup := buildAdminAuth(ctx, af, *addr, s.DB)
 	defer authCleanup()
 
-	var idp adminapi.IdentityProvider
+	// Bearer-token auth (A0.8) is always available for non-interactive callers
+	// (automation/CI/curl); a human session (or the dev seam) is chained behind it.
+	tokenProvider := adminauth.NewTokenProvider(adminauth.NewTokenStore(s.DB, nil))
+	var human adminapi.IdentityProvider
 	switch {
 	case sessionIdP != nil:
-		idp = sessionIdP
+		human = sessionIdP
 		if *devAuth {
 			log.Warn("admin-api: -dev-auth ignored — real session auth is configured")
 		}
-		log.Info("admin-api auth: session (OIDC/SAML/GitHub)", "login", "/admin/v1/auth/login")
+		log.Info("admin-api auth: bearer tokens + session (OIDC/SAML/GitHub)", "login", "/admin/v1/auth/login")
 	case *devAuth:
-		log.Warn("admin-api auth: DEV-AUTH ENABLED — trusting X-Harbor-Dev-Actor; never enable in production")
-		idp = adminapi.DevHeaderProvider{Roles: []string{*devRole}, MFA: *mfaFreshness > 0}
+		human = adminapi.DevHeaderProvider{Roles: []string{*devRole}, MFA: *mfaFreshness > 0}
+		log.Warn("admin-api auth: bearer tokens + DEV-AUTH — never enable dev-auth in production")
 	default:
-		log.Warn("admin-api auth: none configured — all requests 401", "hint", "use -oidc-issuer/-github-client-id/-mock-idp, or -dev-auth for local dogfooding")
+		log.Info("admin-api auth: bearer tokens only", "hint", "add -oidc-issuer/-github-client-id/-mock-idp or -dev-auth for human login")
 	}
+	idp := adminapi.ChainProvider{tokenProvider, human} // token first, then the human path
 
 	api := adminapi.New(adminapi.Config{
 		Store: s, Identity: idp,

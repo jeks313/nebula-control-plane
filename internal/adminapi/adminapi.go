@@ -48,6 +48,25 @@ type IdentityProvider interface {
 	Identify(r *http.Request) (Identity, bool)
 }
 
+// ChainProvider tries each provider in order and returns the first identity that
+// resolves — so machine tokens (Authorization: Bearer) and human sessions (cookie)
+// can both authenticate the same admin API. Put the token provider first: it keys
+// off a header the browser session never sets, so the two never collide.
+type ChainProvider []IdentityProvider
+
+// Identify implements IdentityProvider.
+func (c ChainProvider) Identify(r *http.Request) (Identity, bool) {
+	for _, p := range c {
+		if p == nil {
+			continue
+		}
+		if id, ok := p.Identify(r); ok {
+			return id, true
+		}
+	}
+	return Identity{}, false
+}
+
 // DevHeaderProvider trusts an `X-Harbor-Dev-Actor` header. It exists ONLY to
 // dogfood the console before 2.11; it must never be wired in production (the
 // harbor command gates it behind an explicit -dev-auth flag + a loud warning).
