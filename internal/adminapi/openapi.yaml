@@ -7,6 +7,13 @@ info:
     Mesh-only (bind to Core's overlay IP). Read-only in this slice (A0.1/A0.2);
     mutating endpoints + the CLI refactor land in later A0 slices. Every
     "is it healthy/safe?" answer is computed server-side (thin client).
+
+
+    Error convention: operations enumerate only the status codes that are part
+    of the contract — the deterministic, client-actionable outcomes (4xx). A 500
+    is abnormal operation (the server failed), NOT a defined result, so it is
+    deliberately never enumerated per-operation. All error bodies are problem+json
+    (see components/responses/Problem). A guard test rejects any re-added 500.
 servers:
   - url: /
     description: Served by Harbor Core over the mesh.
@@ -35,7 +42,6 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/FleetHealth" }
         "401": { $ref: "#/components/responses/Unauthorized" }
-        "500": { $ref: "#/components/responses/Problem" }
   /admin/v1/devices:
     get:
       summary: Device inventory (from heartbeats), keyset-paginated on overlay_ip.
@@ -50,7 +56,6 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/DeviceList" }
         "401": { $ref: "#/components/responses/Unauthorized" }
-        "500": { $ref: "#/components/responses/Problem" }
   /admin/v1/audit:
     get:
       summary: Audit log, newest first, cursor-paginated.
@@ -65,7 +70,6 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/AuditList" }
         "401": { $ref: "#/components/responses/Unauthorized" }
-        "500": { $ref: "#/components/responses/Problem" }
   /admin/v1/audit/verify:
     get:
       summary: Audit-chain integrity (in-DB scope).
@@ -93,7 +97,6 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/LighthouseList" }
         "401": { $ref: "#/components/responses/Unauthorized" }
-        "500": { $ref: "#/components/responses/Problem" }
     post:
       summary: Register a lighthouse.
       operationId: addLighthouse
@@ -112,7 +115,6 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
-        "500": { $ref: "#/components/responses/Problem" }
   /admin/v1/approvals:
     get:
       summary: The dual-control approvals inbox (all kinds).
@@ -126,7 +128,6 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ApprovalList" }
         "401": { $ref: "#/components/responses/Unauthorized" }
-        "500": { $ref: "#/components/responses/Problem" }
   /admin/v1/approvals/{id}:
     get:
       summary: A change with its sign-offs (payload included).
@@ -160,7 +161,6 @@ paths:
         "404": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
         "422": { $ref: "#/components/responses/Problem" }
-        "500": { $ref: "#/components/responses/Problem" }
   /admin/v1/approvals/{id}/deny:
     post:
       summary: Deny (veto) a change as the authenticated principal.
@@ -194,7 +194,6 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ActivePolicy" }
         "401": { $ref: "#/components/responses/Unauthorized" }
-        "500": { $ref: "#/components/responses/Problem" }
   /admin/v1/policy/propose:
     post:
       summary: Validate + invariant-check a policy, then open a dual-control change.
@@ -213,7 +212,6 @@ paths:
         "400": { $ref: "#/components/responses/Problem" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Problem" }
-        "500": { $ref: "#/components/responses/Problem" }
   /admin/v1/policy/compile:
     post:
       summary: Dry-run compile a draft policy for a host's groups (live analysis).
@@ -252,7 +250,6 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
-        "500": { $ref: "#/components/responses/Problem" }
     delete:
       summary: Retire a lighthouse (refuses the last active one).
       operationId: removeLighthouse
@@ -273,7 +270,6 @@ paths:
         "403": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
-        "500": { $ref: "#/components/responses/Problem" }
   /admin/v1/rollouts/current:
     get:
       summary: The current staged rollout + per-host wave status.
@@ -285,7 +281,6 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/RolloutStatus" }
         "401": { $ref: "#/components/responses/Unauthorized" }
-        "500": { $ref: "#/components/responses/Problem" }
   /admin/v1/rollouts:
     post:
       summary: Start a staged canary rollout.
@@ -305,7 +300,6 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
-        "500": { $ref: "#/components/responses/Problem" }
   /admin/v1/rollouts/current/step:
     post:
       summary: Force one rollout evaluation (cron/ops).
@@ -318,7 +312,6 @@ paths:
               schema: { $ref: "#/components/schemas/RolloutStepResult" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Problem" }
-        "500": { $ref: "#/components/responses/Problem" }
   /admin/v1/rollouts/current/abort:
     post:
       summary: Abort the active rollout (touched hosts revert to prev).
@@ -346,7 +339,6 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/JoinKeyList" }
         "401": { $ref: "#/components/responses/Unauthorized" }
-        "500": { $ref: "#/components/responses/Problem" }
     post:
       summary: Create a join key; the secret is returned ONCE.
       operationId: createJoinKey
@@ -365,7 +357,6 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
-        "500": { $ref: "#/components/responses/Problem" }
   /admin/v1/joinkeys/{name}/revoke:
     post:
       summary: Revoke a join key by name.
@@ -386,7 +377,58 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
-        "500": { $ref: "#/components/responses/Problem" }
+  /admin/v1/enrollments:
+    get:
+      summary: The enrollment approval queue (keyset-paginated on id).
+      operationId: listEnrollments
+      parameters:
+        - { name: status, in: query, required: false, description: "pending (default) | issued | denied", schema: { type: string } }
+        - { name: limit, in: query, required: false, description: "page size (1..2000, default 200)", schema: { type: integer } }
+        - { name: after, in: query, required: false, description: "keyset cursor: return rows with id greater than this (from next_after)", schema: { type: integer } }
+      responses:
+        "200":
+          description: A page of enrollments in the requested status.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EnrollmentList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /admin/v1/enrollments/{id}/approve:
+    post:
+      summary: Approve a pending enrollment (issues a cert). Requires issuance mode.
+      operationId: approveEnrollment
+      parameters:
+        - { name: id, in: path, required: true, description: "the enrollment_id", schema: { type: string } }
+      responses:
+        "200":
+          description: Issued.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EnrollDecision" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "501": { $ref: "#/components/responses/Problem" }
+  /admin/v1/enrollments/{id}/deny:
+    post:
+      summary: Reject a pending enrollment (no signing).
+      operationId: denyEnrollment
+      parameters:
+        - { name: id, in: path, required: true, description: "the enrollment_id", schema: { type: string } }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DenyRequest" }
+      responses:
+        "200":
+          description: Denied.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EnrollDecision" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
 components:
   securitySchemes:
     DevActor:
@@ -704,3 +746,32 @@ components:
       properties:
         secret: { type: string, description: "the join-key secret — shown ONCE" }
         joinkey: { $ref: "#/components/schemas/JoinKey" }
+    EnrollmentView:
+      type: object
+      required: [enrollment_id, device_name, pubkey_hash, method, groups, status, created_at]
+      properties:
+        enrollment_id: { type: string }
+        device_name: { type: string }
+        pubkey_hash: { type: string, description: "fingerprint of the host pubkey; the key bytes are never returned" }
+        method: { type: string }
+        join_key_id: { type: integer }
+        groups: { type: array, items: { type: string } }
+        status: { type: string, description: "pending | issued | denied" }
+        overlay_ip: { type: string }
+        created_at: { type: string, format: date-time }
+        decided_at: { type: string, format: date-time }
+        approver: { type: string }
+    EnrollmentList:
+      type: object
+      required: [enrollments, count]
+      properties:
+        enrollments: { type: array, items: { $ref: "#/components/schemas/EnrollmentView" } }
+        count: { type: integer, description: "page size — NOT the queue total" }
+        next_after: { type: integer, description: "keyset cursor for the next page; absent on the last page" }
+    EnrollDecision:
+      type: object
+      required: [enrollment_id, status]
+      properties:
+        enrollment_id: { type: string }
+        status: { type: string, description: "issued | denied" }
+        overlay_ip: { type: string }

@@ -1114,7 +1114,7 @@ func cmdCoreAPI(args []string) {
 // console can be dogfooded; it must never be enabled in production.
 func cmdAdminAPI(args []string) {
 	fs := flag.NewFlagSet("admin-api", flag.ExitOnError)
-	driver, dsn := dbFlags(fs)
+	cf := addCoreFlags(fs) // backend/CA/queue flags — present => issuance mode (enroll approve)
 	addr := fs.String("addr", ":8445", "listen address (bind to Core's overlay IP in production)")
 	devAuth := fs.Bool("dev-auth", false, "DEV ONLY: trust the X-Harbor-Dev-Actor header for identity (never in prod)")
 	devRole := fs.String("dev-role", "admin", "role granted to the dev actor")
@@ -1123,7 +1123,24 @@ func cmdAdminAPI(args []string) {
 	clockSkew := fs.Int("clock-skew-ms", 5000, "clock-skew health threshold (ms)")
 	_ = fs.Parse(args)
 
-	s := openStore(*driver, *dsn)
+	// Issuance mode: when the CA/signing config is supplied, build the full
+	// enrollment consumer so the approval queue can issue certs. Otherwise run
+	// read-only (list + deny; approve returns 501).
+	var (
+		s        *store.Store
+		consumer *enrollment.Consumer
+		canIssue bool
+	)
+	if *cf.caCert != "" {
+		var q *queue.Durable
+		consumer, q, s = cf.build()
+		defer q.Close()
+		canIssue = true
+		fmt.Fprintln(os.Stderr, "harbor admin-api: issuance mode (enrollment approve will issue certs)")
+	} else {
+		s = openStore(*cf.driver, *cf.dsn)
+		fmt.Fprintln(os.Stderr, "harbor admin-api: read-only mode (enrollment approve disabled; pass -ca-cert/-config-key/-queue-* to enable)")
+	}
 	defer s.Close()
 	audit := func(c context.Context, a, ac, t, d string) error { _, e := s.AppendAudit(c, a, ac, t, d); return e }
 
@@ -1138,6 +1155,7 @@ func cmdAdminAPI(args []string) {
 	api := adminapi.New(adminapi.Config{
 		Store: s, Identity: idp,
 		Rollout: rollout.New(s.DB, audit), Lighthouses: lighthouse.New(s.DB, audit),
+		Enrollment: consumer, CanIssue: canIssue,
 		Thresholds: fleet.Thresholds{ExpiryWindow: *expiryWithin, StaleAfter: *staleAfter, ClockSkewMs: *clockSkew},
 	})
 	srv := &http.Server{

@@ -65,6 +65,28 @@ func newSrv(t *testing.T) (*adminapi.Server, *httptest.Server) {
 // TestOpenAPISpecValid: the embedded spec is well-formed.
 func TestOpenAPISpecValid(t *testing.T) { loadSpec(t) }
 
+// TestNo500Enumerated locks in the error convention: a 500 is abnormal operation
+// (the server failed), not a defined result, so it must never be enumerated as a
+// per-operation response. Operations document only the contract's deterministic,
+// client-actionable outcomes — the 4xx codes, plus the deliberate mode/state
+// signals 501 ("issuance not configured") and 503 ("audit check unavailable").
+// This guards against a reviewer/codegen tool re-adding "500" per endpoint.
+func TestNo500Enumerated(t *testing.T) {
+	doc := loadSpec(t)
+	for path, item := range doc.Paths.Map() {
+		for method, op := range item.Operations() {
+			if op.Responses == nil {
+				continue
+			}
+			for code := range op.Responses.Map() {
+				if code == "500" {
+					t.Errorf("%s %s enumerates 500 — a 500 is abnormal operation, not a documented response (see the spec's error convention)", method, path)
+				}
+			}
+		}
+	}
+}
+
 // TestOpenAPIServedUnauthenticated: the contract is reachable without auth (it's
 // public contract info, no fleet data) so UI codegen/tooling can fetch it.
 func TestOpenAPIServedUnauthenticated(t *testing.T) {

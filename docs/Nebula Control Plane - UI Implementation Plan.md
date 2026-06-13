@@ -592,10 +592,27 @@ The v1 UI-0…UI-6 pretended the backend was done. Reframe as a **backend track*
     undocumented 501 path (engines now default in `New`), added step-audit
     attribution, fixed the unreachable `aborted` enum, and stopped a spurious
     audit row on idempotent lighthouse-remove.
-  - ⬜ **A0.5+** — enrollment **approve/deny** (approve needs the signer/CA wired
-    into admin-api — its own slice); generate the **TS client** (once `ui/`
-    exists); refactor the `harbor` CLI onto the API; CI test that the **CLI ⊆ the
-    OpenAPI surface**.
+  - ✅ **A0.5 (2026-06-13)** — enrollment **approval queue**: `GET /enrollments`
+    (keyset-paginated, default `pending`), `POST {id}/approve`, `POST {id}/deny`.
+    Approve is gated on **issuance mode** — `harbor admin-api -ca-cert …` builds the
+    full enrollment consumer (`CanIssue`); started read-only, approve returns a
+    deliberate **501** ("issuance not configured") instead of a broken signer.
+    Deny works on a Store-only consumer. All mutations require the admin role,
+    bind to the authenticated principal (audited), and the views never return the
+    host pubkey/cert bytes (fingerprint only). OpenAPI + contract test extended;
+    HTTP tests (list, deny 200/409, approve-501 read-only, viewer-403, unauth-401).
+    Adversarially reviewed (14-agent; 8 confirmed → 3 distinct): **hardened
+    `enrollment.Approve`/`Deny` with a status-gated compare-and-set** — a concurrent
+    approve+deny on the same pending row could otherwise mint a cert for a host
+    recorded **denied** (the A0.3 TOCTOU class); the losing approve now releases its
+    IP and never delivers the cert, with a `-race` regression test; added **keyset
+    pagination** to the enrollment list (was unbounded — the one join-key-holder-
+    influenced surface); and, per Chris's call, **dropped `500` from the OpenAPI
+    contract spec-wide** — a 500 is abnormal operation (the server failed), not a
+    documented result, so it is no longer enumerated per-operation (4xx + the
+    deliberate 501/503 signals remain), locked by a `TestNo500Enumerated` guard.
+  - ⬜ **A0.6+** — generate the **TS client** (once `ui/` exists); refactor the
+    `harbor` CLI onto the API; CI test that the **CLI ⊆ the OpenAPI surface**.
 - **A1 — Policy analysis engine** (gates UI-4): reachability query → flow-diff/blast-
   radius → assertions + publish gate, snapshotted into approvals.
 - **A2 — SSE change emitter** (upgrades UI-2+ live views; polling until then).

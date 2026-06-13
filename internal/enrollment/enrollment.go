@@ -243,16 +243,28 @@ func (c *Consumer) Approve(ctx context.Context, enrollmentID, approver string) (
 	if err != nil {
 		return Result{}, err
 	}
+	// Compare-and-set the issuance: commit the cert ONLY if the row is still
+	// pending, so a concurrent deny cannot leave a host marked denied while we
+	// deliver it a cert (and two approves cannot both win). If we lose the race,
+	// the bundle is never delivered (writeResult below is skipped) — the signed
+	// cert is therefore never handed to the host and is unusable — and we release
+	// the IP we speculatively allocated so it does not leak.
 	now := c.now().UnixNano()
-	if err := c.cfg.Store.DB.WithContext(ctx).Model(&Enrollment{}).
-		Where("enrollment_id = ?", enrollmentID).
+	claim := c.cfg.Store.DB.WithContext(ctx).Model(&Enrollment{}).
+		Where("enrollment_id = ? AND status = ?", enrollmentID, StatusPending).
 		Updates(map[string]any{
 			"status": StatusIssued, "cert_pem": certPEM, "overlay_ip": ip.String(),
 			"decided_at": now, "approver": approver,
-		}).Error; err != nil {
-		return Result{}, err
+		})
+	if claim.Error != nil {
+		_ = c.cfg.Allocator.Release(ctx, ip)
+		return Result{}, claim.Error
 	}
-	// Flip the poll result to issued (secret hash preserved from the pending row).
+	if claim.RowsAffected == 0 {
+		_ = c.cfg.Allocator.Release(ctx, ip)
+		return Result{}, ErrNotPending // another mutator decided it first; cert undelivered
+	}
+	// We won the claim — deliver the bundle (secret hash preserved from the pending row).
 	bundleJWS, err := c.buildBundle(ctx, e.DeviceName, ip.String(), groups, certPEM, notAfter)
 	if err != nil {
 		return Result{}, err
@@ -260,6 +272,41 @@ func (c *Consumer) Approve(ctx context.Context, enrollmentID, approver string) (
 	c.writeResult(ctx, enrollmentID, nil, bundleJWS, StatusIssued, "")
 	_ = c.audit(ctx, approver, "enroll-approved", e.DeviceName, fmt.Sprintf(`{"overlay_ip":%q}`, ip))
 	return Result{EnrollmentID: enrollmentID, Status: StatusIssued, OverlayIP: ip.String(), CertPEM: certPEM}, nil
+}
+
+// Deny rejects a PENDING enrollment: it records the decision and flips the poll
+// result to denied so the waiting host learns it was rejected. No signing — works
+// on a Store-only Consumer (the admin queue's reject action, 3.9).
+func (c *Consumer) Deny(ctx context.Context, enrollmentID, approver, reason string) (Result, error) {
+	var e Enrollment
+	err := c.cfg.Store.DB.WithContext(ctx).Where("enrollment_id = ?", enrollmentID).First(&e).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return Result{}, ErrNotPending
+	}
+	if err != nil {
+		return Result{}, err
+	}
+	if e.Status != StatusPending {
+		return Result{}, ErrNotPending
+	}
+	// Compare-and-set the transition so a concurrent approve/deny on the same row
+	// cannot both win (the read above is only a friendly fast-path; this UPDATE is
+	// the real gate). Mirrors the dualcontrol commit-claim: scope the write with
+	// `AND status = pending` and treat RowsAffected == 0 as "lost the race". Without
+	// this, an approve racing a deny could mint a cert for a host recorded denied.
+	now := c.now().UnixNano()
+	res := c.cfg.Store.DB.WithContext(ctx).Model(&Enrollment{}).
+		Where("enrollment_id = ? AND status = ?", enrollmentID, StatusPending).
+		Updates(map[string]any{"status": StatusDenied, "decided_at": now, "approver": approver})
+	if res.Error != nil {
+		return Result{}, res.Error
+	}
+	if res.RowsAffected == 0 {
+		return Result{}, ErrNotPending // another mutator decided it first
+	}
+	c.writeResult(ctx, enrollmentID, nil, nil, StatusDenied, reason) // no-op if no result store configured
+	_ = c.audit(ctx, approver, "enroll-denied", e.DeviceName, reason)
+	return Result{EnrollmentID: enrollmentID, Status: StatusDenied}, nil
 }
 
 // deny records a denied enrollment + result + audit (the shared rejection path).

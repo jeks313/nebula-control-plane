@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/jeks313/nebula-control-plane/internal/dualcontrol"
+	"github.com/jeks313/nebula-control-plane/internal/enrollment"
 	"github.com/jeks313/nebula-control-plane/internal/fleet"
 	"github.com/jeks313/nebula-control-plane/internal/lighthouse"
 	"github.com/jeks313/nebula-control-plane/internal/nebulaconfig"
@@ -73,9 +74,14 @@ type Config struct {
 	Identity    IdentityProvider
 	Rollout     *rollout.Engine      // optional; feeds the health rollup
 	Lighthouses *lighthouse.Registry // optional; /lighthouses
-	Thresholds  fleet.Thresholds     // health thresholds (sensible defaults if zero)
-	Now         func() time.Time
-	Logger      *slog.Logger // server-side error log (default slog.Default())
+	// Enrollment drives the approval queue. A Store-only consumer (the default)
+	// supports list + deny; a fully-configured one (CanIssue) also approves
+	// (issues a cert). CanIssue gates the approve endpoint.
+	Enrollment *enrollment.Consumer
+	CanIssue   bool
+	Thresholds fleet.Thresholds // health thresholds (sensible defaults if zero)
+	Now        func() time.Time
+	Logger     *slog.Logger // server-side error log (default slog.Default())
 }
 
 // Server is the admin API.
@@ -115,6 +121,10 @@ func New(cfg Config) *Server {
 		}
 		if s.cfg.Lighthouses == nil {
 			s.cfg.Lighthouses = lighthouse.New(cfg.Store.DB, audit)
+		}
+		if s.cfg.Enrollment == nil {
+			// Store-only: list + deny work; approve is gated by CanIssue (false here).
+			s.cfg.Enrollment = enrollment.New(enrollment.Config{Store: cfg.Store})
 		}
 		// Policy-publish committer: re-validate at commit (defense in depth; the
 		// active policy is the latest committed change of this kind).
@@ -178,6 +188,10 @@ func (s *Server) routeTable() []route {
 		{"GET", "/admin/v1/joinkeys", s.handleJoinKeys},
 		{"POST", "/admin/v1/joinkeys", s.handleJoinKeyCreate},
 		{"POST", "/admin/v1/joinkeys/{name}/revoke", s.handleJoinKeyRevoke},
+		// A0.5 enrollment approval queue.
+		{"GET", "/admin/v1/enrollments", s.handleEnrollments},
+		{"POST", "/admin/v1/enrollments/{id}/approve", s.handleEnrollApprove},
+		{"POST", "/admin/v1/enrollments/{id}/deny", s.handleEnrollDeny},
 	}
 }
 
