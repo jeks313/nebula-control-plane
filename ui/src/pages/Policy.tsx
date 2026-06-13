@@ -3,7 +3,12 @@ import {
   useActivePolicy,
   useCompilePolicy,
   useProposePolicy,
+  useReachability,
+  usePolicyMatrix,
+  useRunPolicyTests,
   type CompileResult,
+  type Decision,
+  type ReachabilityMatrix,
 } from '../api/hooks'
 import { usePermissions } from '../api/perms'
 import { isApiError, isCentrallyHandled } from '../api/errors'
@@ -13,15 +18,18 @@ import { Card, Page, StateBlock, ErrorState, Button, Chip, cx } from '../compone
 export function Policy() {
   const { can } = usePermissions()
   const mayPropose = can('policy:propose')
+  // The draft DSL is shared by the editor (compile/propose) and the A1 analysis rail.
+  const [draft, setDraft] = useState('allow group:laptops -> group:servers tcp 22\n')
 
   return (
-    <Page title="Policy" subtitle="The published firewall policy, with draft preview + dual-control publish">
+    <Page title="Policy" subtitle="The published firewall policy, with draft preview, analysis + dual-control publish">
       <div className="flex flex-col gap-5">
         <ActivePolicyCard />
-        <DraftEditor mayPropose={mayPropose} />
+        <DraftEditor draft={draft} setDraft={setDraft} mayPropose={mayPropose} />
+        <AnalysisRail draft={draft} />
         <p className="text-[12px] text-ink-faint">
-          The reachability matrix, test suite, blast-radius and visual diff (§4 analysis rail) land with the A1
-          policy-analysis engine.
+          Blast-radius (affected hosts) and the visual active-vs-draft diff overlay (§4.4) land with A1.2 + the device
+          group-membership source.
         </p>
       </div>
     </Page>
@@ -83,11 +91,10 @@ function RuleTable({ rules }: { rules: { from: string; to: string; proto: string
 
 const FIELD = 'w-full rounded-[6px] border border-edge bg-mesh-2 px-2 py-1.5 text-[13px] text-ink placeholder:text-ink-faint'
 
-function DraftEditor({ mayPropose }: { mayPropose: boolean }) {
+function DraftEditor({ draft, setDraft, mayPropose }: { draft: string; setDraft: (s: string) => void; mayPropose: boolean }) {
   const toast = useToast()
   const compile = useCompilePolicy()
   const propose = useProposePolicy()
-  const [draft, setDraft] = useState('allow group:laptops -> group:servers tcp 22\n')
   const [groups, setGroups] = useState('servers')
   const [description, setDescription] = useState('')
   const result = compile.data
@@ -157,6 +164,184 @@ function DraftEditor({ mayPropose }: { mayPropose: boolean }) {
         )}
       </div>
     </Card>
+  )
+}
+
+// AnalysisRail — the §4 analysis rail (server-computed, A1): reachability query (with
+// "why"), the test-authoring loop, and the all-pairs reachability matrix. All run against
+// the current draft DSL.
+function AnalysisRail({ draft }: { draft: string }) {
+  return (
+    <Card className="overflow-hidden">
+      <div className="border-b border-edge px-4 py-2 text-[12px] font-medium text-ink">
+        Analysis <span className="text-ink-faint">(server-computed)</span>
+      </div>
+      <div className="flex flex-col gap-5 px-4 py-3">
+        <ReachabilityQuery draft={draft} />
+        <PolicyTests draft={draft} />
+        <MatrixView draft={draft} />
+      </div>
+    </Card>
+  )
+}
+
+const SMALL = 'w-24 rounded-[6px] border border-edge bg-mesh-2 px-2 py-1 text-[13px] text-ink'
+
+function ReachabilityQuery({ draft }: { draft: string }) {
+  const toast = useToast()
+  const q = useReachability()
+  const [from, setFrom] = useState('laptops')
+  const [to, setTo] = useState('servers')
+  const [proto, setProto] = useState('tcp')
+  const [port, setPort] = useState('22')
+
+  function check() {
+    q.mutate(
+      { policy: draft, from, to, proto, port },
+      { onError: (e) => toast.notify(isApiError(e) ? e.detail || e.title : 'Query failed.', 'error') },
+    )
+  }
+
+  return (
+    <div>
+      <div className="mb-2 text-[11px] uppercase tracking-wide text-ink-faint">Reachability query</div>
+      <div className="flex flex-wrap items-center gap-2">
+        <input value={from} onChange={(e) => setFrom(e.target.value)} className={SMALL} placeholder="from" />
+        <span className="text-ink-faint">→</span>
+        <input value={to} onChange={(e) => setTo(e.target.value)} className={SMALL} placeholder="to" />
+        <input value={proto} onChange={(e) => setProto(e.target.value)} className={cx(SMALL, 'w-16')} placeholder="proto" />
+        <input value={port} onChange={(e) => setPort(e.target.value)} className={cx(SMALL, 'w-20')} placeholder="port" />
+        <Button onClick={check} disabled={q.isPending}>{q.isPending ? '…' : 'Check'}</Button>
+      </div>
+      {q.data && <ReachResult d={q.data} from={from} to={to} proto={proto} port={port} />}
+    </div>
+  )
+}
+
+function ReachResult({ d, from, to, proto, port }: { d: Decision; from: string; to: string; proto: string; port: string }) {
+  const flow = `${from} → ${to} ${proto}/${port}`
+  if (d.allowed) {
+    const why =
+      d.reason === 'rule' && d.rule
+        ? `granted by: allow ${d.rule.from} -> ${d.rule.to} ${d.rule.proto} ${d.rule.port}`
+        : `granted by ${d.reason}`
+    return (
+      <div className="mt-2 rounded-[6px] border border-permit/40 bg-permit/10 px-3 py-2 text-[12px] text-permit">
+        ALLOWED — {flow}
+        <span className="ml-1 text-ink-dim">· {why}</span>
+      </div>
+    )
+  }
+  return (
+    <div className="mt-2 rounded-[6px] border border-danger/40 bg-danger/10 px-3 py-2 text-[12px] text-danger">
+      DENIED — {flow}
+      <span className="ml-1 text-ink-dim">
+        ·{' '}
+        {d.nearest
+          ? `nearest miss: allow ${d.nearest.from} -> ${d.nearest.to} ${d.nearest.proto} ${d.nearest.port} (wrong proto/port)`
+          : 'default-deny — no matching rule'}
+      </span>
+    </div>
+  )
+}
+
+function PolicyTests({ draft }: { draft: string }) {
+  const toast = useToast()
+  const run = useRunPolicyTests()
+  const [tests, setTests] = useState('assert allow laptops -> servers tcp 22\nassert deny laptops -> servers tcp 3306\n')
+  const r = run.data
+
+  function onRun() {
+    run.mutate(
+      { policy: draft, tests },
+      { onError: (e) => toast.notify(isApiError(e) ? e.detail || e.title : 'Tests failed.', 'error') },
+    )
+  }
+
+  return (
+    <div>
+      <div className="mb-2 flex items-center gap-2">
+        <span className="text-[11px] uppercase tracking-wide text-ink-faint">Tests</span>
+        {r && (
+          <span className={cx('text-[11px]', r.ok ? 'text-permit' : 'text-danger')}>
+            {r.passed}/{r.results.length} passing
+          </span>
+        )}
+      </div>
+      <textarea
+        value={tests}
+        onChange={(e) => setTests(e.target.value)}
+        rows={3}
+        spellCheck={false}
+        className={cx(FIELD, 'font-mono text-[12px]')}
+        placeholder="assert allow|deny <from> -> <to> <proto> <port>"
+      />
+      <div className="mt-2"><Button onClick={onRun} disabled={run.isPending}>{run.isPending ? 'Running…' : 'Run tests'}</Button></div>
+      {r && r.results.length > 0 && (
+        <ul className="mt-2 flex flex-col gap-0.5 font-mono text-[11px]">
+          {r.results.map((t, i) => (
+            <li key={i} className={t.pass ? 'text-permit' : 'text-danger'}>
+              {t.pass ? 'PASS' : 'FAIL'} assert {t.assertion.expect ? 'allow' : 'deny'} {t.assertion.from} {'->'}{' '}
+              {t.assertion.to} {t.assertion.proto} {t.assertion.port}
+              {!t.pass && <span className="text-ink-dim"> (got {t.got ? 'allow' : 'deny'})</span>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+function MatrixView({ draft }: { draft: string }) {
+  const m = usePolicyMatrix()
+  return (
+    <div>
+      <div className="mb-2 flex items-center gap-2">
+        <span className="text-[11px] uppercase tracking-wide text-ink-faint">Reachability matrix</span>
+        <Button onClick={() => m.mutate({ policy: draft })} disabled={m.isPending}>
+          {m.isPending ? '…' : 'Build'}
+        </Button>
+      </div>
+      {m.data && <MatrixGrid m={m.data} />}
+    </div>
+  )
+}
+
+function MatrixGrid({ m }: { m: ReachabilityMatrix }) {
+  if (m.groups.length === 0) {
+    return <div className="text-[12px] text-ink-faint">No concrete groups in the policy to chart.</div>
+  }
+  const byPair = new Map(m.cells.map((c) => [`${c.from} ${c.to}`, c]))
+  return (
+    <div className="overflow-x-auto">
+      <table className="text-[11px]">
+        <thead>
+          <tr>
+            <th className="px-2 py-1 text-left text-ink-faint">from ＼ to</th>
+            {m.groups.map((g) => (
+              <th key={g} className="px-2 py-1 font-mono text-ink-dim">{g}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {m.groups.map((from) => (
+            <tr key={from}>
+              <td className="px-2 py-1 font-mono text-ink-dim">{from}</td>
+              {m.groups.map((to) => {
+                const c = byPair.get(`${from} ${to}`)
+                const n = c?.flows.length ?? 0
+                const title = n > 0 ? c!.flows.map((f) => `${f.proto}/${f.port}`).join(', ') : c?.baseline ? 'baseline only' : 'default-deny'
+                return (
+                  <td key={to} className="px-2 py-1 text-center" title={title}>
+                    {n > 0 ? <span className="nums text-permit">{n}</span> : c?.baseline ? <span className="text-ink-faint">·</span> : <span className="text-ink-faint">—</span>}
+                  </td>
+                )
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   )
 }
 

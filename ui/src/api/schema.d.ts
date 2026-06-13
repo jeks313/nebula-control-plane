@@ -263,6 +263,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/v1/policy/reachability": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Can `from` reach `to` on proto/port under a draft policy? (A1 analysis) */
+        post: operations["policyReachability"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/policy/matrix": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** The all-pairs group×group reachability grid for a draft policy. (A1 analysis) */
+        post: operations["policyMatrix"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/policy/tests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Evaluate reachability assertions against a draft policy. (A1 analysis) */
+        post: operations["policyTests"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/admin/v1/lighthouses/{ip}": {
         parameters: {
             query?: never;
@@ -628,6 +679,67 @@ export interface components {
                 inbound: components["schemas"]["CompiledRule"][];
                 outbound: components["schemas"]["CompiledRule"][];
             };
+        };
+        ReachabilityRequest: {
+            policy: string;
+            from: string;
+            to: string;
+            /** @description tcp|udp|icmp|any (default any) */
+            proto?: string;
+            /** @description any|N (default any) */
+            port?: string;
+        };
+        ReachabilityDecision: {
+            allowed: boolean;
+            /** @description rule | baseline-control-plane | baseline-icmp | default-deny */
+            reason: string;
+            rule?: components["schemas"]["PolicyRule"];
+            nearest?: components["schemas"]["PolicyRule"];
+        };
+        MatrixRequest: {
+            policy: string;
+            /** @description defaults to the groups named in the policy */
+            groups?: string[];
+        };
+        Flow: {
+            proto: string;
+            port: string;
+        };
+        MatrixCell: {
+            from: string;
+            to: string;
+            flows: components["schemas"]["Flow"][];
+            /** @description to is the control plane (always reachable) */
+            baseline: boolean;
+        };
+        ReachabilityMatrix: {
+            groups: string[];
+            cells: components["schemas"]["MatrixCell"][];
+        };
+        PolicyTestRequest: {
+            policy: string;
+            /** @description assert allow|deny <from> -> <to> <proto> <port> per line */
+            tests: string;
+        };
+        PolicyTestAssertion: {
+            expect: boolean;
+            from: string;
+            to: string;
+            proto: string;
+            port: string;
+            line: number;
+        };
+        PolicyTestResult: {
+            assertion: components["schemas"]["PolicyTestAssertion"];
+            got: boolean;
+            pass: boolean;
+            reason: string;
+        };
+        PolicyTestResults: {
+            results: components["schemas"]["PolicyTestResult"][];
+            passed: number;
+            failed: number;
+            ok: boolean;
         };
         LighthouseAdd: {
             overlay_ip: string;
@@ -1168,6 +1280,84 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CompileResult"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    policyReachability: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReachabilityRequest"];
+            };
+        };
+        responses: {
+            /** @description The reachability decision (granting rule, or default-deny + nearest miss). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReachabilityDecision"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    policyMatrix: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MatrixRequest"];
+            };
+        };
+        responses: {
+            /** @description The reachability matrix. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReachabilityMatrix"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    policyTests: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PolicyTestRequest"];
+            };
+        };
+        responses: {
+            /** @description Per-assertion results + pass/fail tally. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PolicyTestResults"];
                 };
             };
             400: components["responses"]["Problem"];

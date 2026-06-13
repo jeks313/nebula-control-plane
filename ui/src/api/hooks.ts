@@ -183,6 +183,31 @@ export function useCompilePolicy() {
   })
 }
 
+// --- A1 policy analysis (read-only dry-runs over a draft) ---
+
+export type Decision = components['schemas']['ReachabilityDecision']
+export type ReachabilityMatrix = components['schemas']['ReachabilityMatrix']
+export type PolicyTestResults = components['schemas']['PolicyTestResults']
+
+export function useReachability() {
+  return useMutation({
+    mutationFn: (body: { policy: string; from: string; to: string; proto?: string; port?: string }) =>
+      unwrap(api.POST('/admin/v1/policy/reachability', { body })),
+  })
+}
+
+export function usePolicyMatrix() {
+  return useMutation({
+    mutationFn: (body: { policy: string; groups?: string[] }) => unwrap(api.POST('/admin/v1/policy/matrix', { body })),
+  })
+}
+
+export function useRunPolicyTests() {
+  return useMutation({
+    mutationFn: (body: { policy: string; tests: string }) => unwrap(api.POST('/admin/v1/policy/tests', { body })),
+  })
+}
+
 // --- mutations ---
 // All use onSettled (not onSuccess) to refetch: a 409 "not pending" or a 404
 // "already revoked" still means the list moved, so we always reconcile. Auth/step-up

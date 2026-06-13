@@ -59,6 +59,25 @@ So the UI has two hard predecessors, tracked as a **backend track** that runs
   not "cheap on the existing engine." Staged: (1) reachability query (compile both
   groups, intersect — powers the simulator *and* the matrix), (2) flow-diff across
   the host set (blast-radius), (3) assertion DSL + storage + publish gate.
+  - ✅ **A1.1 reachability / matrix / tests (2026-06-13).** New `internal/policy/
+    analysis.go` — pure, server-computed answers defined as a faithful mirror of what
+    `CompileHost` enforces (a single `allow A->B` rule is compiled into both endpoints,
+    so one matching rule grants reachability; the non-removable baseline — control-plane
+    + ICMP — is layered on). **`Reachable`** (allowed + why: granting rule, or
+    default-deny with the nearest miss), **`Matrix`** (all-pairs group×group permitted
+    flows; baseline flagged), and a **test DSL** (`assert allow|deny <from> -> <to>
+    <proto> <port>`) → pass/fail. New read-only endpoints
+    `POST /admin/v1/policy/{reachability,matrix,tests}` (dry-runs, no perm/step-up like
+    compile). UI **analysis rail** on the Policy page: a reachability query bar with the
+    "why", an inline test runner, and a reachability-matrix grid. Adversarially reviewed
+    (7-agent, cross-checked against `CompileHost`): **5 confirmed, all fixed** — incl. a
+    **critical false-allow** (a wildcard query dimension dropped the other concrete
+    dimension → "reachable" when enforcement blocks; now each dimension is evaluated
+    independently, with regression tests), a control-plane-sender baseline false-allow,
+    a matrix O(n²) DoS (group cap), and query input validation.
+  - **Deferred to A1.2:** flow-diff (active vs draft) + **blast-radius** (needs a device
+    group-membership source; the devices/heartbeats table has no groups today),
+    assertion **storage + publish-gate** wiring, and richer per-rule invariant diagnostics.
 - **A2 — Change/event emitter.** A fan-out (heartbeat upserts, rollout transitions,
   approval state) behind one multiplexed SSE endpoint. Until it exists, the rollout
   monitor polls.

@@ -258,6 +258,57 @@ paths:
               schema: { $ref: "#/components/schemas/CompileResult" }
         "400": { $ref: "#/components/responses/Problem" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+  /admin/v1/policy/reachability:
+    post:
+      summary: Can `from` reach `to` on proto/port under a draft policy? (A1 analysis)
+      operationId: policyReachability
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReachabilityRequest" }
+      responses:
+        "200":
+          description: The reachability decision (granting rule, or default-deny + nearest miss).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReachabilityDecision" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /admin/v1/policy/matrix:
+    post:
+      summary: The all-pairs group×group reachability grid for a draft policy. (A1 analysis)
+      operationId: policyMatrix
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MatrixRequest" }
+      responses:
+        "200":
+          description: The reachability matrix.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReachabilityMatrix" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /admin/v1/policy/tests:
+    post:
+      summary: Evaluate reachability assertions against a draft policy. (A1 analysis)
+      operationId: policyTests
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PolicyTestRequest" }
+      responses:
+        "200":
+          description: Per-assertion results + pass/fail tally.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PolicyTestResults" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
   /admin/v1/lighthouses/{ip}:
     put:
       summary: Re-address (and re-activate) a lighthouse.
@@ -700,6 +751,81 @@ components:
           properties:
             inbound: { type: array, items: { $ref: "#/components/schemas/CompiledRule" } }
             outbound: { type: array, items: { $ref: "#/components/schemas/CompiledRule" } }
+    ReachabilityRequest:
+      type: object
+      required: [policy, from, to]
+      properties:
+        policy: { type: string }
+        from: { type: string }
+        to: { type: string }
+        proto: { type: string, description: "tcp|udp|icmp|any (default any)" }
+        port: { type: string, description: "any|N (default any)" }
+    ReachabilityDecision:
+      type: object
+      required: [allowed, reason]
+      properties:
+        allowed: { type: boolean }
+        reason: { type: string, description: "rule | baseline-control-plane | baseline-icmp | default-deny" }
+        rule: { $ref: "#/components/schemas/PolicyRule" }
+        nearest: { $ref: "#/components/schemas/PolicyRule" }
+    MatrixRequest:
+      type: object
+      required: [policy]
+      properties:
+        policy: { type: string }
+        groups: { type: array, items: { type: string }, description: "defaults to the groups named in the policy" }
+    Flow:
+      type: object
+      required: [proto, port]
+      properties:
+        proto: { type: string }
+        port: { type: string }
+    MatrixCell:
+      type: object
+      required: [from, to, flows, baseline]
+      properties:
+        from: { type: string }
+        to: { type: string }
+        flows: { type: array, items: { $ref: "#/components/schemas/Flow" } }
+        baseline: { type: boolean, description: "to is the control plane (always reachable)" }
+    ReachabilityMatrix:
+      type: object
+      required: [groups, cells]
+      properties:
+        groups: { type: array, items: { type: string } }
+        cells: { type: array, items: { $ref: "#/components/schemas/MatrixCell" } }
+    PolicyTestRequest:
+      type: object
+      required: [policy, tests]
+      properties:
+        policy: { type: string }
+        tests: { type: string, description: "assert allow|deny <from> -> <to> <proto> <port> per line" }
+    PolicyTestAssertion:
+      type: object
+      required: [expect, from, to, proto, port, line]
+      properties:
+        expect: { type: boolean }
+        from: { type: string }
+        to: { type: string }
+        proto: { type: string }
+        port: { type: string }
+        line: { type: integer }
+    PolicyTestResult:
+      type: object
+      required: [assertion, got, pass, reason]
+      properties:
+        assertion: { $ref: "#/components/schemas/PolicyTestAssertion" }
+        got: { type: boolean }
+        pass: { type: boolean }
+        reason: { type: string }
+    PolicyTestResults:
+      type: object
+      required: [results, passed, failed, ok]
+      properties:
+        results: { type: array, items: { $ref: "#/components/schemas/PolicyTestResult" } }
+        passed: { type: integer }
+        failed: { type: integer }
+        ok: { type: boolean }
     LighthouseAdd:
       type: object
       required: [overlay_ip, public_addrs]
