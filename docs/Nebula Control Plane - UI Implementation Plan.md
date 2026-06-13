@@ -611,8 +611,27 @@ The v1 UI-0…UI-6 pretended the backend was done. Reframe as a **backend track*
     contract spec-wide** — a 500 is abnormal operation (the server failed), not a
     documented result, so it is no longer enumerated per-operation (4xx + the
     deliberate 501/503 signals remain), locked by a `TestNo500Enumerated` guard.
-  - ⬜ **A0.6+** — generate the **TS client** (once `ui/` exists); refactor the
-    `harbor` CLI onto the API; CI test that the **CLI ⊆ the OpenAPI surface**.
+  - ✅ **A0.6 (2026-06-13)** — **CLI ⊆ OpenAPI surface** guardrail (principle 3
+    "no UI backdoor", *tested* not asserted). A CI contract test (`cmd/harbor/
+    cli_surface_test.go`) reconstructs the harbor command tree from `main.go` by
+    AST and checks every command against a `cliSurface` catalog: each **operator**
+    command must map to a real OpenAPI `operationId`; each **break-glass/local** one
+    (`genesis`, `ca-init`, `issue-cert`, `migrate`, `ipam`, the `worker` daemon,
+    `audit add` — audit-row injection is deliberately off-API for integrity, server
+    launchers, meta) must carry a justification. A new/removed command forces a
+    classification decision (bidirectional check). Scope chosen: parity test only —
+    the HTTP-client refactor (needs 2.11 auth) and TS client (needs `ui/`) stay
+    deferred (A0.7+). Adversarially reviewed (16-agent; 6 confirmed → 1 root cause):
+    the extractor **failed *open*** on un-modeled dispatch shapes (const/ident case
+    labels, `default:`-clause logic, pre-switch `if`-guards, if/else chains, non-
+    `cmd*` handlers, dispatch outside `main`'s switch) — a backdoor could ship green.
+    Rewrote it to **fail *closed*** (errors on any shape it can't read; resolves
+    handlers by any in-file function, not a name prefix) and added a
+    `TestExtractorFailsClosed` self-test that proves each dangerous shape is now
+    rejected — so the guardrail's own integrity is itself tested.
+  - ⬜ **A0.7+** — generate the **TS client** (once `ui/` exists); refactor the
+    `harbor` CLI to consume `/admin/v1` over HTTP (once 2.11 auth lands), upgrading
+    the A0.6 static-subset guardrail into runtime parity.
 - **A1 — Policy analysis engine** (gates UI-4): reachability query → flow-diff/blast-
   radius → assertions + publish gate, snapshotted into approvals.
 - **A2 — SSE change emitter** (upgrades UI-2+ live views; polling until then).
