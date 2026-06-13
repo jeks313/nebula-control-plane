@@ -1,0 +1,21 @@
+# Terraform state can contain sensitive values — never commit it.
+*.tfstate
+*.tfstate.*
+.terraform/
+crash.log
+crash.*.log
+
+# Real variable files (may hold environment-specific values). The .example is OK.
+*.tfvars
+!*.tfvars.example
+
+# Local CLI config that can carry secrets.
+.terraformrc
+terraform.rc
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# NOTE: .terraform.lock.hcl is intentionally NOT ignored — commit it to pin
+# provider versions/hashes.
