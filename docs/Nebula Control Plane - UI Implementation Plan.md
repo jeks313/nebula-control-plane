@@ -560,9 +560,15 @@ The v1 UI-0…UI-6 pretended the backend was done. Reframe as a **backend track*
     Adversarially reviewed (14-agent workflow): fixed audit "couldn't-check" vs
     "tampered" conflation (new `store.ErrAuditTampered`), error-string leakage,
     `reasons: null`, `/devices` cursor, 401-not-503, role-null. Tested + live-smoked.
-  - ⬜ **A0.2+** — OpenAPI spec + generated TS client; mutating endpoints
-    (approvals/policy/joinkeys/lighthouse/rollout); refactor `harbor` CLI onto the
-    API; CI contract test (OpenAPI = only admin surface, CLI ⊆ it).
+  - ✅ **A0.2 (2026-06-13)** — **OpenAPI 3.0 spec** for the A0.1 endpoints
+    (`internal/adminapi/openapi.yaml`, embedded + served unauthenticated at
+    `GET /admin/v1/openapi.yaml`), routes made **data-driven** (`Server.Routes()`),
+    and a **contract test** (kin-openapi, test-only dep) that fails on drift:
+    the spec validates, documented operations **exactly equal** the served routes
+    (both directions), and **every live 200 body is validated against its schema**.
+  - ⬜ **A0.3+** — generate the **TS client** (once `ui/` exists); **mutating
+    endpoints** (approvals/policy/joinkeys/lighthouse/rollout); refactor the
+    `harbor` CLI onto the API; CI test that the **CLI ⊆ the OpenAPI surface**.
 - **A1 — Policy analysis engine** (gates UI-4): reachability query → flow-diff/blast-
   radius → assertions + publish gate, snapshotted into approvals.
 - **A2 — SSE change emitter** (upgrades UI-2+ live views; polling until then).

@@ -1,0 +1,227 @@
+openapi: 3.0.3
+info:
+  title: Harbor Admin API
+  version: "0.1.0"
+  description: >
+    The Harbor control-plane admin API (`/admin/v1`) the web console consumes.
+    Mesh-only (bind to Core's overlay IP). Read-only in this slice (A0.1/A0.2);
+    mutating endpoints + the CLI refactor land in later A0 slices. Every
+    "is it healthy/safe?" answer is computed server-side (thin client).
+servers:
+  - url: /
+    description: Served by Harbor Core over the mesh.
+security:
+  - DevActor: []
+paths:
+  /admin/v1/me:
+    get:
+      summary: The authenticated admin principal.
+      operationId: getMe
+      responses:
+        "200":
+          description: The caller's identity.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Identity" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /admin/v1/fleet/health:
+    get:
+      summary: Server-computed fleet health rollup.
+      operationId: getFleetHealth
+      responses:
+        "200":
+          description: The health verdict and the counts behind it.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FleetHealth" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "500": { $ref: "#/components/responses/Problem" }
+  /admin/v1/devices:
+    get:
+      summary: Device inventory (from heartbeats), keyset-paginated on overlay_ip.
+      operationId: listDevices
+      parameters:
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 2000, default: 200 } }
+        - { name: after, in: query, required: false, description: "cursor: overlay_ip of the last row from the previous page", schema: { type: string } }
+      responses:
+        "200":
+          description: A page of devices.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeviceList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "500": { $ref: "#/components/responses/Problem" }
+  /admin/v1/audit:
+    get:
+      summary: Audit log, newest first, cursor-paginated.
+      operationId: listAudit
+      parameters:
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 500, default: 50 } }
+        - { name: before, in: query, required: false, description: "cursor: return entries with seq < this", schema: { type: integer } }
+      responses:
+        "200":
+          description: A page of audit entries.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuditList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "500": { $ref: "#/components/responses/Problem" }
+  /admin/v1/audit/verify:
+    get:
+      summary: Audit-chain integrity (in-DB scope).
+      operationId: verifyAudit
+      description: >
+        "verified" = clean; "tampered" = a genuine integrity failure; a 503 means
+        the check could not run (NOT a claim of tampering). In-DB scope only; it
+        cannot detect tail-truncation until WORM anchoring (impl 2.13) is configured.
+      responses:
+        "200":
+          description: The verification result (verified or tampered).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuditVerify" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /admin/v1/lighthouses:
+    get:
+      summary: The lighthouse discovery fleet.
+      operationId: listLighthouses
+      responses:
+        "200":
+          description: All registered lighthouses.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LighthouseList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "500": { $ref: "#/components/responses/Problem" }
+components:
+  securitySchemes:
+    DevActor:
+      type: apiKey
+      in: header
+      name: X-Harbor-Dev-Actor
+      description: >
+        Dev-auth seam (pre-2.11): the admin principal. Replaced by an OIDC session
+        cookie at 2.11; never enabled in production.
+  responses:
+    Unauthorized:
+      description: No / invalid admin identity.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    Problem:
+      description: An error.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+  schemas:
+    Problem:
+      type: object
+      required: [title, status]
+      properties:
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+    Identity:
+      type: object
+      required: [principal, roles]
+      properties:
+        principal: { type: string }
+        roles: { type: array, items: { type: string } }
+        mfa_satisfied_at: { type: string, format: date-time }
+    Severity:
+      type: string
+      enum: [info, degraded, critical]
+    Reason:
+      type: object
+      required: [code, severity, count, detail]
+      properties:
+        code: { type: string }
+        severity: { $ref: "#/components/schemas/Severity" }
+        count: { type: integer }
+        detail: { type: string }
+        link: { type: string }
+    FleetHealth:
+      type: object
+      required: [status, reasons, totals, audit_ok]
+      properties:
+        status:
+          type: string
+          enum: [healthy, degraded, critical]
+        reasons:
+          type: array
+          items: { $ref: "#/components/schemas/Reason" }
+        totals:
+          type: object
+          required: [total, expired, expiring, stale, clock_skewed, unhealthy]
+          properties:
+            total: { type: integer }
+            expired: { type: integer }
+            expiring: { type: integer }
+            stale: { type: integer }
+            clock_skewed: { type: integer }
+            unhealthy: { type: integer }
+        rollout_state: { type: string }
+        audit_ok: { type: boolean }
+    Device:
+      type: object
+      required: [overlay_ip, name, applied_bundle_version, clock_offset_ms]
+      properties:
+        overlay_ip: { type: string }
+        name: { type: string }
+        pilot_version: { type: string }
+        nebula_version: { type: string }
+        cert_not_after: { type: string, format: date-time }
+        applied_bundle_version: { type: integer }
+        clock_offset_ms: { type: integer }
+        health: { type: string }
+        last_seen: { type: string, format: date-time }
+    DeviceList:
+      type: object
+      required: [devices, count]
+      properties:
+        devices: { type: array, items: { $ref: "#/components/schemas/Device" } }
+        count: { type: integer, description: "page size, NOT the fleet total" }
+        next_after: { type: string, description: "cursor for the next page (present only when more rows exist)" }
+    AuditRow:
+      type: object
+      required: [seq, ts, actor, action]
+      properties:
+        seq: { type: integer, format: int64 }
+        ts: { type: string, format: date-time }
+        actor: { type: string }
+        action: { type: string }
+        target: { type: string }
+        details: { type: string }
+    AuditList:
+      type: object
+      required: [entries, count]
+      properties:
+        entries: { type: array, items: { $ref: "#/components/schemas/AuditRow" } }
+        count: { type: integer }
+        next_before: { type: integer, format: int64, description: "cursor for the next (older) page" }
+    AuditVerify:
+      type: object
+      required: [status, ok, verified_rows, scope]
+      properties:
+        status:
+          type: string
+          enum: [verified, tampered]
+        ok: { type: boolean }
+        verified_rows: { type: integer, format: int64 }
+        scope: { type: string }
+        detail: { type: string }
+    Lighthouse:
+      type: object
+      required: [overlay_ip, state, public_addrs]
+      properties:
+        overlay_ip: { type: string }
+        hostname: { type: string }
+        state: { type: string }
+        public_addrs: { type: array, items: { type: string } }
+    LighthouseList:
+      type: object
+      required: [lighthouses, count]
+      properties:
+        lighthouses: { type: array, items: { $ref: "#/components/schemas/Lighthouse" } }
+        count: { type: integer }
