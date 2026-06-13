@@ -19,6 +19,13 @@ const hashLen = sha256.Size
 // genesisPrev is the prev_hash of the first row: 32 zero bytes.
 var genesisPrev = make([]byte, hashLen)
 
+// ErrAuditTampered wraps every *integrity* failure from VerifyAudit (hash
+// mismatch, broken link, seq gap/reorder). It deliberately does NOT wrap a mere
+// read failure, so callers can tell "the chain is bad" (a security event) apart
+// from "I couldn't check right now" (a transient infra problem) — conflating the
+// two turns a momentary DB hiccup into a false fleet-CRITICAL alarm.
+var ErrAuditTampered = errors.New("store: audit chain integrity failure")
+
 // auditHash computes a row's hash. Every field that defines the row — including
 // its sequence number and the previous row's hash — is committed to, so any
 // content change, reorder, or gap is detectable. Fields are length-prefixed so
@@ -100,13 +107,13 @@ func (s *Store) VerifyAudit(ctx context.Context) (int64, error) {
 	var want int64 = 1
 	for _, r := range rows {
 		if r.Seq != want {
-			return want - 1, fmt.Errorf("store: audit chain: expected seq %d, got %d (gap or reorder)", want, r.Seq)
+			return want - 1, fmt.Errorf("%w: expected seq %d, got %d (gap or reorder)", ErrAuditTampered, want, r.Seq)
 		}
 		if !bytes.Equal(r.PrevHash, prev) {
-			return r.Seq - 1, fmt.Errorf("store: audit chain: broken link at seq %d", r.Seq)
+			return r.Seq - 1, fmt.Errorf("%w: broken link at seq %d", ErrAuditTampered, r.Seq)
 		}
 		if !bytes.Equal(r.Hash, auditHash(r)) {
-			return r.Seq - 1, fmt.Errorf("store: audit chain: hash mismatch at seq %d (row tampered)", r.Seq)
+			return r.Seq - 1, fmt.Errorf("%w: hash mismatch at seq %d (row tampered)", ErrAuditTampered, r.Seq)
 		}
 		prev = r.Hash
 		want++

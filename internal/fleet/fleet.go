@@ -62,6 +62,133 @@ func (r Report) HasAlerts() bool {
 	return r.Expired > 0 || r.ExpiringSoon > 0 || r.Stale > 0
 }
 
+// Severity orders a health reason. info does not degrade the top-line status;
+// degraded and critical do.
+type Severity string
+
+const (
+	SevInfo     Severity = "info"
+	SevDegraded Severity = "degraded"
+	SevCritical Severity = "critical"
+)
+
+// Status is the fleet's single top-line health verdict.
+type Status string
+
+const (
+	StatusHealthy  Status = "healthy"
+	StatusDegraded Status = "degraded"
+	StatusCritical Status = "critical"
+)
+
+// Reason is one contributor to fleet health (UI Implementation Plan §3.2). Codes
+// are stable so the dashboard, `harbor fleet`, and webhooks all speak the same
+// vocabulary.
+type Reason struct {
+	Code     string   `json:"code"`
+	Severity Severity `json:"severity"`
+	Count    int      `json:"count"`
+	Detail   string   `json:"detail"`
+	Link     string   `json:"link,omitempty"`
+}
+
+// Health is the server-computed fleet health rollup: a single status plus the
+// reasons that produced it, severity-ordered. This is THE definition (computed
+// server-side, never in the client) shared across the dashboard verdict, the CLI,
+// and any webhook/SIEM, so there is no drift between surfaces.
+type Health struct {
+	Status  Status   `json:"status"`
+	Reasons []Reason `json:"reasons"`
+}
+
+// AuditState distinguishes a verified-clean chain from a tampered one from a
+// check that couldn't run — so a transient DB failure never masquerades as
+// tampering.
+type AuditState string
+
+const (
+	AuditOK          AuditState = "ok"
+	AuditTampered    AuditState = "tampered"
+	AuditUnavailable AuditState = "unavailable"
+)
+
+// Rollup turns the heartbeat Report plus a few cross-cutting facts into the
+// health verdict. It is pure (no DB / no engine imports): callers gather the
+// inputs (audit state? current rollout state?) and pass them in.
+//
+//	rolloutState: "" if no rollout exists; else rollout.State* ("canary" |
+//	"widening" | "rolledback" | "completed" | "aborted").
+func Rollup(rep Report, audit AuditState, rolloutState string, th Thresholds) Health {
+	rs := []Reason{} // never nil — the contract is always a JSON array
+	add := func(sev Severity, code string, count int, detail string) {
+		rs = append(rs, Reason{Code: code, Severity: sev, Count: count, Detail: detail})
+	}
+
+	// Critical — something is actually broken or down.
+	if audit == AuditTampered {
+		add(SevCritical, "AUDIT_CHAIN_BROKEN", 1, "audit chain failed integrity verification")
+	}
+	if rep.Expired > 0 {
+		add(SevCritical, "CERTS_EXPIRED", rep.Expired, fmt.Sprintf("%d device(s) have expired certs", rep.Expired))
+	}
+	if rolloutState == "rolledback" {
+		add(SevCritical, "ROLLOUT_ROLLEDBACK", 1, "a rollout auto-rolled-back and is frozen")
+	}
+
+	// Degraded — at risk, needs attention soon.
+	if rep.ExpiringSoon > 0 {
+		add(SevDegraded, "CERTS_EXPIRING", rep.ExpiringSoon, fmt.Sprintf("%d cert(s) expiring within %s", rep.ExpiringSoon, th.ExpiryWindow))
+	}
+	if rep.Stale > 0 {
+		add(SevDegraded, "HOSTS_STALE", rep.Stale, fmt.Sprintf("%d host(s) silent > %s", rep.Stale, th.StaleAfter))
+	}
+	if rep.ClockSkewed > 0 {
+		add(SevDegraded, "CLOCK_SKEWED", rep.ClockSkewed, fmt.Sprintf("%d host(s) clock-skewed > %dms", rep.ClockSkewed, th.ClockSkewMs))
+	}
+	if rep.Unhealthy > 0 {
+		add(SevDegraded, "HOSTS_UNHEALTHY", rep.Unhealthy, fmt.Sprintf("%d host(s) report degraded health", rep.Unhealthy))
+	}
+
+	// Degraded — the integrity check couldn't run (NOT proof of tampering, but we
+	// can't currently vouch for the chain either).
+	if audit == AuditUnavailable {
+		add(SevDegraded, "AUDIT_CHECK_UNAVAILABLE", 1, "audit chain could not be verified right now")
+	}
+
+	// Info — notable but not degradation (a healthy fleet mid-rollout is healthy).
+	if rolloutState == "canary" || rolloutState == "widening" {
+		add(SevInfo, "ROLLOUT_IN_PROGRESS", 1, "a staged rollout is in progress")
+	}
+
+	// Top-line status = worst of {degraded, critical}; info never degrades it.
+	status := StatusHealthy
+	for _, r := range rs {
+		if r.Severity == SevCritical {
+			status = StatusCritical
+			break
+		}
+		if r.Severity == SevDegraded {
+			status = StatusDegraded
+		}
+	}
+
+	// Order: critical, then degraded, then info (stable within a tier).
+	sort.SliceStable(rs, func(i, j int) bool { return sevRank(rs[i].Severity) > sevRank(rs[j].Severity) })
+	return Health{Status: status, Reasons: rs}
+}
+
+func sevRank(s Severity) int {
+	switch s {
+	case SevCritical:
+		return 3
+	case SevDegraded:
+		return 2
+	case SevInfo:
+		return 1
+	}
+	return 0
+}
+
 // Generate loads heartbeats and summarizes them.
 func Generate(ctx context.Context, s *store.Store, now time.Time, th Thresholds) (Report, error) {
 	var rows []hb

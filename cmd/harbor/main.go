@@ -19,6 +19,7 @@ import (
 
 	"net/http"
 
+	"github.com/jeks313/nebula-control-plane/internal/adminapi"
 	"github.com/jeks313/nebula-control-plane/internal/bundle"
 	"github.com/jeks313/nebula-control-plane/internal/coreapi"
 	"github.com/jeks313/nebula-control-plane/internal/dualcontrol"
@@ -62,6 +63,8 @@ func main() {
 		cmdEnrollCore(os.Args[2:])
 	case "core-api":
 		cmdCoreAPI(os.Args[2:])
+	case "admin-api":
+		cmdAdminAPI(os.Args[2:])
 	case "fleet":
 		cmdFleet(os.Args[2:])
 	case "lighthouse":
@@ -103,6 +106,7 @@ usage:
   harbor enroll pending    [db flags]        list enrollments awaiting approval
   harbor enroll approve    <id> -approver A  [core flags]  approve a pending host
   harbor core-api          -addr ADDR [core flags]  mesh-only API (renew/heartbeat)
+  harbor admin-api         -addr ADDR [-dev-auth] [db flags]  mesh-only admin API (console)
   harbor fleet             [-expiry-within D] [-stale-after D] [-alert] [db flags]
   harbor lighthouse add    -ip OVERLAY -addrs host:port[,...] [-name N] -actor A [db flags]
   harbor lighthouse replace -ip OVERLAY -addrs host:port[,...] -actor A [db flags]
@@ -1100,6 +1104,57 @@ func cmdCoreAPI(args []string) {
 	fmt.Fprintf(os.Stderr, "harbor core-api listening on %s (mesh-only: bind to the overlay IP in prod)\n", *addr)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		fatalf("core-api: %v", err)
+	}
+}
+
+// cmdAdminAPI serves the admin HTTP API (UI track A0): the /admin/v1 surface the
+// console consumes. Mesh-only — bind to Core's overlay IP in production. Until
+// 2.11 (OIDC/MFA/RBAC), -dev-auth trusts an X-Harbor-Dev-Actor header so the
+// console can be dogfooded; it must never be enabled in production.
+func cmdAdminAPI(args []string) {
+	fs := flag.NewFlagSet("admin-api", flag.ExitOnError)
+	driver, dsn := dbFlags(fs)
+	addr := fs.String("addr", ":8445", "listen address (bind to Core's overlay IP in production)")
+	devAuth := fs.Bool("dev-auth", false, "DEV ONLY: trust the X-Harbor-Dev-Actor header for identity (never in prod)")
+	devRole := fs.String("dev-role", "admin", "role granted to the dev actor")
+	expiryWithin := fs.Duration("expiry-within", 7*24*time.Hour, "cert-expiry health window")
+	staleAfter := fs.Duration("stale-after", 5*time.Minute, "stale-host health window")
+	clockSkew := fs.Int("clock-skew-ms", 5000, "clock-skew health threshold (ms)")
+	_ = fs.Parse(args)
+
+	s := openStore(*driver, *dsn)
+	defer s.Close()
+	audit := func(c context.Context, a, ac, t, d string) error { _, e := s.AppendAudit(c, a, ac, t, d); return e }
+
+	var idp adminapi.IdentityProvider
+	if *devAuth {
+		fmt.Fprintln(os.Stderr, "harbor admin-api: WARNING dev-auth enabled — trusting X-Harbor-Dev-Actor (NEVER enable in production; replace with OIDC at 2.11)")
+		idp = adminapi.DevHeaderProvider{Roles: []string{*devRole}}
+	} else {
+		fmt.Fprintln(os.Stderr, "harbor admin-api: no identity provider (all requests 401 until OIDC lands; use -dev-auth for local dogfooding)")
+	}
+
+	api := adminapi.New(adminapi.Config{
+		Store: s, Identity: idp,
+		Rollout: rollout.New(s.DB, audit), Lighthouses: lighthouse.New(s.DB, audit),
+		Thresholds: fleet.Thresholds{ExpiryWindow: *expiryWithin, StaleAfter: *staleAfter, ClockSkewMs: *clockSkew},
+	})
+	srv := &http.Server{
+		Addr: *addr, Handler: api.Handler(),
+		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second,
+		WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 8 << 10,
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		sc, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(sc)
+	}()
+	fmt.Fprintf(os.Stderr, "harbor admin-api listening on %s (mesh-only: bind to the overlay IP in prod)\n", *addr)
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		fatalf("admin-api: %v", err)
 	}
 }
 
