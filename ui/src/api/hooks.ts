@@ -10,6 +10,12 @@ export type Enrollment = components['schemas']['EnrollmentView']
 export type JoinKey = components['schemas']['JoinKey']
 export type JoinKeyCreate = components['schemas']['JoinKeyCreate']
 export type JoinKeyCreated = components['schemas']['JoinKeyCreated']
+export type Lighthouse = components['schemas']['Lighthouse']
+export type RolloutStatus = components['schemas']['RolloutStatus']
+export type RolloutHost = components['schemas']['RolloutHost']
+export type AuditVerify = components['schemas']['AuditVerify']
+export type ActivePolicy = components['schemas']['ActivePolicy']
+export type Change = components['schemas']['Change']
 
 export type EnrollmentStatus = 'pending' | 'issued' | 'denied'
 
@@ -60,6 +66,48 @@ export function useJoinKeys() {
   return useQuery({
     queryKey: ['joinkeys'],
     queryFn: () => unwrap(api.GET('/admin/v1/joinkeys')),
+  })
+}
+
+// --- UI-2 fleet dashboard reads ---
+
+export function useLighthouses() {
+  return useQuery({
+    queryKey: ['lighthouses'],
+    queryFn: () => unwrap(api.GET('/admin/v1/lighthouses')),
+  })
+}
+
+// The audit-chain verification walks the chain server-side; fetch once (no poll). A 503
+// means the check couldn't run (not a tamper claim) — surfaces as isError to the card.
+export function useAuditVerify() {
+  return useQuery({
+    queryKey: ['audit-verify'],
+    queryFn: () => unwrap(api.GET('/admin/v1/audit/verify')),
+  })
+}
+
+// Poll the current rollout so the active-operations strip stays live until A2/SSE lands.
+export function useCurrentRollout() {
+  return useQuery({
+    queryKey: ['rollout-current'],
+    queryFn: () => unwrap(api.GET('/admin/v1/rollouts/current')),
+    refetchInterval: 10_000,
+  })
+}
+
+export function useApprovals(state: string) {
+  return useQuery({
+    queryKey: ['approvals', state],
+    queryFn: () => unwrap(api.GET('/admin/v1/approvals', { params: { query: { state } } })),
+    refetchInterval: 15_000,
+  })
+}
+
+export function useActivePolicy() {
+  return useQuery({
+    queryKey: ['policy-active'],
+    queryFn: () => unwrap(api.GET('/admin/v1/policy/active')),
   })
 }
 

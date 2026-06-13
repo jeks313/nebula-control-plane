@@ -71,6 +71,8 @@ func main() {
 		cmdAdminAPI(os.Args[2:])
 	case "admin-token":
 		cmdAdminToken(os.Args[2:])
+	case "seed-demo":
+		cmdSeedDemo(os.Args[2:])
 	case "fleet":
 		cmdFleet(os.Args[2:])
 	case "lighthouse":
@@ -113,6 +115,7 @@ usage:
   harbor enroll approve    <id> -approver A  [core flags]  approve a pending host
   harbor core-api          -addr ADDR [core flags]  mesh-only API (renew/heartbeat)
   harbor admin-api         -addr ADDR [-dev-auth] [db flags]  mesh-only admin API (console)
+  harbor seed-demo         [db flags]      DEV ONLY: populate a synthetic fleet for the console demo
   harbor fleet             [-expiry-within D] [-stale-after D] [-alert] [db flags]
   harbor lighthouse add    -ip OVERLAY -addrs host:port[,...] [-name N] -actor A [db flags]
   harbor lighthouse replace -ip OVERLAY -addrs host:port[,...] -actor A [db flags]
