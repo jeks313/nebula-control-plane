@@ -1,0 +1,14 @@
+# Copy to terraform.tfvars and fill in. This file holds ONLY non-secret config.
+# NEVER put aws_access_key_id / aws_secret_access_key here — credentials come from
+# the environment / aws-vault (see README.md). terraform.tfvars is gitignored.
+
+region              = "ca-central-1"
+allowed_ssh_cidr    = "203.0.113.10/32" # <- your public IP /32: curl -s https://checkip.amazonaws.com
+ssh_public_key_path = "~/.ssh/absolute.pub"
+instance_type       = "t3.micro"
+
+# Pin + verify the nebula download (recommended). Get the value from the release page.
+# nebula_sha256     = "<sha256 of nebula-linux-amd64.tar.gz for v1.10.3>"
+
+# Open the enrollment gateway port to your IP (optional).
+# open_gateway_port = 8443

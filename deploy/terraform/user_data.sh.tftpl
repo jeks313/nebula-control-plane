@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Cloud-init bootstrap for a Nebula control-plane node (role: ${role}).
+set -euo pipefail
+
+dnf update -y
+dnf install -y tar gzip iproute
+
+# --- Nebula (data plane) ---
+cd /tmp
+curl -fsSL -o nebula.tar.gz \
+  "https://github.com/slackhq/nebula/releases/download/v${nebula_version}/nebula-linux-amd64.tar.gz"
+%{ if nebula_sha256 != "" ~}
+echo "${nebula_sha256}  nebula.tar.gz" | sha256sum -c -
+%{ else ~}
+echo "WARNING: nebula_sha256 not set — skipping checksum verification (supply-chain gap)." >&2
+%{ endif ~}
+tar -xzf nebula.tar.gz -C /usr/local/bin nebula nebula-cert
+install -d -m 0700 /etc/nebula
+
+# --- Control-plane layout ---
+id -u ncp >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin ncp
+install -d -o ncp -g ncp -m 0750 /opt/nebula-control-plane /var/lib/ncp
+
+cat >/root/NEXT-STEPS.txt <<'EOF'
+Role: ${role}
+Nebula data plane is installed at /usr/local/bin/nebula (+ nebula-cert).
+This box has an IAM instance role + IMDSv2-only, so it is ready for M5 AWS
+sigv4 attestation: sts:GetCallerIdentity works with no extra permissions.
+
+The harbor / pilot / gateway binaries are NOT auto-installed — there is no public
+signed-release pipeline yet (implementation-plan 1.2). Install them one of these ways:
+
+  1) Build locally and copy up:
+       GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/harbor  ./cmd/harbor
+       GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/pilot   ./cmd/pilot
+       GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/gateway ./cmd/gateway
+       scp /tmp/{harbor,pilot,gateway} ec2-user@<this-ip>:/tmp/
+       sudo install -m 0755 /tmp/{harbor,pilot,gateway} /usr/local/bin/
+
+  2) Or bake an AMI with the binaries preinstalled, and reference it from main.tf.
+
+Then, on the harbor node: harbor genesis / migrate / core-api ...
+and on the pilot node:    pilot init && pilot enroll ...
+See docs/Nebula Control Plane - Genesis Runbook.md.
+EOF
