@@ -23,15 +23,22 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TFDIR="$ROOT/deploy/terraform"
-SSH_KEY="${SSH_KEY:-$HOME/.ssh/absolute}"   # private key matching ssh_public_key_path
+SSH_KEY="${SSH_KEY:-$HOME/.ssh/absolute.pub}"   # public key selecting the agent identity (private may be passphrase-locked in the agent)
 SSH_USER="${SSH_USER:-ec2-user}"
 SKIP_BUILD=0
 [[ "${1:-}" == "--skip-build" ]] && SKIP_BUILD=1
 
+# Overlay pool + lighthouse overlay IP. IMPORTANT: do NOT use 100.64.0.0/10
+# (CGNAT) if any host also runs Tailscale — Tailscale installs an nftables rule
+# that drops 100.64.0.0/10 traffic on non-tailscale0 interfaces, which silently
+# kills the nebula data plane. Default to a private range that won't collide.
+POOL="${POOL:-10.44.0.0/16}"
+LH_OVERLAY="${LH_OVERLAY:-10.44.0.1}"
+
 for t in terraform jq go ssh scp openssl; do command -v "$t" >/dev/null || { echo "missing tool: $t" >&2; exit 1; }; done
 [[ -f "$SSH_KEY" ]] || { echo "ssh private key not found: $SSH_KEY (set SSH_KEY=...)" >&2; exit 1; }
 
-SSH_OPTS=(-i "$SSH_KEY" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10)
+SSH_OPTS=(-i "$SSH_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o BatchMode=yes)
 rsh() { local host="$1"; shift; ssh "${SSH_OPTS[@]}" "$SSH_USER@$host" "$@"; }
 rcp() { scp "${SSH_OPTS[@]}" "$@"; }
 
@@ -74,7 +81,7 @@ rsh "$HB_IP" "set -e
   harbor migrate up -dsn \$DSN >/dev/null
   harbor genesis -dsn \$DSN -out ~/ncp/genesis \
     -operator-a alice -operator-b bob \
-    -lighthouse-pub /tmp/lh-host.pub -lighthouse-ip 100.64.0.1 -lighthouse-addr '$LH_ADDR' >/dev/null
+    -pool '$POOL' -lighthouse-pub /tmp/lh-host.pub -lighthouse-ip '$LH_OVERLAY' -lighthouse-addr '$LH_ADDR' >/dev/null
   echo ok"
 # pull the trust artifacts we need to distribute
 rcp "$SSH_USER@$HB_IP:ncp/genesis/ca.crt"              "$WORK/ca.crt"
@@ -104,12 +111,12 @@ JOIN="$(rsh "$HB_IP" "set -e
   umask 077
   [ -f hmac.b64 ]  || openssl rand 32 | basenc --base64url | tr -d '=' > hmac.b64
   [ -f queue.b64 ] || openssl rand 32 | basenc --base64url | tr -d '=' > queue.b64
-  LH='100.64.0.1=$LH_ADDR'
+  LH="$LH_OVERLAY=$LH_ADDR"
   # (re)start the enrollment plane as transient systemd units
   sudo systemctl reset-failed ncp-gateway ncp-worker 2>/dev/null || true
   sudo systemd-run --unit ncp-gateway --collect /usr/local/bin/gateway \
     -addr 0.0.0.0:${GW_URL##*:} -hmac-key ~/ncp/hmac.b64 -queue-dsn \$QDSN -queue-key ~/ncp/queue.b64 >/dev/null
-  sudo systemd-run --unit ncp-worker --collect /usr/local/bin/harbor enroll worker \
+  sudo systemd-run --unit ncp-worker --collect /usr/local/bin/harbor enroll worker -pool '$POOL' \
     -dsn \$DSN -ca-cert \$G/ca.crt -ca-key \$G/ca.key -config-key \$G/config-signing.key \
     -hmac-key ~/ncp/hmac.b64 -queue-dsn \$QDSN -queue-key ~/ncp/queue.b64 -lighthouse \"\$LH\" >/dev/null
   # join keys (idempotent-ish: ignore 'already exists')
@@ -126,7 +133,7 @@ cat <<EOF
  GENESIS BOOTSTRAP COMPLETE
 ────────────────────────────────────────────────────────────────────────────
  Gateway URL      : $GW_URL
- Lighthouse       : 100.64.0.1 @ $LH_ADDR
+ Lighthouse       : $LH_OVERLAY @ $LH_ADDR  (pool $POOL)
  Config-signing pin: deploy/terraform/config-signing.pub  (give this to clients)
 
  Join secrets (SENSITIVE — shown only here, on your terminal):
@@ -143,17 +150,19 @@ cat <<EOF
  Enroll the OFF-CLOUD iMac (waits for manual approval):
    pilot enroll -dir ~/.nebula -gateway $GW_URL \\
      -join-key ${IMAC_KEY:-<imac-key>} -config-pub deploy/terraform/config-signing.pub -name imac
-   # then APPROVE it on harbor:
+   # then APPROVE it on harbor. NOTE: the gateway/worker run as root (sudo
+   # systemd-run), so queue.db is root-owned — the approve must run as root too,
+   # with absolute paths (sudo HOME=/root), or its result write is silently denied.
    ssh -i $SSH_KEY $SSH_USER@$HB_IP \\
-     'EID=\$(harbor enroll pending -dsn ~/ncp/harbor.db | awk "/imac/{print \\\$1}"); \\
-      harbor enroll approve \$EID -approver alice -dsn ~/ncp/harbor.db \\
-        -ca-cert ~/ncp/genesis/ca.crt -ca-key ~/ncp/genesis/ca.key \\
-        -config-key ~/ncp/genesis/config-signing.key \\
-        -hmac-key ~/ncp/hmac.b64 -queue-dsn ~/ncp/queue.db -queue-key ~/ncp/queue.b64 \\
-        -lighthouse "100.64.0.1=$LH_ADDR"'
-   # the iMac's next poll receives the bundle; then: sudo nebula -config ~/.nebula/config.yml
+     'B=/home/$SSH_USER/ncp; EID=\$(harbor enroll pending -dsn \$B/harbor.db | awk "/ imac/{print \\\$1}"); \\
+      sudo harbor enroll approve \$EID -approver alice -dsn \$B/harbor.db \\
+        -ca-cert \$B/genesis/ca.crt -ca-key \$B/genesis/ca.key \\
+        -config-key \$B/genesis/config-signing.key \\
+        -hmac-key \$B/hmac.b64 -queue-dsn \$B/queue.db -queue-key \$B/queue.b64 \\
+        -pool $POOL -lighthouse "$LH_OVERLAY=$LH_ADDR"'
+   # the iMac re-runs the same enroll to fetch the bundle, then: sudo nebula -config /etc/nebula/config.yml
 
- Verify: from any joined node,  ping 100.64.0.1   (lighthouse) and ping the others.
+ Verify: from any joined node,  ping $LH_OVERLAY   (lighthouse) and ping the others.
 
  Lifecycle follow-on (not done here): bring Harbor onto the mesh and run
    'harbor core-api -addr <harbor-overlay-ip>:8444 ...' so clients can renew +

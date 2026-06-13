@@ -95,6 +95,12 @@ commands for the cloud client and the off-cloud iMac. (Re-run with `--skip-build
 to skip rebuilding.) Bringing Harbor onto the mesh + `core-api` for renew/heartbeat
 is the documented lifecycle follow-on.
 
+**Overlay range (important):** the bootstrap defaults the overlay to `10.44.0.0/16`
+(`POOL` / `LH_OVERLAY` env vars). Do **not** use `100.64.0.0/10` (CGNAT) if any
+host also runs **Tailscale** — Tailscale installs an nftables rule that drops
+`100.64.0.0/10` traffic on non-`tailscale0` interfaces, which silently kills the
+nebula data plane (handshakes succeed, pings don't). This was hit and fixed live.
+
 ## What it creates
 - 3× `t3.micro` EC2 (Amazon Linux 2023), encrypted root volume, IMDSv2-only; Elastic IPs on lighthouse + harbor.
 - Three role-split security groups (lighthouse UDP, harbor gateway+UDP, client SSH-only; Core 8444 never exposed).
