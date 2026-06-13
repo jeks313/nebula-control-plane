@@ -1,0 +1,66 @@
+@import "tailwindcss";
+
+/* §5 visual signature. Accent = Nebula-blue meaning "permitted / allowed / healthy".
+   A blue-cool neutral ramp on a true near-black, tokens named for the domain
+   (mesh/surface/edge), borders-first elevation, Geist + tabular numerics. These
+   @theme tokens become utilities: bg-mesh-0, text-ink, border-edge, text-permit … */
+@theme {
+  --font-sans: "Geist Variable", system-ui, sans-serif;
+  --font-mono: "Geist Mono Variable", ui-monospace, "SF Mono", monospace;
+
+  /* near-black base + blue-cool surfaces (borders-first elevation) */
+  --color-mesh-0: #0a0b0d; /* e0 — app background */
+  --color-mesh-1: #0f1115; /* e1 — raised surface */
+  --color-mesh-2: #151820; /* e2 — overlay/inset */
+  --color-edge: #232733;   /* hairline border */
+  --color-edge-2: #2d323f; /* stronger border */
+
+  /* text ramp */
+  --color-ink: #e7eaf0;       /* primary */
+  --color-ink-dim: #99a2b2;   /* secondary */
+  --color-ink-faint: #5c6675; /* metadata */
+
+  /* Nebula-blue = permitted / healthy; status hues for degraded/critical */
+  --color-permit: #3b82f6;
+  --color-permit-soft: #1e3a8a;
+  --color-warn: #d8a657;
+  --color-danger: #e5484d;
+
+  --radius: 6px;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-mesh-0);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.5;
+  letter-spacing: -0.006em;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* tabular numerics everywhere numbers matter (counts, ids, timestamps) */
+.nums {
+  font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
+}
+
+/* faint mesh-grid texture for hero / empty surfaces (so even empty looks branded) */
+.mesh-grid {
+  background-image:
+    linear-gradient(to right, color-mix(in oklab, var(--color-edge) 55%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in oklab, var(--color-edge) 55%, transparent) 1px, transparent 1px);
+  background-size: 28px 28px;
+}

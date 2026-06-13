@@ -723,6 +723,38 @@ The v1 UI-0…UI-6 pretended the backend was done. Reframe as a **backend track*
   (with the §3 fleet identity + health rollup) + Devices + Audit on the dev-auth
   seam** — a *running, data-backed* demo, not just Storybook. Real OIDC/MFA = **UI-0b**
   when 2.11 lands.
+  - ✅ **UI-0 foundation (2026-06-13).** The SPA skeleton + the running, data-backed
+    demo. New `ui/` (Vite 8 + React 19 + TS 5.9; Tailwind v4 CSS-first `@theme` with the
+    §5 domain tokens — mesh/surface/edge/ink, accent=permitted, Geist; TanStack Query;
+    react-router 7). **Generated, typed API client** (`openapi-typescript` →
+    `openapi-fetch` against `internal/adminapi/openapi.yaml`; the generator stays
+    build/test-only — `go list -deps` confirms it is in **no** shipped binary). App shell
+    (sidebar nav + topbar identity/sign-out + env banner) over three read-only screens:
+    **Dashboard** (§3 health rollup + reasons + metrics), **Devices**, **Audit** — all on
+    the bearer-token / dev-auth seam. **Served by Core**, not a separate origin: new
+    `internal/adminui` embeds the built bundle via `go:embed` behind a `ui` build tag (a
+    plain `go build` ships a "not built" stub, so CI never needs Node) → one artifact,
+    lockstep UI↔API versioning. **Zero authority (P-UI-1):** the client makes no authz
+    decision; **environment posture is server-injected** into `index.html` (operator-set
+    `-environment`, sanitized to a benign token) and read **fail-closed** (anything but
+    `production` ⇒ non-prod banner) — never inferred from the URL.
+  - ✅ **UI-0 HTTPS/TLS + console hardening (2026-06-13).** TLS across all three servers
+    via new `internal/httpserve` (`ListenAndServeTLS` when `-tls-cert`/`-tls-key` are set
+    — TLS 1.2+ floor, HTTP/2; else plain) + a `Scheme()` helper for logs. **Fail-closed
+    transport posture (P8):** the public **gateway** refuses plaintext unless `-insecure`
+    (upstream-TLS opt-out), and a partial cert/key pair is a hard error; **admin-api**
+    treats `-environment=production` as the prod signal — refusing to start without Secure
+    cookies and hard-blocking `-dev-auth`. Console security headers (`internal/adminui`):
+    a strict **CSP** that pins the inline runtime-config script by its **sha256** (so
+    scripts never need `'unsafe-inline'`), `X-Frame-Options: DENY`, `nosniff`,
+    `Referrer-Policy: no-referrer`, and **HSTS over TLS**; hashed assets `immutable`,
+    index `no-store`. Adversarially reviewed (9-agent): 4 low findings, all fixed +
+    regression-tested.
+  - **Deferred to later UI-0 increments / UI-0b:** Storybook + the 3-comp **design gate**
+    (§5), the **⌘K** command palette, visx charts, the Tag Canvas / reachability
+    **matrix** hero (§4.2–4.3), the dual-control/preview/destructive-action component
+    primitives, build-time **style-src** hash tightening, and **real OIDC/MFA login**
+    (**UI-0b**, when 2.11's session auth is wired into the SPA).
 - **UI-1 — Enrollment** *(M3):* approval queue, join keys (auto-issue warned),
   conflict/admit inbox, funnel, quotas; console onboarding checklist + empty-states.
 - **UI-2 — Fleet health** *(M4):* expiry/cliff + lighthouse-availability + trust-

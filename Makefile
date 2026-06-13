@@ -5,6 +5,8 @@ M0 := spike/m0
 help:
 	@echo "build targets:"
 	@echo "  build        build pilot + harbor + gateway into bin/"
+	@echo "  ui           build the web console SPA (ui/ -> internal/adminui/dist)"
+	@echo "  harbor-ui    build harbor with the web console embedded (bin/harbor, -tags ui)"
 	@echo "  test         go test ./..."
 	@echo "  demo         full walkthrough: enrollment spine (m3) + control plane (M5/M6)"
 	@echo "  m1-smoke     run the M1 acceptance (needs nebula + nebula-cert)"
@@ -31,6 +33,16 @@ build:
 	go build -trimpath -ldflags "$(LDFLAGS)" -o bin/pilot ./cmd/pilot
 	go build -trimpath -ldflags "$(LDFLAGS)" -o bin/harbor ./cmd/harbor
 	go build -trimpath -ldflags "$(LDFLAGS)" -o bin/gateway ./cmd/gateway
+
+.PHONY: ui
+ui:
+	npm --prefix ui install
+	npm --prefix ui run build
+
+.PHONY: harbor-ui
+harbor-ui: ui
+	@mkdir -p bin
+	go build -trimpath -tags ui -ldflags "$(LDFLAGS)" -o bin/harbor ./cmd/harbor
 
 .PHONY: test
 test:

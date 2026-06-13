@@ -18,6 +18,7 @@ import (
 
 	"github.com/jeks313/nebula-control-plane/internal/clilog"
 	"github.com/jeks313/nebula-control-plane/internal/gateway"
+	"github.com/jeks313/nebula-control-plane/internal/httpserve"
 	"github.com/jeks313/nebula-control-plane/internal/nonce"
 	"github.com/jeks313/nebula-control-plane/internal/queue"
 	"github.com/jeks313/nebula-control-plane/internal/ratelimit"
@@ -40,10 +41,24 @@ func main() {
 	burst := fs.Int("burst", 20, "edge rate-limit burst")
 	queueDSN := fs.String("queue-dsn", "", "durable queue SQLite DSN (default: in-memory dev queue)")
 	queueKeyPath := fs.String("queue-key", "", "gateway<->Core queue HMAC key (base64url, >=16 bytes)")
+	tlsCert := fs.String("tls-cert", "", "TLS certificate PEM (serve HTTPS — required on this public endpoint unless -insecure)")
+	tlsKey := fs.String("tls-key", "", "TLS private key PEM (with -tls-cert)")
+	insecure := fs.Bool("insecure", false, "serve plain HTTP on this PUBLIC endpoint (only when TLS is terminated by a trusted proxy)")
 	logFormat := fs.String("log-format", "auto", "log format: auto (text on a TTY, JSON as a service) | text | json")
 	logLevel := fs.String("log-level", "info", "log level: debug | info | warn | error")
 	_ = fs.Parse(os.Args[1:])
 	log := clilog.Setup(clilog.Options{Format: *logFormat, Level: *logLevel})
+	// The enroll endpoint is public, so demand an explicit transport posture (P8: fail
+	// closed on a config error). A partial cert/key pair is always a misconfiguration;
+	// plaintext is allowed only behind an operator's -insecure opt-out (upstream TLS).
+	switch {
+	case (*tlsCert == "") != (*tlsKey == ""):
+		fatalf("-tls-cert and -tls-key must be set together")
+	case *tlsCert == "" && !*insecure:
+		fatalf("refusing to serve the public enroll endpoint over plaintext; provide -tls-cert/-tls-key, or pass -insecure if TLS is terminated by a trusted proxy")
+	case *tlsCert == "" && *insecure:
+		log.Warn("gateway: serving plain HTTP by operator opt-out (-insecure) — ensure TLS is terminated by a trusted proxy")
+	}
 
 	keys, err := loadKeys(*keyPath, *prevPath)
 	if err != nil {
@@ -91,8 +106,8 @@ func main() {
 		_ = srv.Shutdown(shutCtx)
 	}()
 
-	log.Info("gateway listening", "addr", *addr, "version", version, "access", "public/credential-less")
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	log.Info("gateway listening", "addr", *addr, "scheme", httpserve.Scheme(*tlsCert, *tlsKey), "version", version, "access", "public/credential-less")
+	if err := httpserve.Serve(srv, *tlsCert, *tlsKey); err != nil && err != http.ErrServerClosed {
 		fatalf("%v", err)
 	}
 	log.Info("gateway stopped")

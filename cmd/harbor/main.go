@@ -21,12 +21,14 @@ import (
 
 	"github.com/jeks313/nebula-control-plane/internal/adminapi"
 	"github.com/jeks313/nebula-control-plane/internal/adminauth"
+	"github.com/jeks313/nebula-control-plane/internal/adminui"
 	"github.com/jeks313/nebula-control-plane/internal/bundle"
 	"github.com/jeks313/nebula-control-plane/internal/coreapi"
 	"github.com/jeks313/nebula-control-plane/internal/dualcontrol"
 	"github.com/jeks313/nebula-control-plane/internal/enrollment"
 	"github.com/jeks313/nebula-control-plane/internal/fleet"
 	"github.com/jeks313/nebula-control-plane/internal/genesis"
+	"github.com/jeks313/nebula-control-plane/internal/httpserve"
 	"github.com/jeks313/nebula-control-plane/internal/ipam"
 	"github.com/jeks313/nebula-control-plane/internal/joinkey"
 	"github.com/jeks313/nebula-control-plane/internal/lighthouse"
@@ -1067,6 +1069,8 @@ func cmdCoreAPI(args []string) {
 	fs := flag.NewFlagSet("core-api", flag.ExitOnError)
 	cf := addCoreFlags(fs)
 	addr := fs.String("addr", ":8444", "listen address (bind to Core's overlay IP in production)")
+	tlsCert := fs.String("tls-cert", "", "TLS certificate PEM (serve HTTPS; recommended even mesh-only)")
+	tlsKey := fs.String("tls-key", "", "TLS private key PEM (with -tls-cert)")
 	lf := addLogFlags(fs)
 	_ = fs.Parse(args)
 	log := lf.setup()
@@ -1114,8 +1118,8 @@ func cmdCoreAPI(args []string) {
 		defer cancel()
 		_ = srv.Shutdown(sc)
 	}()
-	log.Info("core-api listening", "addr", *addr, "access", "mesh-only", "pool", pool.String(), "version", version)
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	log.Info("core-api listening", "addr", *addr, "scheme", httpserve.Scheme(*tlsCert, *tlsKey), "access", "mesh-only", "pool", pool.String(), "version", version)
+	if err := httpserve.Serve(srv, *tlsCert, *tlsKey); err != nil && err != http.ErrServerClosed {
 		fatalf("core-api: %v", err)
 	}
 	log.Info("core-api stopped")
@@ -1132,12 +1136,16 @@ func cmdAdminAPI(args []string) {
 	devAuth := fs.Bool("dev-auth", false, "DEV ONLY: trust the X-Harbor-Dev-Actor header for identity (never in prod)")
 	devRole := fs.String("dev-role", "admin", "role granted to the dev actor")
 	mfaFreshness := fs.Duration("mfa-freshness", 15*time.Minute, "require MFA within this window for privileged actions (dual-control approve, policy publish); 0 disables step-up")
+	environment := fs.String("environment", "development", "deployment posture shown in the console banner (e.g. production, staging); anything but production is tinted non-production")
 	af := addAdminAuthFlags(fs) // OIDC / GitHub / mock-IdP session auth (2.11)
 	expiryWithin := fs.Duration("expiry-within", 7*24*time.Hour, "cert-expiry health window")
 	staleAfter := fs.Duration("stale-after", 5*time.Minute, "stale-host health window")
 	clockSkew := fs.Int("clock-skew-ms", 5000, "clock-skew health threshold (ms)")
+	tlsCert := fs.String("tls-cert", "", "TLS certificate PEM (serve HTTPS; recommended even mesh-only — Secure cookies, HTTP/2)")
+	tlsKey := fs.String("tls-key", "", "TLS private key PEM (with -tls-cert)")
 	lf := addLogFlags(fs)
 	_ = fs.Parse(args)
+	tlsOn := *tlsCert != "" && *tlsKey != ""
 	log := lf.setup()
 
 	// Issuance mode: when the CA/signing config is supplied, build the full
@@ -1165,6 +1173,20 @@ func cmdAdminAPI(args []string) {
 	// otherwise the -dev-auth header seam; otherwise every request is 401.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	if tlsOn {
+		*af.secure = true // HTTPS → session/CSRF cookies must be Secure
+	}
+	// Fail closed on the production posture: -environment=production is the operator's
+	// "this is prod" signal, so enforce the invariants here rather than only warning.
+	// (af.secure may be set by in-process TLS above or by -auth-secure behind a proxy.)
+	if strings.EqualFold(*environment, "production") {
+		if *devAuth {
+			fatalf("admin-api: -dev-auth must never be enabled in production (-environment=production)")
+		}
+		if !*af.secure {
+			fatalf("admin-api: -environment=production requires Secure cookies; supply -tls-cert/-tls-key, or set -auth-secure (only behind a TLS-terminating proxy)")
+		}
+	}
 	sessionIdP, authHandler, csrfWrap, authCleanup := buildAdminAuth(ctx, af, *addr, s.DB)
 	defer authCleanup()
 
@@ -1195,16 +1217,21 @@ func cmdAdminAPI(args []string) {
 		MFAFreshness: *mfaFreshness,
 	})
 
-	// Compose: auth routes (unauthenticated) + the CSRF-guarded admin API.
-	var handler http.Handler = api.Handler()
+	// Compose: auth routes (unauthenticated) + the CSRF-guarded JSON API + the web
+	// console (SPA). The SPA serves "/" and client routes; /admin/v1 is the API.
+	apiHandler := api.Handler()
+	if csrfWrap != nil {
+		apiHandler = csrfWrap(apiHandler)
+	}
+	top := http.NewServeMux()
 	if authHandler != nil {
-		if csrfWrap != nil {
-			handler = csrfWrap(handler)
-		}
-		mux := http.NewServeMux()
-		mux.Handle("/admin/v1/auth/", authHandler)
-		mux.Handle("/", handler)
-		handler = mux
+		top.Handle("/admin/v1/auth/", authHandler) // unauthenticated login/callback/logout
+	}
+	top.Handle("/admin/v1/", apiHandler)                                        // the JSON API
+	top.Handle("/", adminui.Handler(adminui.Config{Environment: *environment})) // the React console (or a "not built" stub)
+	handler := http.Handler(top)
+	if adminui.Embedded() {
+		log.Info("admin-api: web console enabled (embedded SPA at /)")
 	}
 
 	srv := &http.Server{
@@ -1219,8 +1246,8 @@ func cmdAdminAPI(args []string) {
 		defer cancel()
 		_ = srv.Shutdown(sc)
 	}()
-	log.Info("admin-api listening", "addr", *addr, "access", "mesh-only", "version", version)
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	log.Info("admin-api listening", "addr", *addr, "scheme", httpserve.Scheme(*tlsCert, *tlsKey), "access", "mesh-only", "version", version)
+	if err := httpserve.Serve(srv, *tlsCert, *tlsKey); err != nil && err != http.ErrServerClosed {
 		fatalf("admin-api: %v", err)
 	}
 	log.Info("admin-api stopped")
