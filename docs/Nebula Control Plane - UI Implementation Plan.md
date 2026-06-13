@@ -629,9 +629,23 @@ The v1 UI-0…UI-6 pretended the backend was done. Reframe as a **backend track*
     handlers by any in-file function, not a name prefix) and added a
     `TestExtractorFailsClosed` self-test that proves each dangerous shape is now
     rejected — so the guardrail's own integrity is itself tested.
-  - ⬜ **A0.7+** — generate the **TS client** (once `ui/` exists); refactor the
-    `harbor` CLI to consume `/admin/v1` over HTTP (once 2.11 auth lands), upgrading
-    the A0.6 static-subset guardrail into runtime parity.
+  - ✅ **A0.7 CLI logging + polish (2026-06-13).** New `internal/clilog`: a `slog`
+    setup that is **human-readable text on a TTY and JSON when run as a service**
+    (`-log-format auto|text|json`, `-log-level`), installed as `slog.Default()` so the
+    daemon libraries (`supervisor`/`renew`/`heartbeat`/`drift`/`adminapi`/`adminauth`)
+    inherit the format with no threading. The long-running daemons — harbor `core-api`
+    / `admin-api` / `enroll worker`, `pilot supervise`, `gateway` — now emit **structured
+    lifecycle + background-task logs** (start/listening/shutdown/stopped, mode + auth
+    diagnostics, worker batch progress, SIGHUP reloads, build version) instead of raw
+    `printf`. Interactive command **results stay clean stdout** (logs → stderr) so
+    pipelines/`jq` are unaffected. Adversarially reviewed (4-agent; 1 confirmed + fixed):
+    the pilot SIGHUP reload handler still used raw `fmt`, breaking the JSON stream — now
+    routed through the logger. No secret leakage; stdout/stderr discipline verified.
+  - ⬜ **A0.8 — runtime CLI⊆API parity:** add **admin API tokens** (non-interactive
+    machine auth — the admin API only accepts human OIDC/SAML sessions today), then
+    refactor the operator `harbor` commands to consume `/admin/v1` over HTTP, upgrading
+    the A0.6 static-subset guardrail into runtime parity. Generate the **TS client**
+    once `ui/` exists.
 - **A1 — Policy analysis engine** (gates UI-4): reachability query → flow-diff/blast-
   radius → assertions + publish gate, snapshotted into approvals.
 - **A2 — SSE change emitter** (upgrades UI-2+ live views; polling until then).
@@ -687,7 +701,7 @@ The v1 UI-0…UI-6 pretended the backend was done. Reframe as a **backend track*
     `internal/nonce`); and `mfaFromClaims` **fell back to the token `iat`** when `auth_time`
     was absent, making a cached MFA look fresh → now requires `auth_time` (fail closed).
   - ⬜ **2.11+ deferred:** SAML **SLO** (single logout) + **encrypted assertions**; the
-    **CLI→HTTP refactor (A0.7)** can now proceed since real session auth exists.
+    **CLI→HTTP refactor (A0.8)** can now proceed since real session auth exists.
 
 **UI track (each phase front-to-back, no screen before its data):**
 - **UI-0 — Foundation + design gate** *(needs A0):* design system + Storybook + the

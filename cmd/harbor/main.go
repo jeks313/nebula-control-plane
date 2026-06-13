@@ -46,6 +46,7 @@ import (
 var version = "dev"
 
 func main() {
+	defaultLog() // baseline structured logger; service commands refine it via -log-format/-log-level
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
@@ -564,7 +565,9 @@ func enrollWorker(args []string) {
 	batch := fs.Int("batch", 16, "max messages claimed per cycle")
 	interval := fs.Duration("interval", 500*time.Millisecond, "idle poll interval")
 	lease := fs.Duration("lease", time.Minute, "claim lease duration")
+	lf := addLogFlags(fs)
 	_ = fs.Parse(args)
+	log := lf.setup()
 
 	cons, q, s := cf.build()
 	defer s.Close()
@@ -572,11 +575,12 @@ func enrollWorker(args []string) {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	fmt.Fprintln(os.Stderr, "harbor enroll worker: draining queue (ctrl-c to stop)")
+	log.Info("enroll worker started", "batch", *batch, "interval", interval.String(), "lease", lease.String())
+	var total int
 	for ctx.Err() == nil {
 		n, err := cons.Drain(ctx, q, *batch, *lease)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "harbor enroll worker: drain: %v\n", err)
+			log.Error("enroll worker: drain failed", "err", err)
 		}
 		if n == 0 {
 			select {
@@ -584,9 +588,11 @@ func enrollWorker(args []string) {
 			case <-time.After(*interval):
 			}
 		} else {
-			fmt.Printf("processed %d enrollment(s)\n", n)
+			total += n
+			log.Info("enroll worker: processed batch", "count", n, "total", total)
 		}
 	}
+	log.Info("enroll worker stopped", "total_processed", total)
 }
 
 func enrollPending(args []string) {
@@ -1058,7 +1064,9 @@ func cmdCoreAPI(args []string) {
 	fs := flag.NewFlagSet("core-api", flag.ExitOnError)
 	cf := addCoreFlags(fs)
 	addr := fs.String("addr", ":8444", "listen address (bind to Core's overlay IP in production)")
+	lf := addLogFlags(fs)
 	_ = fs.Parse(args)
+	log := lf.setup()
 	if *cf.caCert == "" {
 		fatalf("core-api: -ca-cert is required")
 	}
@@ -1098,14 +1106,16 @@ func cmdCoreAPI(args []string) {
 	defer stop()
 	go func() {
 		<-ctx.Done()
+		log.Info("core-api shutting down", "reason", "signal")
 		sc, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(sc)
 	}()
-	fmt.Fprintf(os.Stderr, "harbor core-api listening on %s (mesh-only: bind to the overlay IP in prod)\n", *addr)
+	log.Info("core-api listening", "addr", *addr, "access", "mesh-only", "pool", pool.String(), "version", version)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		fatalf("core-api: %v", err)
 	}
+	log.Info("core-api stopped")
 }
 
 // cmdAdminAPI serves the admin HTTP API (UI track A0): the /admin/v1 surface the
@@ -1123,7 +1133,9 @@ func cmdAdminAPI(args []string) {
 	expiryWithin := fs.Duration("expiry-within", 7*24*time.Hour, "cert-expiry health window")
 	staleAfter := fs.Duration("stale-after", 5*time.Minute, "stale-host health window")
 	clockSkew := fs.Int("clock-skew-ms", 5000, "clock-skew health threshold (ms)")
+	lf := addLogFlags(fs)
 	_ = fs.Parse(args)
+	log := lf.setup()
 
 	// Issuance mode: when the CA/signing config is supplied, build the full
 	// enrollment consumer so the approval queue can issue certs. Otherwise run
@@ -1138,10 +1150,10 @@ func cmdAdminAPI(args []string) {
 		consumer, q, s = cf.build()
 		defer q.Close()
 		canIssue = true
-		fmt.Fprintln(os.Stderr, "harbor admin-api: issuance mode (enrollment approve will issue certs)")
+		log.Info("admin-api issuance mode", "enroll_approve", "enabled")
 	} else {
 		s = openStore(*cf.driver, *cf.dsn)
-		fmt.Fprintln(os.Stderr, "harbor admin-api: read-only mode (enrollment approve disabled; pass -ca-cert/-config-key/-queue-* to enable)")
+		log.Info("admin-api read-only mode", "enroll_approve", "disabled (pass -ca-cert/-config-key/-queue-* to enable)")
 	}
 	defer s.Close()
 	audit := func(c context.Context, a, ac, t, d string) error { _, e := s.AppendAudit(c, a, ac, t, d); return e }
@@ -1158,14 +1170,14 @@ func cmdAdminAPI(args []string) {
 	case sessionIdP != nil:
 		idp = sessionIdP
 		if *devAuth {
-			fmt.Fprintln(os.Stderr, "harbor admin-api: NOTE -dev-auth ignored — real session auth is configured")
+			log.Warn("admin-api: -dev-auth ignored — real session auth is configured")
 		}
-		fmt.Fprintln(os.Stderr, "harbor admin-api: session auth enabled (sign in at /admin/v1/auth/login)")
+		log.Info("admin-api auth: session (OIDC/SAML/GitHub)", "login", "/admin/v1/auth/login")
 	case *devAuth:
-		fmt.Fprintln(os.Stderr, "harbor admin-api: WARNING dev-auth enabled — trusting X-Harbor-Dev-Actor (NEVER enable in production)")
+		log.Warn("admin-api auth: DEV-AUTH ENABLED — trusting X-Harbor-Dev-Actor; never enable in production")
 		idp = adminapi.DevHeaderProvider{Roles: []string{*devRole}, MFA: *mfaFreshness > 0}
 	default:
-		fmt.Fprintln(os.Stderr, "harbor admin-api: no identity provider (all requests 401; use -oidc-issuer/-github-client-id/-mock-idp, or -dev-auth for local dogfooding)")
+		log.Warn("admin-api auth: none configured — all requests 401", "hint", "use -oidc-issuer/-github-client-id/-mock-idp, or -dev-auth for local dogfooding")
 	}
 
 	api := adminapi.New(adminapi.Config{
@@ -1195,14 +1207,16 @@ func cmdAdminAPI(args []string) {
 	}
 	go func() {
 		<-ctx.Done()
+		log.Info("admin-api shutting down", "reason", "signal")
 		sc, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(sc)
 	}()
-	fmt.Fprintf(os.Stderr, "harbor admin-api listening on %s (mesh-only: bind to the overlay IP in prod)\n", *addr)
+	log.Info("admin-api listening", "addr", *addr, "access", "mesh-only", "version", version)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		fatalf("admin-api: %v", err)
 	}
+	log.Info("admin-api stopped")
 }
 
 func parseLighthouses(s string) []bundle.Lighthouse {
