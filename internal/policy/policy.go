@@ -21,6 +21,11 @@ const (
 	GroupLighthouse   = "lighthouse"
 )
 
+// PublishKind is the dual-control change kind for firewall-policy publish (6.5).
+// The active fleet policy is the latest committed change of this kind. Shared by
+// the CLI and the admin API so both write/read the same records.
+const PublishKind = "policy.publish"
+
 // Rule is one allow rule: members of FromGroup may reach members of ToGroup on
 // Proto/Port. "any" is allowed for FromGroup (any source) and Port.
 type Rule struct {

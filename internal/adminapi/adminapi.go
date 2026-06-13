@@ -15,15 +15,21 @@ package adminapi
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
 
+	"github.com/jeks313/nebula-control-plane/internal/dualcontrol"
 	"github.com/jeks313/nebula-control-plane/internal/fleet"
 	"github.com/jeks313/nebula-control-plane/internal/lighthouse"
+	"github.com/jeks313/nebula-control-plane/internal/nebulaconfig"
+	"github.com/jeks313/nebula-control-plane/internal/policy"
 	"github.com/jeks313/nebula-control-plane/internal/rollout"
 	"github.com/jeks313/nebula-control-plane/internal/store"
 )
@@ -73,7 +79,10 @@ type Config struct {
 }
 
 // Server is the admin API.
-type Server struct{ cfg Config }
+type Server struct {
+	cfg Config
+	dc  *dualcontrol.Controller // dual-control workflow (approvals + policy publish)
+}
 
 // New builds a Server, filling sensible defaults.
 func New(cfg Config) *Server {
@@ -92,7 +101,24 @@ func New(cfg Config) *Server {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
-	return &Server{cfg: cfg}
+	s := &Server{cfg: cfg}
+	if cfg.Store != nil {
+		audit := func(ctx context.Context, a, ac, t, d string) error {
+			_, e := cfg.Store.AppendAudit(ctx, a, ac, t, d)
+			return e
+		}
+		s.dc = dualcontrol.New(dualcontrol.Config{DB: cfg.Store.DB, Audit: audit})
+		// Policy-publish committer: re-validate at commit (defense in depth; the
+		// active policy is the latest committed change of this kind).
+		s.dc.Register(policy.PublishKind, func(_ context.Context, ch dualcontrol.Change) error {
+			p, err := policy.Parse(string(ch.Payload))
+			if err != nil {
+				return err
+			}
+			return policy.CheckInvariants(p)
+		})
+	}
+	return s
 }
 
 // fail logs the real error server-side and returns a stable, generic detail to
@@ -125,6 +151,14 @@ func (s *Server) routeTable() []route {
 		{"GET", "/admin/v1/audit", s.handleAudit},
 		{"GET", "/admin/v1/audit/verify", s.handleAuditVerify},
 		{"GET", "/admin/v1/lighthouses", s.handleLighthouses},
+		// Dual-control approvals (generic) + policy publish (the showcase).
+		{"GET", "/admin/v1/approvals", s.handleApprovals},
+		{"GET", "/admin/v1/approvals/{id}", s.handleApproval},
+		{"POST", "/admin/v1/approvals/{id}/approve", s.handleApprove},
+		{"POST", "/admin/v1/approvals/{id}/deny", s.handleDeny},
+		{"GET", "/admin/v1/policy/active", s.handlePolicyActive},
+		{"POST", "/admin/v1/policy/propose", s.handlePolicyPropose},
+		{"POST", "/admin/v1/policy/compile", s.handlePolicyCompile},
 	}
 }
 
@@ -387,7 +421,297 @@ func (s *Server) handleLighthouses(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"lighthouses": out, "count": len(out)})
 }
 
+// ── dual-control approvals + policy publish ─────────────────────────────────
+
+// Change is the API view of a dual-control change.
+type Change struct {
+	ID         int64  `json:"id"`
+	Kind       string `json:"kind"`
+	Target     string `json:"target,omitempty"`
+	State      string `json:"state"`
+	Quorum     int    `json:"quorum"`
+	Proposer   string `json:"proposer"`
+	PayloadSHA string `json:"payload_sha256"`
+	CreatedAt  string `json:"created_at"`
+	DecidedAt  string `json:"decided_at,omitempty"`
+	Payload    string `json:"payload,omitempty"` // included on detail, not in lists
+}
+
+// Signoff is the API view of one vote.
+type Signoff struct {
+	Actor     string `json:"actor"`
+	Decision  string `json:"decision"`
+	CreatedAt string `json:"created_at"`
+}
+
+func changeView(ch dualcontrol.Change, withPayload bool) Change {
+	cv := Change{
+		ID: ch.ID, Kind: ch.Kind, Target: ch.Target, State: ch.State, Quorum: ch.Quorum,
+		Proposer: ch.Proposer, PayloadSHA: hex.EncodeToString(ch.PayloadHash),
+		CreatedAt: rfc3339(ch.CreatedAt), DecidedAt: rfc3339(ch.DecidedAt),
+	}
+	if withPayload {
+		cv.Payload = string(ch.Payload)
+	}
+	return cv
+}
+
+// GET /admin/v1/approvals?state=pending — the dual-control inbox (all kinds).
+func (s *Server) handleApprovals(w http.ResponseWriter, r *http.Request) {
+	changes, err := s.dc.List(r.Context(), dualcontrol.State(r.URL.Query().Get("state")))
+	if err != nil {
+		s.fail(w, r, "list approvals failed", err)
+		return
+	}
+	out := make([]Change, len(changes))
+	for i, c := range changes {
+		out[i] = changeView(c, false)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"approvals": out, "count": len(out)})
+}
+
+// GET /admin/v1/approvals/{id} — a change + its sign-offs (payload included).
+func (s *Server) handleApproval(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	ch, sigs, err := s.dc.Get(r.Context(), id)
+	if err != nil {
+		s.mapDCErr(w, r, err)
+		return
+	}
+	out := make([]Signoff, len(sigs))
+	for i, sg := range sigs {
+		out[i] = Signoff{Actor: sg.Actor, Decision: sg.Decision, CreatedAt: rfc3339(sg.CreatedAt)}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"change": changeView(ch, true), "signoffs": out})
+}
+
+// POST /admin/v1/approvals/{id}/approve — approve as the authenticated principal
+// (never a body field). The dual-control engine enforces distinct-approver.
+func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
+	id := identityFrom(r.Context())
+	if !s.requireRole(w, id, "admin") {
+		return
+	}
+	cid, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	ch, err := s.dc.Approve(r.Context(), cid, id.Principal)
+	if err != nil {
+		s.mapDCErr(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, changeView(ch, true))
+}
+
+// POST /admin/v1/approvals/{id}/deny — a single deny vetoes (fail-closed).
+func (s *Server) handleDeny(w http.ResponseWriter, r *http.Request) {
+	id := identityFrom(r.Context())
+	if !s.requireRole(w, id, "admin") {
+		return
+	}
+	cid, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	if !readJSON(w, r, &body) {
+		return
+	}
+	ch, err := s.dc.Deny(r.Context(), cid, id.Principal, body.Reason)
+	if err != nil {
+		s.mapDCErr(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, changeView(ch, true))
+}
+
+// GET /admin/v1/policy/active — the published fleet policy (latest committed).
+func (s *Server) handlePolicyActive(w http.ResponseWriter, r *http.Request) {
+	ch, ok, err := s.dc.LatestCommitted(r.Context(), policy.PublishKind)
+	if err != nil {
+		s.fail(w, r, "read active policy failed", err)
+		return
+	}
+	if !ok {
+		writeJSON(w, http.StatusOK, map[string]any{"published": false})
+		return
+	}
+	p, perr := policy.Parse(string(ch.Payload))
+	if perr != nil {
+		s.fail(w, r, "active policy is unparseable", perr)
+		return
+	}
+	rules := p.Rules
+	if rules == nil {
+		rules = []policy.Rule{} // contract: rules is always a JSON array
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"published": true, "change_id": ch.ID, "hash": hex.EncodeToString(ch.PayloadHash),
+		"text": string(ch.Payload), "rules": rules,
+	})
+}
+
+// POST /admin/v1/policy/propose — validate + invariant-check, then open a
+// dual-control change. Proposer = the authenticated principal.
+func (s *Server) handlePolicyPropose(w http.ResponseWriter, r *http.Request) {
+	id := identityFrom(r.Context())
+	if !s.requireRole(w, id, "admin") {
+		return
+	}
+	var body struct {
+		Policy      string `json:"policy"`
+		Description string `json:"description"`
+	}
+	if !readJSON(w, r, &body) {
+		return
+	}
+	if body.Policy == "" {
+		writeProblem(w, http.StatusBadRequest, "policy required", "the 'policy' field is empty")
+		return
+	}
+	p, err := policy.Parse(body.Policy)
+	if err != nil {
+		writeProblem(w, http.StatusBadRequest, "invalid policy", err.Error())
+		return
+	}
+	if err := policy.CheckInvariants(p); err != nil {
+		writeProblem(w, http.StatusBadRequest, "policy invariant violation", err.Error())
+		return
+	}
+	target := body.Description
+	if target == "" {
+		target = fmt.Sprintf("firewall policy (%d rules)", len(p.Rules))
+	}
+	ch, err := s.dc.Propose(r.Context(), policy.PublishKind, target, []byte(body.Policy), id.Principal)
+	if err != nil {
+		s.fail(w, r, "propose failed", err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, changeView(ch, true))
+}
+
+// CompileResult is the analysis-rail response: validity, invariants, and the
+// per-host compiled firewall — the server is the single source of "is it safe?".
+type CompileResult struct {
+	Valid        bool   `json:"valid"`
+	Error        string `json:"error,omitempty"`
+	InvariantsOK bool   `json:"invariants_ok"`
+	Compiled     *struct {
+		Inbound  []nebulaRule `json:"inbound"`
+		Outbound []nebulaRule `json:"outbound"`
+	} `json:"compiled,omitempty"`
+}
+
+type nebulaRule struct {
+	Proto string `json:"proto"`
+	Port  string `json:"port"`
+	Host  string `json:"host,omitempty"`
+	Group string `json:"group,omitempty"`
+}
+
+// POST /admin/v1/policy/compile — dry-run compile a draft for a host's groups
+// (the designer's live analysis). Read-only (no mutation), so any authenticated
+// admin may preview — not role-gated like the mutating endpoints. Returns 200 with
+// a structured result even on a parse error (a live-lint surface), so the editor
+// can render squiggles.
+func (s *Server) handlePolicyCompile(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Policy string   `json:"policy"`
+		Groups []string `json:"groups"`
+	}
+	if !readJSON(w, r, &body) {
+		return
+	}
+	p, err := policy.Parse(body.Policy)
+	if err != nil {
+		writeJSON(w, http.StatusOK, CompileResult{Valid: false, Error: err.Error()})
+		return
+	}
+	res := CompileResult{Valid: true, InvariantsOK: policy.CheckInvariants(p) == nil}
+	c := policy.CompileHost(p, body.Groups)
+	res.Compiled = &struct {
+		Inbound  []nebulaRule `json:"inbound"`
+		Outbound []nebulaRule `json:"outbound"`
+	}{Inbound: toRules(c.Inbound), Outbound: toRules(c.Outbound)}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func toRules(in []nebulaconfig.Rule) []nebulaRule {
+	out := make([]nebulaRule, len(in))
+	for i, r := range in {
+		out[i] = nebulaRule{Proto: r.Proto, Port: r.Port, Host: r.Host, Group: r.Group}
+	}
+	return out
+}
+
+// requireRole enforces the RBAC seam (real roles arrive with 2.11; the dev seam
+// grants the configured -dev-role). 403 if the principal lacks the role.
+func (s *Server) requireRole(w http.ResponseWriter, id Identity, role string) bool {
+	for _, r := range id.Roles {
+		if r == role {
+			return true
+		}
+	}
+	writeProblem(w, http.StatusForbidden, "forbidden", "requires role: "+role)
+	return false
+}
+
+// mapDCErr maps dual-control sentinels to HTTP; unknown errors are 500 (logged).
+func (s *Server) mapDCErr(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, dualcontrol.ErrNotFound):
+		writeProblem(w, http.StatusNotFound, "not found", "no such change")
+	case errors.Is(err, dualcontrol.ErrSelfApproval):
+		writeProblem(w, http.StatusConflict, "self-approval not allowed", "the proposer cannot approve their own change")
+	case errors.Is(err, dualcontrol.ErrDuplicateActor):
+		writeProblem(w, http.StatusConflict, "already signed", "this actor has already signed off")
+	case errors.Is(err, dualcontrol.ErrNotPending):
+		writeProblem(w, http.StatusConflict, "not pending", "the change is no longer pending")
+	case errors.Is(err, dualcontrol.ErrCommit):
+		// Quorum was reached but the effect was rejected at commit (business
+		// failure) — the change is marked failed. Not an infra 500.
+		writeProblem(w, http.StatusUnprocessableEntity, "change rejected at commit", "the approved change failed validation at commit and was not applied")
+	default:
+		s.fail(w, r, "dual-control operation failed", err)
+	}
+}
+
 // ── helpers ─────────────────────────────────────────────────────────────────
+
+// pathID parses the {id} path wildcard; writes a 400 and returns false if bad.
+func pathID(w http.ResponseWriter, r *http.Request) (int64, bool) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeProblem(w, http.StatusBadRequest, "bad id", "id must be a positive integer")
+		return 0, false
+	}
+	return id, true
+}
+
+// readJSON decodes a (size-limited) JSON body. An empty body is allowed (the
+// target keeps its zero value) so optional-body endpoints work; malformed JSON or
+// trailing data after the value is a 400.
+func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	switch err := dec.Decode(v); {
+	case errors.Is(err, io.EOF): // empty body → leave v as zero
+		return true
+	case err != nil:
+		writeProblem(w, http.StatusBadRequest, "bad request", "invalid JSON body")
+		return false
+	}
+	if dec.More() {
+		writeProblem(w, http.StatusBadRequest, "bad request", "unexpected trailing data after JSON body")
+		return false
+	}
+	return true
+}
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")

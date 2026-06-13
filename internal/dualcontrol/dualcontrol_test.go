@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/jeks313/nebula-control-plane/internal/dualcontrol"
@@ -183,6 +184,35 @@ func TestLatestCommitted(t *testing.T) {
 	}
 	if string(got.Payload) != "v2" {
 		t.Fatalf("latest payload = %q, want v2", got.Payload)
+	}
+}
+
+// TestConcurrentApproversCommitOnce is the regression guard for the commit-claim:
+// several distinct approvers reaching quorum at once must run the committer
+// exactly once (no double-apply). Without the compare-and-set claim this fails.
+func TestConcurrentApproversCommitOnce(t *testing.T) {
+	dc, _ := newController(t) // quorum 2
+	ctx := context.Background()
+	var runs int32
+	dc.Register("k", func(context.Context, dualcontrol.Change) error { atomic.AddInt32(&runs, 1); return nil })
+
+	ch, err := dc.Propose(ctx, "k", "t", []byte("x"), "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for _, who := range []string{"bob", "carol", "dave"} {
+		wg.Add(1)
+		go func(w string) { defer wg.Done(); _, _ = dc.Approve(ctx, ch.ID, w) }(who)
+	}
+	wg.Wait()
+
+	if n := atomic.LoadInt32(&runs); n != 1 {
+		t.Fatalf("committer ran %d times, want exactly 1", n)
+	}
+	got, _, _ := dc.Get(ctx, ch.ID)
+	if dualcontrol.State(got.State) != dualcontrol.StateCommitted {
+		t.Fatalf("state = %s, want committed", got.State)
 	}
 }
 
