@@ -77,7 +77,19 @@ export function Enrollments() {
                     <td className="nums px-4 py-2 font-mono text-[11px] text-ink-faint" title={e.pubkey_hash}>
                       {e.pubkey_hash.slice(0, 12)}…
                     </td>
-                    <td className="px-4 py-2 text-ink-dim">{e.method}</td>
+                    <td className="px-4 py-2">
+                      {e.attest_account ? (
+                        <span className="flex flex-col gap-0.5">
+                          <span><Chip tone="permit">{attestLabel(e.attest_provider)}</Chip></span>
+                          <span className="nums font-mono text-[11px] text-ink-faint" title={e.attest_principal}>
+                            {e.attest_account}
+                            {e.attest_region ? ` · ${e.attest_region}` : ''}
+                          </span>
+                        </span>
+                      ) : (
+                        <span className="text-ink-dim">{e.method}</span>
+                      )}
+                    </td>
                     <td className="px-4 py-2">
                       <span className="flex flex-wrap gap-1">
                         {e.groups.length === 0 ? <span className="text-ink-faint">—</span> : e.groups.map((g) => <Chip key={g}>{g}</Chip>)}
@@ -182,6 +194,14 @@ function approveError(err: unknown): string {
     return err.detail || err.title
   }
   return 'Approve failed.'
+}
+
+// attestLabel maps a provider id to a short display label (provider-agnostic).
+function attestLabel(provider?: string): string {
+  if (provider === 'aws') return 'AWS'
+  if (provider === 'azure') return 'Azure'
+  if (provider === 'gcp') return 'GCP'
+  return provider || 'attested'
 }
 
 function decisionError(err: unknown): string {

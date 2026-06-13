@@ -212,6 +212,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/v1/cloudtrust/active": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The published cloud-attestation trust config (latest committed cloudtrust.publish). */
+        get: operations["getActiveCloudTrust"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/cloudtrust/propose": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Validate a cloud-trust config, then open a dual-control change. */
+        post: operations["proposeCloudTrust"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/admin/v1/policy/compile": {
         parameters: {
             query?: never;
@@ -552,6 +586,30 @@ export interface components {
             text?: string;
             rules?: components["schemas"]["PolicyRule"][];
         };
+        CloudTrustAccount: {
+            /** @description AWS account id (exact match) */
+            account: string;
+            /** @description allowed caller-ARN globs; empty = any ARN in the account */
+            arn_patterns?: string[];
+            /** @description groups granted to hosts attesting from this account */
+            groups?: string[];
+            /** @description issue immediately vs queue for manual approval */
+            auto_issue?: boolean;
+        };
+        CloudTrustActive: {
+            published: boolean;
+            /** Format: int64 */
+            change_id?: number;
+            hash?: string;
+            /** @description granted to every validly-attested host */
+            default_groups?: string[];
+            aws?: components["schemas"]["CloudTrustAccount"][];
+        };
+        CloudTrustProposeRequest: {
+            default_groups?: string[];
+            aws: components["schemas"]["CloudTrustAccount"][];
+            description?: string;
+        };
         CompileRequest: {
             policy: string;
             groups?: string[];
@@ -672,6 +730,15 @@ export interface components {
             /** Format: date-time */
             decided_at?: string;
             approver?: string;
+            /** @description cloud-attestation provider, e.g. aws (M5) */
+            attest_provider?: string;
+            /** @description attested account/subscription/project */
+            attest_account?: string;
+            /** @description attested ARN/principal/service-account */
+            attest_principal?: string;
+            attest_region?: string;
+            /** Format: date-time */
+            verified_at?: string;
         };
         EnrollmentList: {
             enrollments: components["schemas"]["EnrollmentView"][];
@@ -1016,6 +1083,54 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["ProposeRequest"];
+            };
+        };
+        responses: {
+            /** @description The opened change (proposer = the authenticated principal). */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Change"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Problem"];
+        };
+    };
+    getActiveCloudTrust: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The active cloud-trust config, or {published:false} when none. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CloudTrustActive"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    proposeCloudTrust: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CloudTrustProposeRequest"];
             };
         };
         responses: {

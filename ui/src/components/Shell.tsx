@@ -10,6 +10,7 @@ const NAV = [
   { to: '/enrollments', label: 'Enrollments', end: false },
   { to: '/devices', label: 'Devices', end: false },
   { to: '/joinkeys', label: 'Join Keys', end: false },
+  { to: '/cloudtrust', label: 'Cloud Trust', end: false },
   { to: '/audit', label: 'Audit', end: false },
 ]
 

@@ -14,9 +14,13 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"net/url"
+	"strings"
 	"time"
 
+	"github.com/jeks313/nebula-control-plane/internal/awsattest"
 	"github.com/jeks313/nebula-control-plane/internal/bundle"
+	"github.com/jeks313/nebula-control-plane/internal/cloudtrust"
 	"github.com/jeks313/nebula-control-plane/internal/ipam"
 	"github.com/jeks313/nebula-control-plane/internal/joinkey"
 	"github.com/jeks313/nebula-control-plane/internal/jws"
@@ -65,6 +69,12 @@ type Enrollment struct {
 	CreatedAt    int64  `gorm:"column:created_at"`
 	DecidedAt    int64  `gorm:"column:decided_at"`
 	Approver     string `gorm:"column:approver"`
+	// Cloud-attestation evidence (M5; provider-agnostic). Empty for token enrollments.
+	AttestProvider  string `gorm:"column:attest_provider"`  // e.g. "aws"
+	AttestAccount   string `gorm:"column:attest_account"`   // AWS account / Azure sub / GCP project
+	AttestPrincipal string `gorm:"column:attest_principal"` // AWS ARN / Azure principal / GCP SA
+	AttestRegion    string `gorm:"column:attest_region"`
+	VerifiedAt      int64  `gorm:"column:verified_at"`
 }
 
 func (Enrollment) TableName() string { return "enrollments" }
@@ -103,6 +113,15 @@ type Config struct {
 	Policy           *policy.Policy // central firewall (M6); nil -> Pilot's local default
 	Results          *queue.Durable // result store (gateway↔Core shared store)
 	ResultTTL        time.Duration  // result/ticket validity (0 -> 1h)
+
+	// Cloud attestation (M5). AWSSigV4Enabled gates the aws-sigv4 method; CloudTrust
+	// is the active dual-control trust config (which accounts/roles may attest +
+	// their groups/auto-issue). Both nil/false => aws-sigv4 enrollments are denied
+	// (fail closed). AWSVerify is the STS verification config (test-only Endpoint
+	// override; leave its Endpoint empty in prod so the allowlisted signed URL is used).
+	AWSSigV4Enabled bool
+	AWSVerify       awsattest.VerifyConfig
+	CloudTrust      *cloudtrust.Config
 }
 
 // Consumer processes enrollment candidates.
@@ -144,6 +163,14 @@ func terminal(err error) bool {
 	for _, t := range []error{
 		ErrBadRequest, ErrSignature, ErrNonce, ErrReplay, ErrMethod, ErrQuota,
 		joinkey.ErrNotFound, joinkey.ErrExpired, joinkey.ErrExhausted,
+		// Attestation outcomes are all terminal for THIS attempt. A bad/forged/
+		// un-allowlisted attestation will never succeed; an STS-unavailable error also
+		// denies (rather than nacking) because the single-use nonce was already consumed
+		// in verify(), so a queue redelivery would only hit ErrReplay — the host instead
+		// re-enrolls with a fresh nonce (replay-safe recovery).
+		awsattest.ErrBinding, awsattest.ErrUnsignedBinding, awsattest.ErrBadRequest,
+		awsattest.ErrBadEndpoint, awsattest.ErrAttestation, awsattest.ErrNotAllowed,
+		awsattest.ErrSTSUnavailable,
 	} {
 		if errors.Is(err, t) {
 			return true
@@ -162,8 +189,11 @@ func (c *Consumer) Process(ctx context.Context, cand queue.Candidate) (Result, e
 	if err != nil {
 		return Result{}, err
 	}
+	if req.Method == wire.MethodAWSSigV4 {
+		return c.processAttested(ctx, cand, req, pubBytes)
+	}
 	if req.Method != wire.MethodToken {
-		return Result{}, fmt.Errorf("%w: %q (only token/join-key is implemented; attestation is M5)", ErrMethod, req.Method)
+		return Result{}, fmt.Errorf("%w: %q (token/join-key and aws-sigv4 are implemented)", ErrMethod, req.Method)
 	}
 
 	// Validate + consume the join key.
@@ -201,7 +231,7 @@ func (c *Consumer) Process(ctx context.Context, cand queue.Candidate) (Result, e
 
 	// Approval decision: bearer secrets are PENDING by default.
 	if !jk.AutoIssue {
-		c.record(ctx, cand.EnrollmentID, req, pubBytes, jk.ID, groups, StatusPending, nil, "")
+		c.record(ctx, cand.EnrollmentID, req, pubBytes, jk.ID, groups, StatusPending, nil, "", evidence{})
 		c.writeResult(ctx, cand.EnrollmentID, cand.RetrievalSecretHash, nil, StatusPending, "")
 		_ = c.audit(ctx, "system", "enroll-pending", deviceName,
 			fmt.Sprintf(`{"join_key":%q,"reason":"manual approval required"}`, jk.Name))
@@ -217,9 +247,103 @@ func (c *Consumer) Process(ctx context.Context, cand queue.Candidate) (Result, e
 	if err != nil {
 		return Result{}, err
 	}
-	c.record(ctx, cand.EnrollmentID, req, pubBytes, jk.ID, groups, StatusIssued, certPEM, ip.String())
+	c.record(ctx, cand.EnrollmentID, req, pubBytes, jk.ID, groups, StatusIssued, certPEM, ip.String(), evidence{})
 	c.writeResult(ctx, cand.EnrollmentID, cand.RetrievalSecretHash, bundleJWS, StatusIssued, "")
 	return Result{EnrollmentID: cand.EnrollmentID, Status: StatusIssued, OverlayIP: ip.String(), CertPEM: certPEM}, nil
+}
+
+// processAttested handles an aws-sigv4 enrollment: verify the presigned STS attestation
+// (bound to THIS enrollment's nonce + host pubkey — the same single-use nonce the outer
+// JWS verify already consumed), enforce the dual-control cloud-trust allowlist, derive
+// groups from the matched account (∪ default groups), capture provider evidence, and
+// auto-issue or queue for manual approval per the account's posture. Fails closed.
+func (c *Consumer) processAttested(ctx context.Context, cand queue.Candidate, req wire.EnrollRequest, pubBytes []byte) (Result, error) {
+	if !c.cfg.AWSSigV4Enabled || c.cfg.CloudTrust == nil {
+		c.deny(ctx, cand, req, pubBytes, "enroll-denied", "aws-sigv4 attestation is not enabled on this control plane")
+		return Result{EnrollmentID: cand.EnrollmentID, Status: StatusDenied}, fmt.Errorf("%w: aws-sigv4 disabled", ErrMethod)
+	}
+
+	var pres awsattest.PresignedRequest
+	if err := json.Unmarshal(req.Credential, &pres); err != nil {
+		c.deny(ctx, cand, req, pubBytes, "enroll-denied", "malformed attestation credential")
+		return Result{EnrollmentID: cand.EnrollmentID, Status: StatusDenied}, fmt.Errorf("%w: %v", awsattest.ErrBadRequest, err)
+	}
+
+	// Verify binds to the nonce + pubkey hash already validated by c.verify() — do NOT
+	// introduce a second nonce. STS vouches for the identity; we trust nothing the host
+	// supplied beyond the SigV4-signed, allowlisted request.
+	id, err := awsattest.Verify(ctx, pres, req.Nonce, wire.PubkeyHash(pubBytes), c.cfg.AWSVerify)
+	if err != nil {
+		// Fail closed for this attempt. STS-unavailable is denied (not nacked): the
+		// nonce was already consumed in verify(), so a redelivery would hit ErrReplay —
+		// the host re-enrolls with a fresh nonce instead (replay-safe recovery).
+		reason := "attestation rejected: " + err.Error()
+		if errors.Is(err, awsattest.ErrSTSUnavailable) {
+			reason = "cloud attestation verifier (AWS STS) is unavailable; re-enroll to retry"
+		}
+		c.deny(ctx, cand, req, pubBytes, "enroll-denied", reason)
+		return Result{EnrollmentID: cand.EnrollmentID, Status: StatusDenied}, err
+	}
+
+	groupsSlice, autoIssue, ok := c.cfg.CloudTrust.MatchAWS(id)
+	if !ok {
+		reason := fmt.Sprintf("AWS account %s / role %s is not in the cloud-trust config", id.Account, id.Arn)
+		c.deny(ctx, cand, req, pubBytes, "enroll-denied", reason)
+		return Result{EnrollmentID: cand.EnrollmentID, Status: StatusDenied}, fmt.Errorf("%w: account %s", awsattest.ErrNotAllowed, id.Account)
+	}
+
+	ev := evidence{
+		provider:   cloudtrust.ProviderAWS,
+		account:    id.Account,
+		principal:  id.Arn,
+		region:     regionFromSTSURL(pres.URL),
+		verifiedAt: c.now().UnixNano(),
+	}
+	if groupsSlice == nil {
+		groupsSlice = []string{}
+	}
+	groupsJSON, _ := json.Marshal(groupsSlice)
+	deviceName := deviceName(req, cand.PubkeyHash)
+
+	// Attested-but-not-auto-issue still queues for manual approval (an operator-set
+	// posture per account). JoinKeyID stays 0 — there is no join key.
+	if !autoIssue {
+		c.record(ctx, cand.EnrollmentID, req, pubBytes, 0, string(groupsJSON), StatusPending, nil, "", ev)
+		c.writeResult(ctx, cand.EnrollmentID, cand.RetrievalSecretHash, nil, StatusPending, "")
+		_ = c.audit(ctx, "system", "enroll-pending", deviceName,
+			fmt.Sprintf(`{"method":"aws-sigv4","account":%q,"reason":"manual approval required"}`, id.Account))
+		return Result{EnrollmentID: cand.EnrollmentID, Status: StatusPending}, nil
+	}
+
+	ip, certPEM, notAfter, err := c.issue(ctx, "enroll-attested", deviceName, pubBytes, groupsSlice)
+	if err != nil {
+		return Result{}, err
+	}
+	bundleJWS, err := c.buildBundle(ctx, deviceName, ip.String(), groupsSlice, certPEM, notAfter)
+	if err != nil {
+		return Result{}, err
+	}
+	c.record(ctx, cand.EnrollmentID, req, pubBytes, 0, string(groupsJSON), StatusIssued, certPEM, ip.String(), ev)
+	c.writeResult(ctx, cand.EnrollmentID, cand.RetrievalSecretHash, bundleJWS, StatusIssued, "")
+	_ = c.audit(ctx, "system", "enroll-attested", deviceName,
+		fmt.Sprintf(`{"method":"aws-sigv4","account":%q,"arn":%q}`, id.Account, id.Arn))
+	return Result{EnrollmentID: cand.EnrollmentID, Status: StatusIssued, OverlayIP: ip.String(), CertPEM: certPEM}, nil
+}
+
+// regionFromSTSURL extracts the AWS region from a signed STS host
+// (sts.<region>.amazonaws.com); the global endpoint sts.amazonaws.com -> "global".
+func regionFromSTSURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	h := strings.TrimSuffix(u.Hostname(), ".amazonaws.com")
+	h = strings.TrimPrefix(h, "sts")
+	h = strings.TrimPrefix(h, ".")
+	if h == "" {
+		return "global"
+	}
+	return h
 }
 
 // Approve issues a cert for a PENDING enrollment (the 3.9 workflow adds RBAC +
@@ -311,7 +435,7 @@ func (c *Consumer) Deny(ctx context.Context, enrollmentID, approver, reason stri
 
 // deny records a denied enrollment + result + audit (the shared rejection path).
 func (c *Consumer) deny(ctx context.Context, cand queue.Candidate, req wire.EnrollRequest, pubBytes []byte, action, reason string) {
-	c.record(ctx, cand.EnrollmentID, req, pubBytes, 0, "[]", StatusDenied, nil, "")
+	c.record(ctx, cand.EnrollmentID, req, pubBytes, 0, "[]", StatusDenied, nil, "", evidence{})
 	c.writeResult(ctx, cand.EnrollmentID, cand.RetrievalSecretHash, nil, StatusDenied, reason)
 	_ = c.audit(ctx, "system", action, req.CSR.RequestedName, reason)
 }
@@ -453,19 +577,31 @@ func (c *Consumer) writeResult(ctx context.Context, enrollmentID string, secretH
 	_ = c.cfg.Results.PutResult(ctx, enrollmentID, status, secretHash, bundleJWS, reason, c.now().Add(ttl))
 }
 
-func (c *Consumer) record(ctx context.Context, enrollmentID string, req wire.EnrollRequest, pubBytes []byte, joinKeyID int64, groups, status string, certPEM []byte, ip string) {
+// evidence carries cloud-attestation facts captured (from the cloud provider, never the
+// host) for an attested enrollment. Zero value for token enrollments.
+type evidence struct {
+	provider, account, principal, region string
+	verifiedAt                           int64
+}
+
+func (c *Consumer) record(ctx context.Context, enrollmentID string, req wire.EnrollRequest, pubBytes []byte, joinKeyID int64, groups, status string, certPEM []byte, ip string, ev evidence) {
 	e := Enrollment{
-		EnrollmentID: enrollmentID,
-		DeviceName:   deviceName(req, wire.PubkeyHash(pubBytes)),
-		PubkeyHash:   wire.PubkeyHash(pubBytes),
-		Pubkey:       pubBytes,
-		Method:       req.Method,
-		JoinKeyID:    joinKeyID,
-		Groups:       groups,
-		Status:       status,
-		CertPEM:      certPEM,
-		OverlayIP:    ip,
-		CreatedAt:    c.now().UnixNano(),
+		EnrollmentID:    enrollmentID,
+		DeviceName:      deviceName(req, wire.PubkeyHash(pubBytes)),
+		PubkeyHash:      wire.PubkeyHash(pubBytes),
+		Pubkey:          pubBytes,
+		Method:          req.Method,
+		JoinKeyID:       joinKeyID,
+		Groups:          groups,
+		Status:          status,
+		CertPEM:         certPEM,
+		OverlayIP:       ip,
+		CreatedAt:       c.now().UnixNano(),
+		AttestProvider:  ev.provider,
+		AttestAccount:   ev.account,
+		AttestPrincipal: ev.principal,
+		AttestRegion:    ev.region,
+		VerifiedAt:      ev.verifiedAt,
 	}
 	if status != StatusPending {
 		e.DecidedAt = c.now().UnixNano()

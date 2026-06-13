@@ -212,6 +212,35 @@ paths:
         "400": { $ref: "#/components/responses/Problem" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Problem" }
+  /admin/v1/cloudtrust/active:
+    get:
+      summary: The published cloud-attestation trust config (latest committed cloudtrust.publish).
+      operationId: getActiveCloudTrust
+      responses:
+        "200":
+          description: The active cloud-trust config, or {published:false} when none.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CloudTrustActive" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /admin/v1/cloudtrust/propose:
+    post:
+      summary: Validate a cloud-trust config, then open a dual-control change.
+      operationId: proposeCloudTrust
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CloudTrustProposeRequest" }
+      responses:
+        "201":
+          description: The opened change (proposer = the authenticated principal).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Change" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Problem" }
   /admin/v1/policy/compile:
     post:
       summary: Dry-run compile a draft policy for a host's groups (live analysis).
@@ -620,6 +649,30 @@ components:
         hash: { type: string }
         text: { type: string }
         rules: { type: array, items: { $ref: "#/components/schemas/PolicyRule" } }
+    CloudTrustAccount:
+      type: object
+      required: [account]
+      properties:
+        account: { type: string, description: "AWS account id (exact match)" }
+        arn_patterns: { type: array, items: { type: string }, description: "allowed caller-ARN globs; empty = any ARN in the account" }
+        groups: { type: array, items: { type: string }, description: "groups granted to hosts attesting from this account" }
+        auto_issue: { type: boolean, description: "issue immediately vs queue for manual approval" }
+    CloudTrustActive:
+      type: object
+      required: [published]
+      properties:
+        published: { type: boolean }
+        change_id: { type: integer, format: int64 }
+        hash: { type: string }
+        default_groups: { type: array, items: { type: string }, description: "granted to every validly-attested host" }
+        aws: { type: array, items: { $ref: "#/components/schemas/CloudTrustAccount" } }
+    CloudTrustProposeRequest:
+      type: object
+      required: [aws]
+      properties:
+        default_groups: { type: array, items: { type: string } }
+        aws: { type: array, items: { $ref: "#/components/schemas/CloudTrustAccount" } }
+        description: { type: string }
     CompileRequest:
       type: object
       required: [policy]
@@ -761,6 +814,11 @@ components:
         created_at: { type: string, format: date-time }
         decided_at: { type: string, format: date-time }
         approver: { type: string }
+        attest_provider: { type: string, description: "cloud-attestation provider, e.g. aws (M5)" }
+        attest_account: { type: string, description: "attested account/subscription/project" }
+        attest_principal: { type: string, description: "attested ARN/principal/service-account" }
+        attest_region: { type: string }
+        verified_at: { type: string, format: date-time }
     EnrollmentList:
       type: object
       required: [enrollments, count]

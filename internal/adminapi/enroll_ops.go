@@ -26,6 +26,12 @@ type EnrollmentView struct {
 	CreatedAt    string   `json:"created_at"`
 	DecidedAt    string   `json:"decided_at,omitempty"`
 	Approver     string   `json:"approver,omitempty"`
+	// Cloud-attestation evidence (M5; provider-agnostic). Present only for attested hosts.
+	AttestProvider  string `json:"attest_provider,omitempty"`
+	AttestAccount   string `json:"attest_account,omitempty"`
+	AttestPrincipal string `json:"attest_principal,omitempty"`
+	AttestRegion    string `json:"attest_region,omitempty"`
+	VerifiedAt      string `json:"verified_at,omitempty"`
 }
 
 func enrollmentView(e enrollment.Enrollment) EnrollmentView {
@@ -38,7 +44,12 @@ func enrollmentView(e enrollment.Enrollment) EnrollmentView {
 		EnrollmentID: e.EnrollmentID, DeviceName: e.DeviceName, PubkeyHash: e.PubkeyHash,
 		Method: e.Method, JoinKeyID: e.JoinKeyID, Groups: groups, Status: e.Status,
 		OverlayIP: e.OverlayIP, CreatedAt: rfc3339(e.CreatedAt), DecidedAt: rfc3339(e.DecidedAt),
-		Approver: e.Approver,
+		Approver:        e.Approver,
+		AttestProvider:  e.AttestProvider,
+		AttestAccount:   e.AttestAccount,
+		AttestPrincipal: e.AttestPrincipal,
+		AttestRegion:    e.AttestRegion,
+		VerifiedAt:      rfc3339(e.VerifiedAt),
 	}
 }
 

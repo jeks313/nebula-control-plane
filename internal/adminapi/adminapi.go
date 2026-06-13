@@ -25,6 +25,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/jeks313/nebula-control-plane/internal/cloudtrust"
 	"github.com/jeks313/nebula-control-plane/internal/dualcontrol"
 	"github.com/jeks313/nebula-control-plane/internal/enrollment"
 	"github.com/jeks313/nebula-control-plane/internal/fleet"
@@ -164,6 +165,12 @@ func New(cfg Config) *Server {
 			}
 			return policy.CheckInvariants(p)
 		})
+		// Cloud-trust-publish committer: re-validate at commit (defense in depth; the
+		// active cloud-trust config is the latest committed change of this kind).
+		s.dc.Register(cloudtrust.PublishKind, func(_ context.Context, ch dualcontrol.Change) error {
+			_, err := cloudtrust.Parse(ch.Payload)
+			return err
+		})
 	}
 	return s
 }
@@ -206,6 +213,9 @@ func (s *Server) routeTable() []route {
 		{"GET", "/admin/v1/policy/active", s.handlePolicyActive},
 		{"POST", "/admin/v1/policy/propose", s.handlePolicyPropose},
 		{"POST", "/admin/v1/policy/compile", s.handlePolicyCompile},
+		// Cloud-attestation trust config (dual-control; approved via /approvals).
+		{"GET", "/admin/v1/cloudtrust/active", s.handleCloudTrustActive},
+		{"POST", "/admin/v1/cloudtrust/propose", s.handleCloudTrustPropose},
 		// A0.4 fleet-management mutations (pure-DB).
 		{"POST", "/admin/v1/lighthouses", s.handleLighthouseAdd},
 		{"PUT", "/admin/v1/lighthouses/{ip}", s.handleLighthouseReplace},
@@ -657,6 +667,74 @@ func (s *Server) handlePolicyPropose(w http.ResponseWriter, r *http.Request) {
 		target = fmt.Sprintf("firewall policy (%d rules)", len(p.Rules))
 	}
 	ch, err := s.dc.Propose(r.Context(), policy.PublishKind, target, []byte(body.Policy), id.Principal)
+	if err != nil {
+		s.fail(w, r, "propose failed", err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, changeView(ch, true))
+}
+
+// GET /admin/v1/cloudtrust/active — the published cloud-attestation trust config
+// (latest committed). {published:false} when none has been published.
+func (s *Server) handleCloudTrustActive(w http.ResponseWriter, r *http.Request) {
+	ch, ok, err := s.dc.LatestCommitted(r.Context(), cloudtrust.PublishKind)
+	if err != nil {
+		s.fail(w, r, "read active cloud-trust failed", err)
+		return
+	}
+	if !ok {
+		writeJSON(w, http.StatusOK, map[string]any{"published": false})
+		return
+	}
+	cfg, perr := cloudtrust.Parse(ch.Payload)
+	if perr != nil {
+		s.fail(w, r, "active cloud-trust is unparseable", perr)
+		return
+	}
+	dg := cfg.DefaultGroups
+	if dg == nil {
+		dg = []string{} // contract: always a JSON array
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"published": true, "change_id": ch.ID, "hash": hex.EncodeToString(ch.PayloadHash),
+		"default_groups": dg, "aws": cfg.AWS,
+	})
+}
+
+// POST /admin/v1/cloudtrust/propose — validate, then open a dual-control change.
+// Changing who may attest into the mesh is authority-granting, so it requires the
+// propose permission AND fresh MFA, and is approved through the generic /approvals flow.
+func (s *Server) handleCloudTrustPropose(w http.ResponseWriter, r *http.Request) {
+	id := identityFrom(r.Context())
+	if !s.requirePerm(w, id, PermCloudTrustPropose) {
+		return
+	}
+	if !s.requireStepUp(w, id) {
+		return
+	}
+	var body struct {
+		DefaultGroups []string                `json:"default_groups"`
+		AWS           []cloudtrust.AWSAccount `json:"aws"`
+		Description   string                  `json:"description"`
+	}
+	if !readJSON(w, r, &body) {
+		return
+	}
+	cfg := cloudtrust.Config{DefaultGroups: body.DefaultGroups, AWS: body.AWS}
+	if err := cloudtrust.Validate(cfg); err != nil {
+		writeProblem(w, http.StatusBadRequest, "invalid cloud-trust config", err.Error())
+		return
+	}
+	payload, err := json.Marshal(cfg) // store the canonical, validated form
+	if err != nil {
+		s.fail(w, r, "marshal cloud-trust failed", err)
+		return
+	}
+	target := body.Description
+	if target == "" {
+		target = fmt.Sprintf("cloud-trust config (%d AWS accounts)", len(cfg.AWS))
+	}
+	ch, err := s.dc.Propose(r.Context(), cloudtrust.PublishKind, target, payload, id.Principal)
 	if err != nil {
 		s.fail(w, r, "propose failed", err)
 		return

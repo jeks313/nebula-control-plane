@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jeks313/nebula-control-plane/internal/cloudtrust"
 	"github.com/jeks313/nebula-control-plane/internal/coreapi"
+	"github.com/jeks313/nebula-control-plane/internal/dualcontrol"
 	"github.com/jeks313/nebula-control-plane/internal/enrollment"
 	"github.com/jeks313/nebula-control-plane/internal/joinkey"
 	"github.com/jeks313/nebula-control-plane/internal/lighthouse"
@@ -149,7 +151,65 @@ func cmdSeedDemo(args []string) {
 		}
 	}
 
-	fmt.Printf("seeded demo fleet: %d devices, 3 lighthouses, 3 join keys, 3 pending enrollments, 1 active rollout (v43 canary)\n", len(devices))
+	// A dual-control-published cloud-trust config (proposed + approved by distinct
+	// actors so it commits and becomes the active config).
+	ctCfg := cloudtrust.Config{
+		DefaultGroups: []string{"fleet"},
+		AWS: []cloudtrust.AWSAccount{
+			{Account: "111122223333", ARNPatterns: []string{"arn:aws:sts::111122223333:assumed-role/web-*/*"}, Groups: []string{"web"}, AutoIssue: true},
+			{Account: "444455556666", Groups: []string{"db"}}, // manual approval
+		},
+	}
+	payload, _ := json.Marshal(ctCfg)
+	dc := dualcontrol.New(dualcontrol.Config{DB: s.DB, Audit: audit})
+	dc.Register(cloudtrust.PublishKind, func(_ context.Context, ch dualcontrol.Change) error {
+		_, err := cloudtrust.Parse(ch.Payload)
+		return err
+	})
+	ch, err := dc.Propose(ctx, cloudtrust.PublishKind, "AWS production accounts", payload, "chris@hyde.ca")
+	if err != nil {
+		fatalf("seed cloud-trust propose: %v", err)
+	}
+	if _, err := dc.Approve(ctx, ch.ID, "ops@hyde.ca"); err != nil {
+		fatalf("seed cloud-trust approve: %v", err)
+	}
+
+	// Attested enrollments (aws-sigv4) carrying provider evidence — what the UI renders
+	// for cloud-attested hosts.
+	for i, a := range []struct {
+		name, status, account, arn, ip string
+		groups                         []string
+	}{
+		{"ec2-web-01", enrollment.StatusPending, "111122223333", "arn:aws:sts::111122223333:assumed-role/web-prod/i-0abc", "", []string{"fleet", "web"}},
+		{"ec2-db-02", enrollment.StatusIssued, "444455556666", "arn:aws:sts::444455556666:assumed-role/db/i-0def", "100.64.0.30", []string{"fleet", "db"}},
+	} {
+		groups, _ := json.Marshal(a.groups)
+		ts := now.Add(-time.Duration(i+1) * 7 * time.Minute).UnixNano()
+		row := enrollment.Enrollment{
+			EnrollmentID:    fmt.Sprintf("enr-aws-%03d", i+1),
+			DeviceName:      a.name,
+			PubkeyHash:      fmt.Sprintf("%064x", 100+i),
+			Method:          "aws-sigv4",
+			Groups:          string(groups),
+			Status:          a.status,
+			OverlayIP:       a.ip,
+			CreatedAt:       ts,
+			AttestProvider:  cloudtrust.ProviderAWS,
+			AttestAccount:   a.account,
+			AttestPrincipal: a.arn,
+			AttestRegion:    "us-east-1",
+			VerifiedAt:      ts,
+		}
+		if a.status != enrollment.StatusPending {
+			row.DecidedAt = ts
+			row.Approver = "ops@hyde.ca"
+		}
+		if err := s.DB.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&row).Error; err != nil {
+			fatalf("seed attested enrollment %s: %v", a.name, err)
+		}
+	}
+
+	fmt.Printf("seeded demo fleet: %d devices, 3 lighthouses, 3 join keys, 5 enrollments (3 token + 2 aws-sigv4), 1 active rollout (v43 canary), 1 published cloud-trust config\n", len(devices))
 }
 
 // seedHeartbeats builds a believable ~14-host fleet whose facts drive the dashboard:

@@ -52,6 +52,12 @@ var (
 	ErrBadEndpoint     = errors.New("awsattest: STS endpoint is not an allowlisted AWS STS host")
 	ErrAttestation     = errors.New("awsattest: STS rejected the attestation")
 	ErrNotAllowed      = errors.New("awsattest: caller account/role is not allowlisted")
+	// ErrSTSUnavailable is an STS-side unavailability (transport timeout/DNS/refused, or
+	// an HTTP 429/5xx) — distinct from ErrAttestation, which is STS actively REJECTING
+	// the caller (a 4xx, e.g. a forged/expired signature). The caller decides policy;
+	// the enroll consumer treats both as a fail-closed denial (the host re-enrolls with
+	// a fresh nonce), but the distinct error gives a clear "unavailable vs rejected" reason.
+	ErrSTSUnavailable = errors.New("awsattest: STS unavailable")
 )
 
 // Credentials are AWS credentials (from the instance role via IMDS, 5.1).
@@ -313,11 +319,17 @@ func Verify(ctx context.Context, pres PresignedRequest, expectedNonce, expectedP
 	req.Host = u.Host // preserve the signed Host even when Endpoint redirects execution
 	resp, err := client.Do(req)
 	if err != nil {
-		return Identity{}, fmt.Errorf("%w: %v", ErrAttestation, err)
+		// Transport failure (STS unreachable) — transient, not a rejection.
+		return Identity{}, fmt.Errorf("%w: %v", ErrSTSUnavailable, err)
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+		// Throttling / STS-side degradation — unavailable, not a rejection of the caller.
+		return Identity{}, fmt.Errorf("%w: STS status %d", ErrSTSUnavailable, resp.StatusCode)
+	}
 	if resp.StatusCode != http.StatusOK {
+		// A 4xx sender rejection (e.g. 403 for a forged/expired signature) — terminal.
 		return Identity{}, fmt.Errorf("%w: STS status %d", ErrAttestation, resp.StatusCode)
 	}
 

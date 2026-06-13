@@ -81,6 +81,38 @@ func fakeSTS(t *testing.T, account, arn string, reject bool) *httptest.Server {
 	}))
 }
 
+// TestVerifySTSUnavailable: a transport failure reaching STS is the transient
+// ErrSTSUnavailable (retryable), distinct from ErrAttestation (a rejection). The signed
+// URL is allowlisted; only the execution endpoint is unreachable.
+func TestVerifySTSUnavailable(t *testing.T) {
+	_, err := Verify(context.Background(), goodPres(t), "nonce-1", "ph-1", VerifyConfig{Endpoint: "http://127.0.0.1:1"})
+	if !errors.Is(err, ErrSTSUnavailable) {
+		t.Fatalf("err = %v, want ErrSTSUnavailable", err)
+	}
+	if errors.Is(err, ErrAttestation) {
+		t.Fatal("transport failure must NOT be ErrAttestation (it would be wrongly treated as terminal)")
+	}
+}
+
+// TestVerifySTSThrottled: a 429/5xx from STS is unavailability (ErrSTSUnavailable),
+// NOT a rejection (ErrAttestation) — so the caller can distinguish "STS is down" from
+// "your signature was rejected".
+func TestVerifySTSThrottled(t *testing.T) {
+	for _, code := range []int{429, 500, 503} {
+		sts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(code)
+		}))
+		_, err := Verify(context.Background(), goodPres(t), "nonce-1", "ph-1", VerifyConfig{Endpoint: sts.URL})
+		sts.Close()
+		if !errors.Is(err, ErrSTSUnavailable) {
+			t.Fatalf("status %d: err = %v, want ErrSTSUnavailable", code, err)
+		}
+		if errors.Is(err, ErrAttestation) {
+			t.Fatalf("status %d: must not be ErrAttestation (would be treated as a terminal rejection)", code)
+		}
+	}
+}
+
 func goodPres(t *testing.T) PresignedRequest {
 	t.Helper()
 	p, err := Sign(Credentials{AccessKeyID: "AKID", SecretAccessKey: "s", SessionToken: "tok"},
