@@ -1,12 +1,14 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'
-import { QueryClient, QueryCache, QueryClientProvider } from '@tanstack/react-query'
+import { QueryClient, QueryCache, MutationCache, QueryClientProvider } from '@tanstack/react-query'
 import '@fontsource-variable/geist'
 import '@fontsource-variable/geist-mono'
 import './index.css'
 import { App } from './app'
-import { isUnauthenticated } from './api/errors'
+import { ToastProvider } from './components/Toast'
+import { isUnauthenticated, isStepUpRequired } from './api/errors'
+import { redirectToStepUp } from './api/auth'
 
 // A session that expires mid-use surfaces as a 401 on some background query (e.g. the
 // 15s fleet-health poll). REMOVE the cached /me (don't just invalidate it): an
@@ -23,8 +25,24 @@ const queryCache = new QueryCache({
     }
   },
 })
+// Mutations handle auth failures centrally (so every write — current and future — is
+// uniform): a step-up-required 403 re-authenticates with fresh MFA and returns here to
+// retry; a 401 drops the session so the gate shows login. Action-specific outcomes
+// (409/501/duplicate) are handled per-call for their toast copy.
+const mutationCache = new MutationCache({
+  onError(error) {
+    if (isStepUpRequired(error)) {
+      redirectToStepUp()
+      return
+    }
+    if (isUnauthenticated(error)) {
+      queryClient.removeQueries({ queryKey: ['me'] })
+    }
+  },
+})
 queryClient = new QueryClient({
   queryCache,
+  mutationCache,
   defaultOptions: {
     queries: { retry: false, refetchOnWindowFocus: false, staleTime: 10_000 },
   },
@@ -34,7 +52,9 @@ createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
-        <App />
+        <ToastProvider>
+          <App />
+        </ToastProvider>
       </BrowserRouter>
     </QueryClientProvider>
   </StrictMode>,
