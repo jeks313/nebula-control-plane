@@ -635,7 +635,29 @@ The v1 UI-0…UI-6 pretended the backend was done. Reframe as a **backend track*
 - **A1 — Policy analysis engine** (gates UI-4): reachability query → flow-diff/blast-
   radius → assertions + publish gate, snapshotted into approvals.
 - **A2 — SSE change emitter** (upgrades UI-2+ live views; polling until then).
-- (Independently: **2.11** SSO/MFA/RBAC upgrades the dev seam to real auth.)
+- ✅ **2.11 admin SSO + RBAC — foundation (2026-06-13).** New `internal/adminauth`:
+  a **server-side session layer** (opaque cookie, SHA-256 at rest, httpOnly + SameSite,
+  absolute TTL + revocation, **session-bound** double-submit CSRF) behind a
+  **protocol-agnostic `Authenticator` seam** (bring-your-own-IdP — the session is
+  Harbor's, so the protocol only matters at login). Three providers ship: generic
+  **OIDC** (Auth-Code + PKCE, `go-oidc`, ID-token + nonce verified), **GitHub OAuth**
+  (identity via the API, roles from org/team membership, verified-primary email only),
+  and an **in-process mock OIDC IdP** (`harbor admin-api -mock-idp`) that exercises the
+  real OIDC path for dev/CI. RBAC moved from binary-admin to a server-side
+  **role→permission matrix** (`admin` superuser · `operator` day-2 fleet ops, no
+  policy/CA · `viewer` read-only/default · `break-glass` capability). `GET /me` now
+  carries the real `{principal, roles, mfa_satisfied_at}`; sign-offs/audit bind to it.
+  Wired into `harbor admin-api` (`-oidc-*` / `-github-*` / `-mock-idp` / `-role-map`;
+  real auth precedes the `-dev-auth` seam; `-mock-idp` is fail-closed mutually
+  exclusive with real auth). Migration `000009_sessions`. Full OIDC browser flow +
+  RBAC + CSRF + session lifecycle tested. Adversarially reviewed (11-agent; 3 confirmed
+  + 1 fixed): **open-redirect** `\`-bypass in `return_to`, **mock-idp** not mutually
+  exclusive with real auth, GitHub **unverified-email** as audit principal, and
+  CSRF **bound to the session** (not a bare cookie). This unblocks **UI-0b**.
+  - ⬜ **2.11+ deferred:** **SAML 2.0** (AD FS / Entra) — the next authenticator behind
+    the same seam; **step-up MFA *enforcement*** (`mfa_satisfied_at` is surfaced, gating
+    privileged actions on it is not yet wired); the **CLI→HTTP refactor (A0.7)** can now
+    proceed since real session auth exists.
 
 **UI track (each phase front-to-back, no screen before its data):**
 - **UI-0 — Foundation + design gate** *(needs A0):* design system + Storybook + the

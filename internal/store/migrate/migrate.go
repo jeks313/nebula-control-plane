@@ -34,6 +34,7 @@ var migrations = []*gormigrate.Migration{
 	sqlMigration("000006_approvals"),
 	sqlMigration("000007_lighthouses"),
 	sqlMigration("000008_rollouts"),
+	sqlMigration("000009_sessions"),
 }
 
 // Up applies all pending migrations.
