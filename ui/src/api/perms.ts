@@ -11,6 +11,7 @@ export const PERMISSIONS = [
   'enroll:decide',
   'policy:propose',
   'approval:decide',
+  'cloudtrust:propose',
 ] as const
 
 export type Permission = (typeof PERMISSIONS)[number]

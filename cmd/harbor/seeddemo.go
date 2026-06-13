@@ -13,6 +13,7 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/enrollment"
 	"github.com/jeks313/nebula-control-plane/internal/joinkey"
 	"github.com/jeks313/nebula-control-plane/internal/lighthouse"
+	"github.com/jeks313/nebula-control-plane/internal/policy"
 	"github.com/jeks313/nebula-control-plane/internal/rollout"
 	"github.com/jeks313/nebula-control-plane/internal/store/migrate"
 	"gorm.io/gorm/clause"
@@ -174,6 +175,30 @@ func cmdSeedDemo(args []string) {
 		fatalf("seed cloud-trust approve: %v", err)
 	}
 
+	// Policy: a committed (active) policy + a pending one awaiting a second approver, so
+	// the Policy page and the Approvals inbox demo the dual-control publish loop. The
+	// pending change is proposed by chris, leaving a distinct admin (e.g. the mock-IdP
+	// Ada Admin) able to approve it in the demo.
+	dc.Register(policy.PublishKind, func(_ context.Context, ch dualcontrol.Change) error {
+		p, perr := policy.Parse(string(ch.Payload))
+		if perr != nil {
+			return perr
+		}
+		return policy.CheckInvariants(p)
+	})
+	active := "allow group:laptops -> group:servers tcp 22\nallow any -> group:web tcp 443\n"
+	pch, err := dc.Propose(ctx, policy.PublishKind, "baseline access", []byte(active), "chris@hyde.ca")
+	if err != nil {
+		fatalf("seed policy propose: %v", err)
+	}
+	if _, err := dc.Approve(ctx, pch.ID, "ops@hyde.ca"); err != nil {
+		fatalf("seed policy approve: %v", err)
+	}
+	pending := "allow group:contractors -> group:servers tcp 22\nallow any -> group:web tcp 443\n"
+	if _, err := dc.Propose(ctx, policy.PublishKind, "grant contractors SSH", []byte(pending), "chris@hyde.ca"); err != nil {
+		fatalf("seed pending policy: %v", err)
+	}
+
 	// Attested enrollments (aws-sigv4) carrying provider evidence — what the UI renders
 	// for cloud-attested hosts.
 	for i, a := range []struct {
@@ -209,7 +234,7 @@ func cmdSeedDemo(args []string) {
 		}
 	}
 
-	fmt.Printf("seeded demo fleet: %d devices, 3 lighthouses, 3 join keys, 5 enrollments (3 token + 2 aws-sigv4), 1 active rollout (v43 canary), 1 published cloud-trust config\n", len(devices))
+	fmt.Printf("seeded demo fleet: %d devices, 3 lighthouses, 3 join keys, 5 enrollments (3 token + 2 aws-sigv4), 1 active rollout (v43 canary), a published cloud-trust config + policy, and 1 pending policy change awaiting approval\n", len(devices))
 }
 
 // seedHeartbeats builds a believable ~14-host fleet whose facts drive the dashboard:

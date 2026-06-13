@@ -876,6 +876,32 @@ The v1 UI-0…UI-6 pretended the backend was done. Reframe as a **backend track*
 - **UI-4 — Policy & Group-Tag Designer** *(M6 + A1) — the headline:* matrix-default
   + canvas + DSL, the analysis rail (reachability/tests/diff/blast-radius),
   single-admin-aware dual-control publish, canary monitor, drift panel; Network/IPAM.
+  - ✅ **UI-4a dual-control publish pipeline (2026-06-13).** The data-backed half of the
+    designer (the §4 matrix/canvas/analysis-rail are A1-blocked and deferred). New
+    **Approvals inbox** (`pages/Approvals.tsx`): lists dual-control changes by state
+    (Pending / All / Committed / Denied / Failed) — both `policy.publish` and
+    `cloudtrust.publish` flow through it — with a **review dialog** showing the proposed
+    payload + sign-off progress (X/quorum) and **Approve / Deny**. This is the first real
+    consumer of the **step-up MFA** primitive: approve is step-up-gated, so a stale-MFA
+    approve auto-redirects to re-auth and retries (UI-0b `MutationCache`); deny is the
+    ungated single veto. **No-self-approval** is shown (the Approve button is gated with
+    a reason when you proposed it) and **server-enforced** (409 backstop); the
+    single-admin dead-end is messaged. New **Policy page** (`pages/Policy.tsx`): the
+    active published policy (rules + DSL + change id/hash), a **compile preview** (draft
+    DSL + groups → server `policy/compile`: valid / invariants-ok / per-host inbound+
+    outbound incl. baseline — live-lint, read-only), and **propose for approval**
+    (step-up-gated, opens a dual-control change). New pure dual-control helpers
+    (`lib/approvals.ts`) unit-tested (Vitest 46). `seed-demo` now publishes an active
+    policy + leaves a **pending policy change** for a distinct admin (mock-IdP Ada) to
+    approve in the demo. Verified end-to-end (propose → inbox → distinct-actor approve →
+    commit → active; self-approve → 409). Adversarially reviewed (3-agent): 1 low fixed
+    (the transient `committing` state now shows under an All tab, so a change is never
+    invisible mid-commit).
+  - **Deferred to A1 / UI-4b:** the reachability **matrix** (default view), the **Tag
+    Canvas**, the analysis rail beyond single-host compile (**reachability query, test
+    authoring, blast-radius, server-computed diff overlay**), the CodeMirror DSL editor
+    with rich per-span diagnostics, canary-rollout monitor + drift panel, and Network/
+    IPAM — all need the A1 policy-analysis engine + new endpoints.
 - **UI-5 — Trust ops** *(M7–M8):* revocation/blocklist + propagation SLO; CA/key
   rotation wizards; lighthouse fleet management.
 - **UI-6 — Enterprise** *(M9):* detections + reconciliation, full Settings, Access/
