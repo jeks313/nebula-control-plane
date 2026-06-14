@@ -73,8 +73,13 @@ type Config struct {
 	// Rollout, if set, drives staged canary rollouts (6.6): heartbeats are fed to
 	// the engine, in-wave hosts are commanded toward the target version, and the
 	// renew bundle is stamped with the host's rollout version.
-	Rollout      *rollout.Engine
-	Pool         netip.Prefix
+	Rollout *rollout.Engine
+	Pool    netip.Prefix
+	// TunDev + ListenPort are this mesh's nebula TUN device name + UDP listen port,
+	// stamped into renew + GET /v1/config bundles. MUST match enrollment.Config's, or a
+	// renew/refresh would flip a device's tun/port. Empty/zero -> nebula1/4242.
+	TunDev       string
+	ListenPort   int
 	CertLifetime time.Duration
 	// RenewCommandThreshold: if a heartbeat reports a cert expiring within this
 	// window, Core replies with a `renew` command (a backstop to Pilot's own
@@ -367,6 +372,8 @@ func (s *Server) assembleBundle(ctx context.Context, dev enrollment.Enrollment, 
 		Firewall:         bundle.CompileFirewall(s.cfg.Policy, groups),
 		Lighthouses:      s.lighthouses(ctx),
 		Blocklist:        s.blocklist(ctx),
+		TunDev:           s.cfg.TunDev,
+		ListenPort:       s.cfg.ListenPort,
 		NotAfter:         notAfter.UTC().Format(time.RFC3339),
 	}
 }

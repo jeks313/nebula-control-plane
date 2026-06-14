@@ -148,17 +148,24 @@ CA/cert/config, and overlay IP. Install is therefore **per-mesh, additive, names
 - **Namespacing:** per-mesh state dir (e.g. `/var/lib/pilot/<mesh-id>/`) + a templated
   **`pilot@<mesh>.service`**. `pilot install <dev-url>` then `pilot install <prod-url>` — each
   lands in its own namespace; re-running one is an idempotent update.
-- **Collision guards** install enforces: distinct **listen ports** and distinct **tun device
-  names**, plus **disjoint overlay CIDRs** across the meshes a host joins (dev `10.44/16`,
-  prod `10.45/16`). Overlapping CIDRs would require policy routing — **out of scope**; install
-  refuses it. *(Concretely: `tun.dev` defaults to `nebula1` and the listen port to `4242`
-  (`internal/nebulaconfig/render.go`); two meshes on one host collide on both. For ENROLLED
-  hosts the config is rendered from Harbor's **signed bundle** (pilot's `enroll` writes it and
-  drift control reverts local edits), so the per-mesh `TunDev` + port must be set **Harbor-side**
-  in the bundle / mesh config policy — pilot's local renderer (`pilot init` / `pilotsetup`) only
-  governs standalone/pre-enroll configs like a lighthouse. The `install` command's own
-  namespacing (per-mesh state dir + `pilot@<mesh>` service) is already collision-free; the
-  tun/port is the remaining multi-mesh item, owned by Harbor's bundle rendering — task #27.)*
+- **Collision guards** — three things must differ across the meshes a host joins:
+  - **TUN device name + listen port — IMPLEMENTED, Harbor-side.** For enrolled hosts the
+    config is rendered from Harbor's **signed bundle** (pilot's `enroll` writes it and drift
+    control reverts local edits), so these are **mesh-wide bundle fields**, not pilot-local.
+    Each mesh's Harbor is run with `-tun-dev <name> -listen-port <port>` (default
+    `nebula1`/`4242`); the value rides every issued/renew/`/v1/config` bundle
+    (`bundle.Bundle.TunDev`/`ListenPort` → `RenderNebulaConfig`, the choke point shared by
+    enroll/renew/drift, so they stay byte-identical). Empty/zero falls back to the renderer's
+    `nebula1`/`4242` (legacy/single-mesh bundles unaffected). So a host on dev+prod gets, e.g.,
+    `nebula-dev`/`4242` and `nebula-prod`/`4243` — no collision. *(pilot's local renderer still
+    governs standalone/pre-enroll configs like a lighthouse, via `pilotsetup`/`pilot init`.)*
+  - **Disjoint overlay CIDRs** — a deployment constraint: each mesh's Harbor uses a distinct
+    `-pool` (dev `10.44/16`, prod `10.45/16`); overlapping pools would make a bridge host's
+    routes ambiguous (out of scope — no policy routing). A host-side overlap **warning** in
+    `install` (compare the enrolled cert's networks against other installed meshes') is a small
+    best-effort follow-up, not a functional blocker.
+  - **State dir + service** — `install`-owned and already collision-free (`/var/lib/pilot/<mesh>`
+    + `pilot@<mesh>`).
 - **Per-mesh identity, one shared anchor:** each mesh has its own CA + config-signing pin
   (delivered via its org-signed meshinfo); the **one pinned org root** trusts them all.
 - **Service model: N templated services** (independent lifecycle / self-update / failure
@@ -213,8 +220,10 @@ Lifecycle siblings: `pilot status` (installed? enrolled? healthy? per mesh), `pi
   endpoint; pilot pins the org root (bundle + fingerprint-confirm) and verifies the artifact;
   the per-mesh pin comes from the artifact (supersede ADR 0003's in-pilot pin); topology +
   groups stay in the post-auth bundle. Add the org-root KMS key + IAM to `deploy/prod` (ADR 0007).
-- **Phase 3 — multi-mesh.** Exercise additive `pilot install` for a 2nd mesh; collision +
-  disjoint-CIDR guards; templated `pilot@<mesh>`; one org root federating N meshes.
+- **Phase 3 — multi-mesh.** ✅ The tun/port collision guard is **done** (mesh-wide
+  `-tun-dev`/`-listen-port` on Harbor → every bundle, default `nebula1`/`4242`). Remaining:
+  exercise additive `pilot install` for a 2nd mesh end-to-end, the best-effort disjoint-CIDR
+  warning, and (with Phase 2) one org root federating N meshes.
 - **Phase 4 — cross-platform.** Implement the service-installer abstraction for **launchd**
   (the iMac) and Windows SCM; sign/notarize the one universal binary per platform.
 

@@ -137,6 +137,35 @@ func TestRenderNebulaConfigBlocklist(t *testing.T) {
 	}
 }
 
+// TestRenderNebulaConfigTunDevPort proves the mesh-wide TUN device + listen port
+// thread from the signed bundle into the rendered config (so a multi-mesh host gets
+// distinct values per mesh), and that an empty/zero bundle keeps the nebula1/4242
+// defaults (backward compatible for legacy bundles).
+func TestRenderNebulaConfigTunDevPort(t *testing.T) {
+	b := Bundle{
+		Device:     Device{Name: "gitlab", OverlayIP: "10.45.0.7"},
+		TunDev:     "nebula-prod",
+		ListenPort: 4243,
+	}
+	out, err := RenderNebulaConfig(b, "/ca.crt", "/host.crt", "/host.key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := string(out); !strings.Contains(s, "nebula-prod") || !strings.Contains(s, "4243") {
+		t.Fatalf("rendered config missing mesh tun/port (nebula-prod / 4243):\n%s", s)
+	}
+
+	// Unset -> the renderer's nebula1/4242 defaults (legacy/single-mesh bundles).
+	b.TunDev, b.ListenPort = "", 0
+	out2, err := RenderNebulaConfig(b, "/ca.crt", "/host.crt", "/host.key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := string(out2); !strings.Contains(s, "nebula1") || !strings.Contains(s, "4242") {
+		t.Fatalf("unset tun/port must default to nebula1/4242:\n%s", s)
+	}
+}
+
 func TestVerifyWrongKeyFails(t *testing.T) {
 	signing, _ := signer.NewSoftwareBackend()
 	other, _ := signer.NewSoftwareBackend()

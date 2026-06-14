@@ -63,9 +63,16 @@ type Bundle struct {
 	// handshake with a blocklisted fingerprint (§4.7). It rides inside the signed
 	// payload, so tampering breaks bundle verification. Sourced from the active
 	// revocations at bundle-build time; ordered for deterministic output.
-	Blocklist      []string `json:"blocklist,omitempty"`
-	NotAfter       string   `json:"not_after"`
-	NextRenewAfter string   `json:"next_renew_after,omitempty"`
+	Blocklist []string `json:"blocklist,omitempty"`
+	// TunDev + ListenPort are the mesh-wide nebula TUN device name and UDP listen
+	// port. They ride the signed bundle so a host on MULTIPLE meshes (a bridge node)
+	// gets a distinct device + port per mesh and its nebula instances don't collide.
+	// Empty/zero -> the renderer's nebula1/4242 defaults, so legacy bundles are
+	// unaffected (omitempty keeps them out of older payloads).
+	TunDev         string `json:"tun_dev,omitempty"`
+	ListenPort     int    `json:"listen_port,omitempty"`
+	NotAfter       string `json:"not_after"`
+	NextRenewAfter string `json:"next_renew_after,omitempty"`
 }
 
 // RenderNebulaConfig renders a bundle into a nebula config.yml: lighthouses +
@@ -78,6 +85,8 @@ func RenderNebulaConfig(b Bundle, caPath, certPath, keyPath string) ([]byte, err
 		lhs[i] = nebulaconfig.Lighthouse{OverlayIP: l.OverlayIP, PublicAddrs: l.PublicAddrs}
 	}
 	v := nebulaconfig.Values{Lighthouses: lhs, CACertPath: caPath, CertPath: certPath, KeyPath: keyPath}
+	v.TunDev = b.TunDev         // mesh-wide; "" -> Defaults() fills nebula1
+	v.ListenPort = b.ListenPort // mesh-wide; 0 -> Defaults() fills 4242
 	v.Defaults()
 	if b.Firewall != nil {
 		v.Inbound = b.Firewall.Inbound
