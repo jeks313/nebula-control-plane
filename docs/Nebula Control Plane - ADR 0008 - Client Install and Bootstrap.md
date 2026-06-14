@@ -39,9 +39,11 @@ and multi-mesh design below.
 org-signed meshinfo from the gateway, enrolls, writes a persistent systemd service, and
 hands off to `supervise` — per-mesh, additive, from a universal signed binary.**
 
-- **Input = the gateway URL** (a packed *token* is an optional convenience envelope over it).
-  The gateway serves a public **`/v1/meshinfo`**: `{mesh id, config-signing pin, accepted
-  auth methods, overlay CIDR, name/group policy}`, **signed by an org-root key**.
+- **Input = a console-generated, org-signed meshinfo artifact (token).** The **admin console**
+  (mesh-only, authenticated) mints + signs the artifact and the admin distributes it; it
+  carries only `{mesh id, config-signing pin, gateway enroll URL, accepted auth methods}`,
+  **signed by an org-root key**. There is **no public `/v1/meshinfo` on the gateway** — the
+  gateway stays enroll-only, so nothing pre-auth leaks the mesh's topology.
 - **Trust anchor = an org-root key, pinned at install on a *universal* binary.** The org
   root's public half is a **pinned trust bundle** on the host (established once, on first
   install); its private half lives in **KMS** (ADR 0007) and the **admin console** uses it
@@ -77,6 +79,14 @@ Why this shape:
   freely distributable (email, CI var, MDM, paste, QR). Its integrity rides the **signature**,
   not the channel — a hostile channel can't tamper with it. Leaking it costs nothing:
   possessing it only lets someone *attempt* enrollment, which still hits the **auth gate**.
+- **Minimal pre-auth disclosure; the console is the mint point.** The artifact is *generated
+  and served by the admin console* (mesh-only, authenticated), then handed to the host — it is
+  **not** exposed by a public gateway endpoint, so a scanner hitting the public edge learns
+  nothing new. It carries only low-sensitivity fields (a public pin, the mesh id, the enroll
+  URL, the auth methods); the **sensitive topology — overlay CIDR + group policy — is never
+  pre-auth.** Those already arrive in the **post-enrollment signed bundle**, disclosed only
+  after the host authenticates and is admitted. (A brand-new host can't reach the mesh-only
+  console itself — the admin downloads the artifact from the console and distributes it.)
 - **Auth is the separate, revocable gate.** aws-sigv4 / SSO / a join key actually decides
   admission — and is revocable (revoke the key, untrust the role) independently of the
   meshinfo.
@@ -148,13 +158,16 @@ CA/cert/config, and overlay IP. Install is therefore **per-mesh, additive, names
 
 ## The command in detail
 
-`pilot install <gateway-url | token>` `[-join-key …] [-name …] [-groups …] [-mesh <id>]`:
+`pilot install <token>` `[-join-key …] [-name …] [-groups …] [-mesh <id>]` — where `<token>`
+is the console-generated, org-signed meshinfo artifact (a string or a file path):
 
 1. **Pre-flight:** `clock-check` (fail-closed on skew — identity ops need a sane clock).
 2. **Pin the org root** (first install only): fetch the org pubkey, fingerprint-confirm (or
    read a pre-shared trust file); add to the host's trust bundle.
-3. **Fetch + verify `/v1/meshinfo`** from the gateway against the pinned org root → learn the
-   mesh id, the config-signing pin, accepted auth, overlay CIDR.
+3. **Verify the install artifact** (the console-generated org-signed meshinfo, passed to
+   `install`) against the pinned org root → learn the mesh id, the config-signing pin, the
+   gateway enroll URL, and accepted auth. (Overlay CIDR + groups are **not** here — they come
+   post-auth in the enrollment bundle.)
 4. **Detect state** for this mesh id: *fresh* → continue; *key-but-no-cert* → resume at
    enroll; *fully installed* → no-op / `status`. `init` never overwrites an existing host key.
 5. **Set up the namespace:** state dir, render config, `init` the host key.
@@ -174,7 +187,7 @@ Lifecycle siblings: `pilot status` (installed? enrolled? healthy? per mesh), `pi
 
 | Decision | Options | Verdict |
 |---|---|---|
-| **Bootstrap input** | gateway URL + signed `/v1/meshinfo` · packed token · explicit flags | **URL primary** (keyless needs nothing else); token = convenience envelope over it; flags = the underlying mechanism. |
+| **Bootstrap input** | **console-generated signed artifact** · explicit flags · public gateway endpoint | **Console artifact** — minted/served by the (authenticated) console, distributed by the admin; flags = the underlying mechanism; a **public endpoint is rejected** (it leaks topology pre-auth). |
 | **Anchor delivery** | compile-time embed · **pin at install** · vendor-root chain | **Pin at install** — universal binary, sign once per platform; embed forces per-org signing; vendor-chain needs a central CA we don't have. |
 | **Pin establishment** | pure TOFU · **fingerprint-confirm** · pre-shared (MDM) | **Fingerprint-confirm** default; pre-shared for hands-free/hardened; pure-TOFU only behind HTTPS for low-security. |
 | **Multi-mesh service** | **N templated `pilot@<mesh>`** · one pilot, many meshes | **N services** — independent lifecycle/self-update/isolation; supervise unchanged. |
@@ -187,10 +200,11 @@ Lifecycle siblings: `pilot status` (installed? enrolled? healthy? per mesh), `pi
   enroll → write+enable `pilot@<mesh>.service` → supervise; idempotent detection; `status` +
   `uninstall`. Per-mesh namespacing in the on-disk layout from the start (even though only one
   mesh is exercised).
-- **Phase 2 — org-signed meshinfo + trust pinning.** Gateway `/v1/meshinfo` (signed); console
-  "Generate installer" (signs with the org KMS key); pilot pins the org root (bundle +
-  fingerprint-confirm) and verifies meshinfo; the per-mesh pin comes from meshinfo (supersede
-  ADR 0003's in-pilot pin). Add the org-root KMS key + IAM to `deploy/prod` (ADR 0007).
+- **Phase 2 — org-signed meshinfo + trust pinning.** The **console** "Generate installer"
+  mints + serves the org-signed artifact (signs with the org KMS key) — no public gateway
+  endpoint; pilot pins the org root (bundle + fingerprint-confirm) and verifies the artifact;
+  the per-mesh pin comes from the artifact (supersede ADR 0003's in-pilot pin); topology +
+  groups stay in the post-auth bundle. Add the org-root KMS key + IAM to `deploy/prod` (ADR 0007).
 - **Phase 3 — multi-mesh.** Exercise additive `pilot install` for a 2nd mesh; collision +
   disjoint-CIDR guards; templated `pilot@<mesh>`; one org root federating N meshes.
 - **Phase 4 — cross-platform.** Implement the service-installer abstraction for **launchd**
@@ -204,8 +218,9 @@ Lifecycle siblings: `pilot status` (installed? enrolled? healthy? per mesh), `pi
   federates all meshes; the often-rotated keys stay off the clients.
 - **+** Multi-mesh (bridge hosts) is first-class, not a bolt-on.
 - **+** Almost entirely orchestration of existing `pilot` subcommands; the genuinely new code
-  is the service installer, the per-mesh namespacing, the org-root pin/verify, the gateway
-  `/v1/meshinfo`, and the console "Generate installer" action.
+  is the service installer, the per-mesh namespacing, the org-root pin/verify, and the console
+  "Generate installer" action (mint + serve the signed artifact). The public gateway is
+  untouched.
 - **−** A one-time per-host trust step (the org-root pin) — mitigated by fingerprint-confirm /
   pre-shared trust files; not blind TOFU.
 - **−** A new long-lived key to custody (the org root) — but in KMS, rarely used, rotated
@@ -218,7 +233,10 @@ Lifecycle siblings: `pilot status` (installed? enrolled? healthy? per mesh), `pi
 ## Open questions to resolve before building
 
 1. **Meshinfo format + signature envelope** — JWS reusing the config-signing `kid` pattern?
-   What exact fields, and how the gateway exposes it pre-mesh (it's the public edge, ADR 0005).
+   Lock the **minimal** field set (pin + mesh id + enroll URL + auth methods only); confirm
+   the console generation/download UX (the admin mints + distributes the artifact) and that
+   topology/groups stay in the post-auth bundle. *(The "public gateway endpoint" option is
+   rejected — resolved.)*
 2. **Token envelope** — is the packed token just base64(JSON of url+join-key+pin), and does it
    carry its own org signature, or only wrap the (already-signed) meshinfo?
 3. **Mesh identity** — is `<mesh-id>` the CA fingerprint, a console-assigned name, or both?
@@ -235,8 +253,10 @@ Lifecycle siblings: `pilot status` (installed? enrolled? healthy? per mesh), `pi
 - **ADR 0003 (self-update & distribution)** — the steady state this on-ramps to; `install`
   ends by handing off to `supervise`. **Refines** 0003's "config-signing key pinned in pilot"
   → the **org root** is what's pinned (multi-mesh-correct); the per-mesh pin rides meshinfo.
-- **ADR 0005 (pull-based gateways)** — the gateway gains the public **`/v1/meshinfo`**
-  endpoint alongside `/v1/nonce`/`/v1/enroll`.
+- **ADR 0005 (pull-based gateways)** — the gateway is **unchanged** (enroll-only:
+  `/v1/nonce`, `/v1/enroll`, `/v1/enroll/{id}`). Meshinfo is generated + served by the
+  **admin console**, *not* the public gateway, so pre-auth disclosure at the edge stays
+  minimal (no overlay CIDR / group taxonomy exposed to the internet).
 - **ADR 0007 (production deploy)** — the org-root key is a KMS `signer.Backend` key
   (reuses that work); the console signs meshinfo with it; `deploy/prod` provisions it.
 - **ADR 0004 (SSO-driven user enrollment)** — `install`'s auth-method indirection (meshinfo's
