@@ -129,10 +129,12 @@ gateway serves public enroll + a Harbor-only collect port over a local queue) +
 back) + imac join key → **core-api** (renew/heartbeat, boot-verifies its control-plane
 cert) + **admin console** (mock-IdP), both bound to Harbor's overlay IP (mesh-only).
 
-It prints the gateway URL, the **config-signing pin** (`config-signing.pub`), the imac
-join secret, and the exact enroll commands: the **cloud client joins keyless via
-`aws-sigv4` attestation** (its IAM role; auto-issued), and the **off-cloud iMac** joins
-via a join key with **manual approval** (approve it in the console or by CLI). The
+The **cloud client is brought up automatically via `pilot install`** (ADR 0008): keyless
+`aws-sigv4` attestation over the in-VPC gateway → a persistent `pilot@default` service
+supervising nebula (this dogfoods `pilot install`, replacing the old manual `enroll` +
+`systemd-run supervise`). It then prints the **config-signing pin** (`config-signing.pub`),
+the imac join secret, and the **off-cloud iMac**'s `pilot install` command (join key +
+**manual approval** — approve in the console or by CLI, then re-run `install`). The
 **admin console** is mesh-only — reach it from an enrolled member at
 `http://<harbor-overlay>:8445`, or SSH-tunnel ports 8445+8446 to Harbor (the out-of-band
 admin path). (Re-run with `--skip-build` to skip rebuilding.)
