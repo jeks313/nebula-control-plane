@@ -166,6 +166,15 @@ which is exactly what the pull/off-mesh model grants it.
   and runs `harbor collect` (replacing `enroll worker`). README + node `NEXT-STEPS`
   updated. *(Not applied to live AWS here — run `terraform apply` + the bootstrap to
   demo; expect first-run iteration on a real apply.)*
+  **Network isolation (2026-06-14 refinement):** moved off the single default subnet
+  to a **dedicated VPC with per-tier subnets** (control/edge/mesh/client). The
+  authoritative control is **SG egress lockdown** (stateful): the gateway may egress
+  only bootstrap + DNS — no Nebula UDP, no SSH-out, no path into harbor/mesh — yet
+  still answers the public enroll + Harbor's pull (both inbound), so a compromised
+  gateway *initiates nothing*. Defense-in-depth: a restrictive **NACL on the edge
+  subnet** (no UDP egress except DNS). The lighthouse stays a mesh member (must keep
+  Nebula UDP to harbor) so it can't be fully fenced; its egress is still tightened.
+  *(NACLs are stateless — confirm return-traffic rules on a real apply.)*
 - **Phase 4 — hardening.** Long-poll for low-latency enrollment; per-gateway rate/
   depth caps + alerting; gateway health in the fleet view.
 

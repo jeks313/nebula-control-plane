@@ -22,6 +22,17 @@ variable "instance_type" {
   default     = "t3.micro"
 }
 
+variable "vpc_cidr" {
+  description = "CIDR for the dedicated lab VPC. Tiered /24 subnets are carved from it (control/edge/mesh/client). Pick a range that won't collide with your other networks."
+  type        = string
+  default     = "10.99.0.0/16"
+
+  validation {
+    condition     = can(cidrhost(var.vpc_cidr, 0))
+    error_message = "vpc_cidr must be a valid CIDR, e.g. 10.99.0.0/16."
+  }
+}
+
 variable "ssh_public_key_path" {
   description = "Path to YOUR personal SSH *public* key; the matching private key is how you log in."
   type        = string
