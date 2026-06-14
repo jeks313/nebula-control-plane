@@ -354,6 +354,9 @@ rsh "$HB_IP" "set -e
   # pilot init); make the dir traversable so it can read the 0644 host.crt (host.key
   # stays 0600 root). Without this core-api crashes at boot with 'permission denied'.
   sudo chmod o+rx /etc/nebula
+  # admin-api needs a local queue key (issuance/approval queue); the bootstrap never minted
+  # it, so ncp-admin (the console + mock-IdP) crashed at boot. Mint it here, like hmac.b64.
+  umask 077; [ -f ~/ncp/queue.b64 ] || openssl rand 32 | basenc --base64url | tr -d '=' > ~/ncp/queue.b64
   # core-api: renew + heartbeat over the mesh, verifying its own control-plane cert at boot.
   sudo systemd-run --uid=$SSH_USER --gid=$SSH_USER --unit ncp-core --collect /usr/local/bin/harbor core-api \
     -dsn \$DSN -ca-cert \$G/ca.crt -ca-key \$G/ca.key -config-key \$G/config-signing.key \
