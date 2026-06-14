@@ -45,10 +45,10 @@ func Render(s Spec) string {
 // Install writes the systemd template unit + this mesh's EnvironmentFile, then
 // enables and starts the per-mesh instance. Idempotent.
 func Install(s Spec) error {
-	if err := os.WriteFile(UnitTemplatePath, []byte(templateUnit), 0644); err != nil {
+	if err := os.WriteFile(UnitTemplatePath, []byte(templateUnit), 0o644); err != nil {
 		return fmt.Errorf("write unit %s: %w", UnitTemplatePath, err)
 	}
-	if err := os.WriteFile(s.envFile(), []byte(RenderEnv(s)), 0640); err != nil {
+	if err := os.WriteFile(s.envFile(), []byte(RenderEnv(s)), 0o640); err != nil {
 		return fmt.Errorf("write env %s: %w", s.envFile(), err)
 	}
 	if err := systemctl("daemon-reload"); err != nil {

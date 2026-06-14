@@ -1,0 +1,72 @@
+# golangci-lint v2 config for the Nebula Control Plane.
+# Run: golangci-lint run ./cmd/... ./internal/...
+# (spike/ is excluded — it holds experimental code + a vendored nebula source copy.)
+version: "2"
+
+run:
+  timeout: 5m
+  build-tags:
+    - linux
+
+linters:
+  # `standard` = errcheck, govet, ineffassign, staticcheck, unused.
+  default: standard
+  enable:
+    - revive       # idiomatic style (successor to golint)
+    - gocritic     # opinionated correctness / style / performance checks
+    - misspell     # typos in comments + strings
+    - unconvert    # redundant type conversions
+    - errorlint    # correct error wrapping / comparison (this codebase uses %w heavily)
+    - bodyclose    # HTTP response bodies that are never closed
+    - copyloopvar  # leftover pre-1.22 loop-variable copies
+    - nilerr       # returning nil after a non-nil error check
+  settings:
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+      disabled-checks:
+        # Pass-by-value perf micro-nits: this codebase deliberately uses value
+        # semantics for small config/request structs. Re-enable case-by-case if a
+        # genuinely large hot-path struct shows up.
+        - hugeParam
+        - rangeValCopy
+        # Harmless in leaf helpers (queryInt, nextBackoff) and noisy now that
+        # min/max are builtins; the shadowed scope never calls the builtin.
+        - builtinShadow
+        # Conflicts with the common "prefer unnamed returns for short funcs" idiom.
+        - unnamedResult
+    revive:
+      rules:
+        - name: exported            # exported identifiers want doc comments
+        - name: unused-parameter
+          disabled: true            # too noisy for a first pass
+        - name: unexported-return
+          disabled: true
+  exclusions:
+    generated: lax
+    presets:
+      - common-false-positives
+      - std-error-handling
+    paths:
+      - spike
+    rules:
+      # Tests may ignore errors, leak response bodies, and skip doc comments.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - revive
+          - gocritic
+          - bodyclose
+      # TableName() is gorm's Tabler interface boilerplate — no doc comment needed.
+      - linters: [revive]
+        text: 'exported method \w+\.TableName should have comment'
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  exclusions:
+    paths:
+      - spike

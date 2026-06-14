@@ -87,7 +87,7 @@ func Init(p InitParams) (InitResult, error) {
 	if err != nil {
 		return res, err
 	}
-	if err := os.WriteFile(p.Layout.Config(), cfg, 0644); err != nil {
+	if err := os.WriteFile(p.Layout.Config(), cfg, 0o644); err != nil {
 		return res, fmt.Errorf("write config: %w", err)
 	}
 	return res, nil

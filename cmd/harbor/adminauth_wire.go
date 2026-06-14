@@ -214,7 +214,7 @@ func loadIdPMetadata(ctx context.Context, metaURL, metaFile string) *saml.Entity
 		}
 		data = b
 	} else {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, metaURL, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, metaURL, http.NoBody)
 		if err != nil {
 			fatalf("admin-api: bad -saml-idp-metadata-url: %v", err)
 		}

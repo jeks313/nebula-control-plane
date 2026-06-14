@@ -2,6 +2,7 @@ package rollout_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -89,7 +90,7 @@ func TestConcurrentLanesAndBlocklistFreeze(t *testing.T) {
 	if _, err := eng.Start(ctx, rollout.StartConfig{
 		Lane: rollout.LaneBlocklist, TargetVersion: 2, PrevVersion: 1, Hosts: hosts,
 		Observe: time.Minute, MissingAfter: time.Minute,
-	}); err != rollout.ErrActiveExists {
+	}); !errors.Is(err, rollout.ErrActiveExists) {
 		t.Fatalf("2nd blocklist start err = %v, want ErrActiveExists", err)
 	}
 
@@ -262,7 +263,7 @@ func TestOnlyOneActive(t *testing.T) {
 		TargetVersion: 3, PrevVersion: 2, Hosts: []string{"100.64.0.2"},
 		Observe: time.Minute, MissingAfter: time.Minute,
 	})
-	if err != rollout.ErrActiveExists {
+	if !errors.Is(err, rollout.ErrActiveExists) {
 		t.Fatalf("second start err = %v, want ErrActiveExists", err)
 	}
 }

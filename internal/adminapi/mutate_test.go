@@ -31,7 +31,7 @@ func plainSrv(t *testing.T, role string) *httptest.Server {
 
 func req(t *testing.T, ts *httptest.Server, method, path, actor string, body any) (int, map[string]any) {
 	t.Helper()
-	var rdr *bytes.Reader = bytes.NewReader(nil)
+	var rdr = bytes.NewReader(nil)
 	if body != nil {
 		b, _ := json.Marshal(body)
 		rdr = bytes.NewReader(b)

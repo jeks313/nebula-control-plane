@@ -145,7 +145,7 @@ func TestVerifyHappyPath(t *testing.T) {
 func TestVerifyNonceMismatch(t *testing.T) {
 	sts := fakeSTS(t, "123456789012", "arn", false)
 	defer sts.Close()
-	if _, err := Verify(context.Background(), goodPres(t), "WRONG-nonce", "ph-1", VerifyConfig{Endpoint: sts.URL}); err != ErrBinding {
+	if _, err := Verify(context.Background(), goodPres(t), "WRONG-nonce", "ph-1", VerifyConfig{Endpoint: sts.URL}); !errors.Is(err, ErrBinding) {
 		t.Fatalf("err = %v, want ErrBinding", err)
 	}
 }
@@ -161,7 +161,7 @@ func TestVerifyUnsignedBinding(t *testing.T) {
 	authz = strings.Replace(authz, "x-harbor-nonce;", "", 1)
 	authz = strings.Replace(authz, "x-harbor-pubkey-hash;", "", 1)
 	p.Headers["Authorization"] = authz
-	if _, err := Verify(context.Background(), p, "nonce-1", "ph-1", VerifyConfig{Endpoint: sts.URL}); err != ErrUnsignedBinding {
+	if _, err := Verify(context.Background(), p, "nonce-1", "ph-1", VerifyConfig{Endpoint: sts.URL}); !errors.Is(err, ErrUnsignedBinding) {
 		t.Fatalf("err = %v, want ErrUnsignedBinding", err)
 	}
 }
@@ -170,7 +170,7 @@ func TestVerifyUnsignedBinding(t *testing.T) {
 func TestVerifySSRF(t *testing.T) {
 	p := goodPres(t)
 	p.URL = "https://evil.example.com/"
-	if _, err := Verify(context.Background(), p, "nonce-1", "ph-1", VerifyConfig{Endpoint: "http://127.0.0.1:0"}); err != ErrBadEndpoint {
+	if _, err := Verify(context.Background(), p, "nonce-1", "ph-1", VerifyConfig{Endpoint: "http://127.0.0.1:0"}); !errors.Is(err, ErrBadEndpoint) {
 		t.Fatalf("err = %v, want ErrBadEndpoint", err)
 	}
 }

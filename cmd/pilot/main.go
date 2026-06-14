@@ -473,7 +473,7 @@ func cmdInstall(args []string) {
 	}
 
 	// 3. Place the pin where the service's `supervise` reads it (-config-pub).
-	if err := os.WriteFile(filepath.Join(base, "config-signing.pub"), pubPEM, 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(base, "config-signing.pub"), pubPEM, 0o644); err != nil {
 		fatalf("install: write config-signing.pub: %v", err)
 	}
 

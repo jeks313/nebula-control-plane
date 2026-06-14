@@ -160,7 +160,7 @@ func TestDeviceProvenanceLatestIssued(t *testing.T) {
 	_, jk, _ := joinkey.Create(context.Background(), s, joinkey.Params{Name: "old-key", Groups: []string{"x"}}, provNow)
 	good := provNow.Add(30 * 24 * time.Hour)
 	hbFull(t, s.DB, "100.64.0.9", "rehomed", good, provNow, 0, "ok")
-	issued(t, s, "old", "100.64.0.9", jk.ID, "", "", "", "", []string{"x"})       // older (lower id)
+	issued(t, s, "old", "100.64.0.9", jk.ID, "", "", "", "", []string{"x"})                  // older (lower id)
 	issued(t, s, "new", "100.64.0.9", 0, "aws", "111122223333", "arn", "r", []string{"web"}) // newer (higher id)
 
 	_, body := do(t, h, "GET", "/admin/v1/devices", "alice")

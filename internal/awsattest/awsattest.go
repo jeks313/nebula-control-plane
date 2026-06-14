@@ -167,7 +167,7 @@ func sign(creds Credentials, region, service, method, path, query string, header
 // canonicalKey finds the original-cased key in headers matching lowercase lk.
 func canonicalKey(headers map[string]string, lk string) string {
 	for k := range headers {
-		if strings.ToLower(k) == lk {
+		if strings.EqualFold(k, lk) {
 			return k
 		}
 	}
@@ -195,7 +195,7 @@ func FetchInstanceCredentials(ctx context.Context, cfg IMDSConfig) (Credentials,
 	}
 
 	// IMDSv2: get a session token first (PUT), then use it on every GET.
-	tokReq, _ := http.NewRequestWithContext(ctx, "PUT", base+"/latest/api/token", nil)
+	tokReq, _ := http.NewRequestWithContext(ctx, "PUT", base+"/latest/api/token", http.NoBody)
 	tokReq.Header.Set("X-aws-ec2-metadata-token-ttl-seconds", "60")
 	tokResp, err := client.Do(tokReq)
 	if err != nil {
@@ -206,7 +206,7 @@ func FetchInstanceCredentials(ctx context.Context, cfg IMDSConfig) (Credentials,
 	token := strings.TrimSpace(string(tokB))
 
 	get := func(path string) (string, error) {
-		r, _ := http.NewRequestWithContext(ctx, "GET", base+path, nil)
+		r, _ := http.NewRequestWithContext(ctx, "GET", base+path, http.NoBody)
 		if token != "" {
 			r.Header.Set("X-aws-ec2-metadata-token", token)
 		}
@@ -320,7 +320,7 @@ func Verify(ctx context.Context, pres PresignedRequest, expectedNonce, expectedP
 	resp, err := client.Do(req)
 	if err != nil {
 		// Transport failure (STS unreachable) — transient, not a rejection.
-		return Identity{}, fmt.Errorf("%w: %v", ErrSTSUnavailable, err)
+		return Identity{}, fmt.Errorf("%w: %w", ErrSTSUnavailable, err)
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))

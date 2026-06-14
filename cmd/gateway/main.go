@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/base64"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -124,7 +125,7 @@ func main() {
 	}
 
 	log.Info("gateway listening", "addr", *addr, "scheme", httpserve.Scheme(*tlsCert, *tlsKey), "version", version, "access", "public/credential-less")
-	if err := httpserve.Serve(srv, *tlsCert, *tlsKey); err != nil && err != http.ErrServerClosed {
+	if err := httpserve.Serve(srv, *tlsCert, *tlsKey); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		fatalf("%v", err)
 	}
 	log.Info("gateway stopped")
@@ -238,7 +239,7 @@ func readKey(path string) ([]byte, error) {
 }
 
 func trimSpace(s string) string {
-	for len(s) > 0 && (s[len(s)-1] == '\n' || s[len(s)-1] == '\r' || s[len(s)-1] == ' ' || s[len(s)-1] == '\t') {
+	for s != "" && (s[len(s)-1] == '\n' || s[len(s)-1] == '\r' || s[len(s)-1] == ' ' || s[len(s)-1] == '\t') {
 		s = s[:len(s)-1]
 	}
 	return s

@@ -91,7 +91,7 @@ func Validate(c Config) error {
 // resolved group set (DefaultGroups ∪ the matched account's groups, deduped+sorted) and
 // the auto-issue posture. ok=false means DENY — an identity matching no entry may not
 // attest (fail closed).
-func (c Config) MatchAWS(id awsattest.Identity) (groups []string, autoIssue bool, ok bool) {
+func (c Config) MatchAWS(id awsattest.Identity) (groups []string, autoIssue, ok bool) {
 	for _, a := range c.AWS {
 		gate := awsattest.Policy{Accounts: []string{a.Account}, ARNPatterns: a.ARNPatterns}
 		if gate.Check(id) == nil {

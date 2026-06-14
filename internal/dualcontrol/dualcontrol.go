@@ -239,7 +239,7 @@ func (c *Controller) Approve(ctx context.Context, id int64, actor string) (Chang
 			c.finalize(ctx, id, StateFailed)
 			c.audit(ctx, actor, "dualcontrol-commit-failed", c.target(ch), cerr.Error())
 			out, _ := c.reload(ctx, id)
-			return out, fmt.Errorf("%w: %v", ErrCommit, cerr)
+			return out, fmt.Errorf("%w: %w", ErrCommit, cerr)
 		}
 	}
 	c.finalize(ctx, id, StateCommitted)

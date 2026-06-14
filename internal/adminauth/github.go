@@ -135,7 +135,7 @@ func (a *GitHubAuthenticator) Exchange(ctx context.Context, code, nonce, verifie
 }
 
 func (a *GitHubAuthenticator) getJSON(ctx context.Context, client *http.Client, path string, v any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.apiBase+path, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.apiBase+path, http.NoBody)
 	if err != nil {
 		return fmt.Errorf("adminauth: github %s: %w", path, err)
 	}

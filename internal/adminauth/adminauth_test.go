@@ -3,6 +3,7 @@ package adminauth_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -207,12 +208,12 @@ func TestSessionStore(t *testing.T) {
 		t.Fatalf("session mismatch: %+v", got)
 	}
 	// A made-up token never resolves.
-	if _, err := ss.Lookup(context.Background(), "not-a-real-token"); err != adminauth.ErrNoSession {
+	if _, err := ss.Lookup(context.Background(), "not-a-real-token"); !errors.Is(err, adminauth.ErrNoSession) {
 		t.Fatalf("bogus token err = %v, want ErrNoSession", err)
 	}
 	// Past expiry → ErrNoSession.
 	now = now.Add(2 * time.Hour)
-	if _, err := ss.Lookup(context.Background(), token); err != adminauth.ErrNoSession {
+	if _, err := ss.Lookup(context.Background(), token); !errors.Is(err, adminauth.ErrNoSession) {
 		t.Fatalf("expired lookup err = %v, want ErrNoSession", err)
 	}
 	// Revoke is idempotent.
