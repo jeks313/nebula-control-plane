@@ -10,10 +10,36 @@ Four small EC2 nodes for trying the Nebula control plane end to end:
 Plus your **off-cloud iMac** (not managed here) which enrolls via a **join key
 with manual approval** — the off-cloud path. All nodes run Amazon Linux 2023, use
 **your personal SSH key**, get an **instance IAM role** (ready for M5 sigv4
-attestation), are **IMDSv2-only**, and have **encrypted EBS**. Security groups are
-**split by role**: only the lighthouse's UDP discovery and the gateway's TCP enroll
-port face the internet; the gateway's collect port is reachable **only from Harbor's
-security group**, and Core's API (8444) is overlay-only. SSH is locked to your IP.
+attestation), are **IMDSv2-only**, and have **encrypted EBS**.
+
+### Network isolation
+
+The nodes live in a **dedicated VPC** (`vpc_cidr`, default `10.99.0.0/16`) with a
+**per-tier subnet** each — `control` (harbor), `edge` (gateway), `mesh` (lighthouse),
+`client` — so the untrusted, internet-facing gateway has its **own network**, fenced
+from the control tier at two layers:
+
+- **Security groups (stateful, the authoritative control).** Egress is locked per
+  role. The **gateway** may egress **only** bootstrap (TCP 443/80) + DNS — **no
+  Nebula UDP, no SSH-out, nothing toward harbor/mesh**; because SGs are stateful, it
+  still answers the public enroll *and* Harbor's pull (both inbound) with zero
+  egress. So a compromised gateway **cannot initiate** any connection into harbor or
+  the mesh. Harbor egress is limited to the gateway's collect port + mesh UDP +
+  bootstrap; lighthouse/client to mesh UDP + bootstrap. Harbor reaches the gateway
+  (it **pulls**); the gateway never reaches harbor.
+- **NACLs (stateless, defense-in-depth).** The `edge` subnet carries a restrictive
+  NACL that, in particular, permits **no UDP egress except DNS** — an L3 backstop to
+  the SG so the off-mesh gateway can't send Nebula UDP into the control/mesh tiers
+  even if an SG rule were loosened. The trusted mesh tiers keep the default NACL (their
+  data plane uses arbitrary UDP ports that are unsafe to NACL; their egress is locked
+  at the SG).
+
+Only the **lighthouse's UDP discovery** and the **gateway's TCP enroll port** face the
+internet; the gateway's collect port is reachable **only from harbor's SG**; core-api
+(8444) + console (8445) are overlay-only (in no SG). SSH is locked to your IP. The
+**lighthouse** stays a mesh member, so it must keep Nebula UDP to/from harbor — it
+can't be fully fenced from harbor without leaving the mesh; its SG egress is still
+tightened to mesh UDP + bootstrap.
 
 ---
 
@@ -114,8 +140,9 @@ host also runs **Tailscale** — Tailscale installs an nftables rule that drops
 nebula data plane (handshakes succeed, pings don't). This was hit and fixed live.
 
 ## What it creates
-- 4× `t3.micro` EC2 (Amazon Linux 2023), encrypted root volume, IMDSv2-only; Elastic IPs on lighthouse, harbor + gateway.
-- Four role-split security groups (lighthouse UDP; harbor UDP; gateway public-enroll TCP + a collect-port TCP reachable **only from harbor's SG**; client UDP; SSH locked to your IP). Only the lighthouse UDP + the gateway's enroll TCP face the internet — the gateway's collect port is harbor-only, and core-api (8444), the admin console (8445) and the mock-IdP (8446) are overlay-only, in no security group by design.
+- A **dedicated VPC** (`vpc_cidr`, default `10.99.0.0/16`) + Internet Gateway + a public route table, with **four per-tier /24 subnets** (control/edge/mesh/client). *(This replaces the earlier single-default-subnet layout — `terraform apply` over an old deployment recreates the topology: it destroys the default-VPC nodes and builds the new VPC.)*
+- 4× `t3.micro` EC2 (Amazon Linux 2023), encrypted root volume, IMDSv2-only, one per tier subnet; Elastic IPs on lighthouse, harbor + gateway.
+- Four role-split security groups with **locked egress** (the gateway may egress only bootstrap + DNS — no path into harbor/mesh; harbor/lighthouse/client to mesh UDP + bootstrap), plus a restrictive **NACL on the edge (gateway) subnet** (defense-in-depth: no UDP egress except DNS). Only the lighthouse UDP + the gateway's enroll TCP face the internet; the gateway's collect port is reachable only from harbor's SG; core-api (8444), console (8445), mock-IdP (8446) are overlay-only, in no SG.
 - An EC2 key pair from your `~/.ssh/absolute.pub`.
 - A permission-less IAM role + instance profile (enough for `sts:GetCallerIdentity`).
 

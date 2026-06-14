@@ -8,16 +8,7 @@ data "aws_ssm_parameter" "al2023" {
   name = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
 }
 
-data "aws_vpc" "default" {
-  default = true
-}
-
-data "aws_subnets" "default" {
-  filter {
-    name   = "vpc-id"
-    values = [data.aws_vpc.default.id]
-  }
-}
+# VPC, tiered subnets, and the edge NACL live in network.tf.
 
 # Your personal public key becomes the EC2 key pair. pathexpand handles "~".
 resource "aws_key_pair" "personal" {
@@ -33,7 +24,7 @@ resource "aws_key_pair" "personal" {
 resource "aws_security_group" "lighthouse" {
   name_prefix = "${var.name_prefix}-lighthouse-"
   description = "Lighthouse: public Nebula UDP discovery + admin SSH."
-  vpc_id      = data.aws_vpc.default.id
+  vpc_id      = aws_vpc.main.id
 
   ingress {
     description = "SSH from you"
@@ -49,10 +40,26 @@ resource "aws_security_group" "lighthouse" {
     protocol    = "udp"
     cidr_blocks = ["0.0.0.0/0"]
   }
+  # Locked egress: mesh UDP (data plane + DNS) + bootstrap package fetch. No
+  # arbitrary outbound TCP.
   egress {
+    description = "Nebula data plane + DNS (UDP)"
     from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
+    to_port     = 65535
+    protocol    = "udp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  egress {
+    description = "Bootstrap package fetch (https/http)"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  egress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
   lifecycle {
@@ -63,7 +70,7 @@ resource "aws_security_group" "lighthouse" {
 resource "aws_security_group" "harbor" {
   name_prefix = "${var.name_prefix}-harbor-"
   description = "Harbor: Nebula UDP (mesh node) + admin SSH. The enrollment gateway is now a SEPARATE off-mesh node (ADR 0005) — Harbor reaches OUT to it (egress) and PULLS; it is NOT exposed here. Core API (8444) is overlay-only, NOT here."
-  vpc_id      = data.aws_vpc.default.id
+  vpc_id      = aws_vpc.main.id
 
   ingress {
     description = "SSH from you"
@@ -79,12 +86,33 @@ resource "aws_security_group" "harbor" {
     protocol    = "udp"
     cidr_blocks = ["0.0.0.0/0"]
   }
+  # Locked egress: PULL the gateway's collect port (to the edge subnet — a CIDR,
+  # not the gateway SG, to avoid an SG<->SG dependency cycle) + mesh UDP + bootstrap.
   egress {
-    # Open egress so Harbor can reach the gateway's collect port (ADR 0005: Harbor
-    # initiates the pull) and pull packages at bootstrap.
+    description = "Pull the off-mesh gateway's collect API (ADR 0005)"
+    from_port   = var.collect_port
+    to_port     = var.collect_port
+    protocol    = "tcp"
+    cidr_blocks = [local.tier_cidr["edge"]]
+  }
+  egress {
+    description = "Nebula data plane + DNS (UDP)"
     from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
+    to_port     = 65535
+    protocol    = "udp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  egress {
+    description = "Bootstrap package fetch (https/http)"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  egress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
   lifecycle {
@@ -100,7 +128,7 @@ resource "aws_security_group" "harbor" {
 resource "aws_security_group" "gateway" {
   name_prefix = "${var.name_prefix}-gateway-"
   description = "Enrollment gateway (ADR 0005): public enroll + Harbor-only collect port; NOT on the mesh."
-  vpc_id      = data.aws_vpc.default.id
+  vpc_id      = aws_vpc.main.id
 
   ingress {
     description = "SSH from you"
@@ -123,10 +151,28 @@ resource "aws_security_group" "gateway" {
     protocol        = "tcp"
     security_groups = [aws_security_group.harbor.id]
   }
+  # Locked egress (ADR 0005 "initiates nothing"): ONLY bootstrap fetch + DNS. No
+  # Nebula UDP, no SSH-out, no path into the control/mesh tiers — responses to the
+  # public enroll + Harbor's pull ride the STATEFUL inbound rules, needing no egress.
   egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
+    description = "Bootstrap package fetch (https)"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  egress {
+    description = "Bootstrap package fetch (http)"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  egress {
+    description = "DNS"
+    from_port   = 53
+    to_port     = 53
+    protocol    = "udp"
     cidr_blocks = ["0.0.0.0/0"]
   }
   lifecycle {
@@ -137,7 +183,7 @@ resource "aws_security_group" "gateway" {
 resource "aws_security_group" "client" {
   name_prefix = "${var.name_prefix}-client-"
   description = "Test client: admin SSH + Nebula UDP; no control-plane exposure."
-  vpc_id      = data.aws_vpc.default.id
+  vpc_id      = aws_vpc.main.id
 
   ingress {
     description = "SSH from you"
@@ -153,10 +199,25 @@ resource "aws_security_group" "client" {
     protocol    = "udp"
     cidr_blocks = ["0.0.0.0/0"]
   }
+  # Locked egress: mesh UDP (data plane + DNS) + bootstrap package fetch.
   egress {
+    description = "Nebula data plane + DNS (UDP)"
     from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
+    to_port     = 65535
+    protocol    = "udp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  egress {
+    description = "Bootstrap package fetch (https/http)"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  egress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
   lifecycle {
@@ -208,7 +269,7 @@ resource "aws_instance" "node" {
 
   ami                         = data.aws_ssm_parameter.al2023.value
   instance_type               = var.instance_type
-  subnet_id                   = element(data.aws_subnets.default.ids, 0)
+  subnet_id                   = aws_subnet.tier[local.node_tier[each.key]].id
   key_name                    = aws_key_pair.personal.key_name
   vpc_security_group_ids      = [local.sg_for[each.key]]
   iam_instance_profile        = aws_iam_instance_profile.node.name
@@ -241,7 +302,8 @@ resource "aws_instance" "node" {
 resource "aws_eip" "node" {
   for_each = { for k, v in local.nodes : k => v if v.eip }
 
-  instance = aws_instance.node[each.key].id
-  domain   = "vpc"
-  tags     = { Name = "${var.name_prefix}-${each.key}" }
+  instance   = aws_instance.node[each.key].id
+  domain     = "vpc"
+  tags       = { Name = "${var.name_prefix}-${each.key}" }
+  depends_on = [aws_internet_gateway.igw] # EIP association needs the VPC's IGW attached
 }
