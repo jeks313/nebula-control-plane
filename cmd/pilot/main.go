@@ -377,17 +377,40 @@ func cmdInstall(args []string) {
 	clockServer := fs.String("clock-server", "pool.ntp.org", "NTP server for the pre-flight clock check")
 	maxSkew := fs.Duration("max-skew", 5*time.Second, "max tolerated clock skew (fail-closed)")
 	skipClock := fs.Bool("skip-clock-check", false, "skip the pre-flight clock check (airgapped hosts)")
+	dryRun := fs.Bool("dry-run", false, "preview the resolved paths + service definition, then exit (no enroll, no write, no root)")
 	_ = fs.Parse(args)
 
-	if *gateway == "" || *core == "" || *configPub == "" {
-		fmt.Fprintln(os.Stderr, "pilot install: -gateway, -core and -config-pub are required")
+	if *core == "" {
+		fmt.Fprintln(os.Stderr, "pilot install: -core is required")
+		os.Exit(2)
+	}
+	if !validMeshID(*mesh) {
+		fatalf("install: invalid -mesh %q (letters/digits/_/-, start alphanumeric, <=32 chars)", *mesh)
+	}
+
+	base := filepath.Join(pilotservice.StateRoot, *mesh)
+	layout := paths.New(base)
+	spec := pilotservice.Spec{Mesh: *mesh, StateDir: base, CoreURL: *core, NebulaPath: *nebulaPath}
+
+	// -dry-run: preview the resolved paths + the exact service definition this would
+	// install, then exit. No clock-check, enroll, write, or root — handy on the macOS
+	// path (validate the LaunchDaemon plist with `plutil -lint`) and before committing.
+	if *dryRun {
+		fmt.Printf("install (dry-run) — mesh %q, service %s\n", *mesh, pilotservice.ServiceLabel(*mesh))
+		fmt.Printf("  state dir : %s\n", base)
+		fmt.Printf("  config    : %s\n", layout.Config())
+		fmt.Printf("  pin       : %s\n", filepath.Join(base, "config-signing.pub"))
+		fmt.Printf("  nebula    : %s\n", *nebulaPath)
+		fmt.Printf("--- service definition ---\n%s\n", pilotservice.Render(spec))
+		return
+	}
+
+	if *gateway == "" || *configPub == "" {
+		fmt.Fprintln(os.Stderr, "pilot install: -gateway and -config-pub are required")
 		os.Exit(2)
 	}
 	if *awsSigV4 == (*joinKey != "") { // exactly one credential source
 		fatalf("install: provide either -join-key or -aws-sigv4 (not both, not neither)")
-	}
-	if !validMeshID(*mesh) {
-		fatalf("install: invalid -mesh %q (letters/digits/_/-, start alphanumeric, <=32 chars)", *mesh)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -405,9 +428,6 @@ func cmdInstall(args []string) {
 				r.Offset.Round(time.Millisecond), *maxSkew)
 		}
 	}
-
-	base := filepath.Join(pilotservice.StateRoot, *mesh)
-	layout := paths.New(base)
 
 	pubPEM, err := os.ReadFile(*configPub)
 	if err != nil {

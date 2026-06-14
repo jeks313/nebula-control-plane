@@ -36,6 +36,12 @@ func RenderEnv(s Spec) string {
 		s.Mesh, s.CoreURL, nebula)
 }
 
+// Render returns a preview (for `install -dry-run`) of the service definition this
+// Spec would install: the systemd template unit + the per-mesh EnvironmentFile.
+func Render(s Spec) string {
+	return templateUnit + "\n# --- EnvironmentFile " + s.envFile() + " ---\n" + RenderEnv(s)
+}
+
 // Install writes the systemd template unit + this mesh's EnvironmentFile, then
 // enables and starts the per-mesh instance. Idempotent.
 func Install(s Spec) error {
