@@ -80,8 +80,8 @@ usage:
 
 commands:
   install     one-shot, idempotent host join: clock-check -> init -> enroll ->
-              write+enable a per-mesh systemd service (pilot@<mesh>) -> supervise.
-              Re-runnable; per-mesh (a host can join multiple meshes). Linux/systemd.
+              write+enable a per-mesh service -> supervise. Re-runnable; per-mesh
+              (a host can join multiple meshes). Linux (systemd) + macOS (launchd).
   status      show a mesh's local state (key/cert/config) + service state.
   uninstall   disable+stop a mesh's service (-purge deletes its identity; -all tears
               down every mesh + the shared unit for a full host cleanup).
@@ -363,7 +363,7 @@ func cmdSupervise(args []string) {
 // Harbor's signed bundle; a local override would be reverted by drift control).
 func cmdInstall(args []string) {
 	fs := flag.NewFlagSet("install", flag.ExitOnError)
-	mesh := fs.String("mesh", "default", "mesh id — namespaces the install (/var/lib/pilot/<mesh>, service pilot@<mesh>)")
+	mesh := fs.String("mesh", "default", "mesh id — namespaces the install (per-mesh state dir + service)")
 	gateway := fs.String("gateway", "", "enrollment gateway base URL (required)")
 	core := fs.String("core", "", "Core API base URL over the mesh, for renew/heartbeat (required)")
 	configPub := fs.String("config-pub", "", "pinned config-signing public key PEM (required)")
@@ -453,8 +453,8 @@ func cmdInstall(args []string) {
 	}); err != nil {
 		fatalf("install: service: %v", err)
 	}
-	fmt.Printf("install: service pilot@%s enabled + started (supervising nebula; renew/heartbeat to %s)\n", *mesh, *core)
-	fmt.Printf("  status: pilot status -mesh %s    logs: journalctl -u pilot@%s -f\n", *mesh, *mesh)
+	fmt.Printf("install: service %s enabled + started (supervising nebula; renew/heartbeat to %s)\n", pilotservice.ServiceLabel(*mesh), *core)
+	fmt.Printf("  status: pilot status -mesh %s    logs: %s\n", *mesh, pilotservice.LogHint(*mesh))
 }
 
 // cmdStatus reports a mesh's local identity/config state + its service state.
@@ -493,9 +493,9 @@ func cmdUninstall(args []string) {
 		}
 		for _, m := range meshes {
 			if err := pilotservice.Uninstall(m); err != nil {
-				fmt.Fprintf(os.Stderr, "uninstall: pilot@%s: %v\n", m, err)
+				fmt.Fprintf(os.Stderr, "uninstall: %s: %v\n", pilotservice.ServiceLabel(m), err)
 			} else {
-				fmt.Printf("uninstall: service pilot@%s disabled + stopped\n", m)
+				fmt.Printf("uninstall: service %s disabled + stopped\n", pilotservice.ServiceLabel(m))
 			}
 			base := filepath.Join(pilotservice.StateRoot, m)
 			if err := os.RemoveAll(base); err != nil {
@@ -514,7 +514,7 @@ func cmdUninstall(args []string) {
 	if err := pilotservice.Uninstall(*mesh); err != nil {
 		fatalf("uninstall: %v", err)
 	}
-	fmt.Printf("uninstall: service pilot@%s disabled + stopped\n", *mesh)
+	fmt.Printf("uninstall: service %s disabled + stopped\n", pilotservice.ServiceLabel(*mesh))
 	base := filepath.Join(pilotservice.StateRoot, *mesh)
 	if !*purge {
 		fmt.Printf("  kept state at %s (re-run install to re-enable; -purge to delete; -all for full cleanup)\n", base)
@@ -537,7 +537,7 @@ func removeHostArtifacts() {
 	if err := pilotservice.RemoveTemplate(); err != nil {
 		fmt.Fprintf(os.Stderr, "uninstall: remove shared unit: %v\n", err)
 	} else {
-		fmt.Printf("  removed the shared systemd unit %s\n", pilotservice.UnitTemplatePath)
+		fmt.Println("  removed the shared service unit (if any)")
 	}
 	if err := os.Remove(pilotservice.StateRoot); err == nil {
 		fmt.Printf("  removed %s\n", pilotservice.StateRoot)
