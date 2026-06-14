@@ -4,7 +4,7 @@ Four small EC2 nodes for trying the Nebula control plane end to end:
 
 - **lighthouse** — `nebula` with `am_lighthouse`; discovery + NAT hole-punch. Elastic IP.
 - **harbor** — control plane: **Core/core-api** (renew, heartbeat) + **admin console** + the **pull collector** (`harbor collect`) + DB + CA/config-signing keys. Itself a mesh node in group `control-plane`. Elastic IP (core-api + console are overlay-only; harbor reaches OUT to the gateway).
-- **gateway** — the public **enrollment gateway** (ADR 0005), on its **own** node and **off the mesh**: serves public enroll + a Harbor-only mTLS collect port over a local queue; Harbor PULLS it. It holds no CA/DB and no overlay identity — a compromise yields no mesh pivot. Elastic IP.
+- **gateway** — the public **enrollment gateway** (ADR 0005), on its **own** node and **off the mesh**: serves public enroll + a Harbor-only mTLS collect port over a local queue; Harbor PULLS it. It holds no CA/DB and no overlay identity — a compromise yields no mesh pivot. Elastic IP. *(Runs no `nebula`, so it can also be **serverless on Fargate** instead of a VM: `gateway_runtime = "fargate"` — see [`../fargate/README.md`](../fargate/README.md). The lighthouse + harbor still need EC2 because they run `nebula`/TUN.)*
 - **client** — a `pilot` mesh member that joins **keyless via `aws-sigv4` attestation** (its instance IAM role), then renews/heartbeats to core-api.
 
 Plus your **off-cloud iMac** (not managed here) which enrolls via a **join key

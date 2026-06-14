@@ -24,13 +24,28 @@ output "lighthouse_addr" {
 }
 
 output "gateway_url" {
-  description = "Public enrollment gateway URL pilots target (the off-mesh gateway node, ADR 0005)."
-  value       = "http://${local.public_ip["gateway"]}:${var.gateway_port}"
+  description = "Public enrollment gateway URL pilots target (the off-mesh gateway, ADR 0005). EC2: the node's public IP; Fargate: the NLB DNS name."
+  value       = var.gateway_runtime == "fargate" ? "http://${one(aws_lb.gateway[*].dns_name)}:${var.gateway_port}" : "http://${lookup(local.public_ip, "gateway", "")}:${var.gateway_port}"
 }
 
 output "gateway_collect_addr" {
-  description = "The gateway's Harbor-facing collect endpoint (intra-VPC private IP:collect_port) — what `harbor gateway add -url` registers."
-  value       = "https://${aws_instance.node["gateway"].private_ip}:${var.collect_port}"
+  description = "The gateway's Harbor-facing collect endpoint — what `harbor gateway add -url` registers. EC2: the node's private IP; Fargate: the NLB DNS name."
+  value       = var.gateway_runtime == "fargate" ? "https://${one(aws_lb.gateway[*].dns_name)}:${var.collect_port}" : "https://${try(aws_instance.node["gateway"].private_ip, "")}:${var.collect_port}"
+}
+
+output "gateway_runtime" {
+  description = "Which gateway runtime is active (ec2 | fargate)."
+  value       = var.gateway_runtime
+}
+
+output "gateway_ecr_repo" {
+  description = "ECR repo URL for the Fargate gateway image (empty unless gateway_runtime=fargate). Push to it with deploy/fargate/build-push.sh."
+  value       = one(aws_ecr_repository.gateway[*].repository_url)
+}
+
+output "region" {
+  description = "AWS region (for the build/deploy scripts)."
+  value       = var.region
 }
 
 output "bootstrap_hint" {
