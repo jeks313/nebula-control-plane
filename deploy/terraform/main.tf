@@ -69,7 +69,7 @@ resource "aws_security_group" "lighthouse" {
 
 resource "aws_security_group" "harbor" {
   name_prefix = "${var.name_prefix}-harbor-"
-  description = "Harbor: Nebula UDP (mesh node) + admin SSH. The enrollment gateway is now a SEPARATE off-mesh node (ADR 0005) — Harbor reaches OUT to it (egress) and PULLS; it is NOT exposed here. Core API (8444) is overlay-only, NOT here."
+  description = "Harbor: Nebula UDP (mesh node) + admin SSH. The enrollment gateway is now a SEPARATE off-mesh node (ADR 0005) - Harbor reaches OUT to it (egress) and PULLS; it is NOT exposed here. Core API (8444) is overlay-only, NOT here."
   vpc_id      = aws_vpc.main.id
 
   ingress {
@@ -89,7 +89,7 @@ resource "aws_security_group" "harbor" {
   # Locked egress: PULL the gateway's collect port (to the edge subnet — a CIDR,
   # not the gateway SG, to avoid an SG<->SG dependency cycle) + mesh UDP + bootstrap.
   egress {
-    description = "Pull the off-mesh gateway's collect API (ADR 0005)"
+    description = "Pull the off-mesh gateway collect API (ADR 0005)"
     from_port   = var.collect_port
     to_port     = var.collect_port
     protocol    = "tcp"
@@ -145,7 +145,7 @@ resource "aws_security_group" "gateway" {
     cidr_blocks = [var.gateway_cidr]
   }
   ingress {
-    description     = "Harbor collect API (mTLS) — Harbor's security group ONLY (the protected side pulls)"
+    description     = "Harbor collect API (mTLS) - Harbor security group ONLY (the protected side pulls)"
     from_port       = var.collect_port
     to_port         = var.collect_port
     protocol        = "tcp"
@@ -199,13 +199,22 @@ resource "aws_security_group" "client" {
     protocol    = "udp"
     cidr_blocks = ["0.0.0.0/0"]
   }
-  # Locked egress: mesh UDP (data plane + DNS) + bootstrap package fetch.
+  # Locked egress: mesh UDP (data plane + DNS) + enroll to the gateway + bootstrap.
   egress {
     description = "Nebula data plane + DNS (UDP)"
     from_port   = 0
     to_port     = 65535
     protocol    = "udp"
     cidr_blocks = ["0.0.0.0/0"]
+  }
+  egress {
+    # A pilot member must reach the enrollment gateway to enroll. In-VPC it uses the
+    # gateway's INTERNAL NLB (edge subnet) — a public NLB isn't reachable from the VPC.
+    description = "Enroll to the gateway (TCP gateway_port, in-VPC via the edge subnet)"
+    from_port   = var.gateway_port
+    to_port     = var.gateway_port
+    protocol    = "tcp"
+    cidr_blocks = [local.tier_cidr["edge"]]
   }
   egress {
     description = "Bootstrap package fetch (https/http)"
