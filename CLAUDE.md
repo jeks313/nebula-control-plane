@@ -107,8 +107,8 @@ need the cloud, verified once in the minimal Tier-2 harness).
 > implementation plan (per-step `✅` + "Proven:" notes); for *what/why* the design plan.
 > This is a fast summary — re-read those for exact state.
 
-**M0–M6 complete; M7 (Revocation & offboarding) in progress — at 7.1b.** Schema at
-migration **000013**. M0 feasibility PASSED (2026-06-11: SoftHSM P256 CA signs certs,
+**M0–M6 complete; M7 (Revocation & offboarding) in progress — 7.1 done, next is 7.2.** Schema at
+migration **000014**. M0 feasibility PASSED (2026-06-11: SoftHSM P256 CA signs certs,
 tunnel forms — design §M0 results; spike under `spike/m0/`, `make m0-*`). The trust
 spine is built end-to-end **on Linux** (Windows/macOS parity deferred to M10):
 - **M1 Pilot** — supervises `nebula`, host keygen, enroll, renew, render, drift-revert.
@@ -131,9 +131,14 @@ Steps: **7.1** blocklist distribution · **7.2** revoke-as-DoS guards (dual-cont
 limit + can't-blocklist-control-plane/lighthouses) · **7.3** decommission (revoke enrollment
 + 2.12 device-state machine + IP→quarantine + cloud-terminate auto-reap) · **7.4** IdP
 offboarding (depends on M9 OIDC — scaffolding until then). Decisions logged this milestone:
-- **7.1 split** into 7.1a (data path) → 7.1b (fast propagation).
+- **7.1 split** into 7.1a (data path) → 7.1b (fast propagation). Both done.
 - **Persistence kept minimal:** `revocations` table + `enrollments.fingerprint` (NOT the full
   `certificates` table — revisit for M8 drain + §7.1 issued-vs-inventory reconciliation).
+- **7.1b propagation = reuse the 6.6 rollout engine** (concurrent **blocklist lane**) with
+  **freeze-the-spread** semantics: an unhealthy canary freezes (stops widening), no content
+  revert — the blocklist set is always the latest active set, an operator lifts a bad entry.
+  (No per-version snapshots.) `apply_bundle` now means "refetch the latest bundle" via `GET
+  /v1/config`.
 - **2.12 device-state machine is unbuilt** (the `devices` table is id/name/created_at only); it
   is a hard prerequisite for 7.3.
 
@@ -150,17 +155,25 @@ offboarding (depends on M9 OIDC — scaffolding until then). Decisions logged th
   fast push is 7.1b.** Peer-side handshake refusal itself is the M0.5 spike proof (nebula 1.10.3).
   *Tests:* `internal/revocation` unit, `internal/bundle` blocklist tamper-refused + render,
   integration `TestRenewBundleCarriesBlocklist`.
-- ⏭️ **7.1b — fast propagation + SLO (NEXT — start here).** Gaps to close (from the M7 read):
-  Pilot never wires `heartbeat.Handlers.ApplyBundle` (only Renew+Restart in `cmd/pilot/main.go`)
-  and never reports `applied_bundle_version` (always 0); there is **no config-fetch endpoint**
-  (only `/v1/certs/renew`, which re-signs the cert). Plan: add a config-only fetch path (design §9
-  `GET /v1/config` — returns the host's current signed bundle without re-issuing a cert), wire
-  Pilot ApplyBundle → fetch+apply, have Pilot report the applied bundle version, and have Core push
-  `apply_bundle` to the **healthy fleet** when the blocklist changes via a **dedicated fast lane
-  (NOT the single-active rollout slot** — a security-urgent blocklist must not queue behind a policy
-  rollout). Track convergence % and **define the numeric SLO** (~heartbeat-cadence, default 60s).
-  *Done when:* a blocklist change converges across the healthy fleet within the SLO over the
-  heartbeat channel rather than the ~⅔-life renewal cadence.
+- ✅ **7.1b — fast staged propagation.** Rollout engine is now **lane-aware** (`rollouts.lane`,
+  migration 000014): a **blocklist-lane** rollout runs concurrently with a policy rollout (one
+  active *per lane*); its own version axis is `bundle.BlocklistVersion` + heartbeat
+  `applied_blocklist_version`. New **`GET /v1/config`** (coreapi) returns the host's current bundle
+  built from its **stored cert** — no key rotation/re-issue (`enrollclient.FetchConfig` +
+  `writeConfigArtifacts` deliberately do NOT rewrite the cert, so a renewed host isn't clobbered by
+  Core's enroll-time copy). Pilot wires `heartbeat.Handlers.ApplyBundle` → fetch+apply+reload and
+  reports both applied versions from the verified stored bundle. `core-api` `commandsFor` emits one
+  `apply_bundle` when **either** lane is behind. Blocklist lane **freezes** on an unhealthy canary
+  (no revert command). `harbor blocklist add|remove` stage it; `harbor blocklist status` shows
+  convergence. *Tests:* `internal/rollout` `TestConcurrentLanesAndBlocklistFreeze`; integration
+  `TestConfigFetchNoReissueCarriesBlocklist`, `TestHeartbeatDrivesBlocklistConvergence`.
+
+**Next: 7.2 — revoke-as-DoS guards.** Reuse `internal/dualcontrol` (register a `revoke.bulk` Kind)
+for bulk-revoke (quorum ≥2) + a DB-backed rate limit (model on `signer` breaker, NOT the in-memory
+`internal/ratelimit`); refuse blocklisting a `control-plane`/lighthouse fingerprint — enforced
+server-side at BOTH propose and commit (resolve groups via `adminapi` `fleetGroupMap` +
+`lighthouse.Registry` + `policy.GroupControlPlane`/`GroupLighthouse`). Add the admin API routes +
+RBAC perm + step-up MFA, and the UI-5 blocklist/propagation-status console view.
 
 ## Conventions
 

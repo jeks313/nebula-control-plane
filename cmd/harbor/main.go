@@ -128,9 +128,11 @@ usage:
   harbor lighthouse replace -ip OVERLAY -addrs host:port[,...] -actor A [db flags]
   harbor lighthouse remove -ip OVERLAY -actor A [db flags]   (keeps >=1 active)
   harbor lighthouse list   [db flags]
-  harbor blocklist add     -fingerprint FP | -device OVERLAY [-reason R] -actor A [db flags]
+  harbor blocklist add     -fingerprint FP | -device OVERLAY [-reason R] -actor A
+                           [-canary K] [-wave-size W] [-observe D] [-no-rollout] [db flags]
   harbor blocklist remove  -fingerprint FP | -device OVERLAY -actor A [db flags]   (lifts the block)
   harbor blocklist list    [db flags]
+  harbor blocklist status  [db flags]      blocklist-lane rollout convergence (7.1b)
   harbor rollout start     -target N -prev M -hosts ip1,ip2,... [-canary K]
                            [-wave-size W] [-min-healthy H] [-observe D] [-missing-after D] -actor A
   harbor rollout step      [db flags]      force one evaluation (cron/ops)
@@ -763,7 +765,7 @@ func cmdLighthouse(args []string) {
 // enrollment. Bulk revoke + the can't-blocklist-control-plane invariant land in 7.2.
 func cmdBlocklist(args []string) {
 	if len(args) < 1 {
-		fatalf("blocklist: want add|remove|list")
+		fatalf("blocklist: want add|remove|list|status")
 	}
 	sub := args[0]
 	fs := flag.NewFlagSet("blocklist "+sub, flag.ExitOnError)
@@ -772,12 +774,21 @@ func cmdBlocklist(args []string) {
 	device := fs.String("device", "", "overlay IP of a host; resolves to its current cert fingerprint")
 	reason := fs.String("reason", "", "why (recorded in the audit trail)")
 	actor := fs.String("actor", "operator", "admin identity for the audit trail")
+	// Staged fast-propagation (7.1b): add/remove pace the push as a blocklist-lane
+	// rollout (canary -> widen -> freeze on an unhealthy canary). core-api drives it
+	// on heartbeats. -no-rollout skips it (the change still propagates at renewal).
+	noRollout := fs.Bool("no-rollout", false, "skip the staged fast-push; rely on each host's next renewal to propagate")
+	canary := fs.Int("canary", 1, "canary wave size for the staged blocklist rollout")
+	waveSize := fs.Int("wave-size", 0, "hosts per post-canary wave (0 = all remaining in one wave)")
+	observe := fs.Duration("observe", 5*time.Minute, "per-wave convergence window before judging it stuck")
+	missingAfter := fs.Duration("missing-after", 3*time.Minute, "heartbeat silence => host considered down")
 	_ = fs.Parse(args[1:])
 
 	s := openStore(*driver, *dsn)
 	defer s.Close()
 	audit := func(c context.Context, a, ac, t, d string) error { _, e := s.AppendAudit(c, a, ac, t, d); return e }
 	reg := revocation.New(s.DB, audit)
+	eng := rollout.New(s.DB, audit)
 	ctx := context.Background()
 
 	// resolve turns -fingerprint / -device into a concrete fingerprint to target.
@@ -803,6 +814,36 @@ func cmdBlocklist(args []string) {
 		}
 	}
 
+	// startRollout paces a blocklist change across the healthy fleet (7.1b). The
+	// blocklist CONTENT is already the latest active set; this only stages WHO is
+	// told to refetch (canary first), freezing if the canary goes unhealthy.
+	startRollout := func() {
+		if *noRollout {
+			fmt.Println("note: -no-rollout — the change propagates at each host's next renewal (slow path)")
+			return
+		}
+		var ips []string
+		if err := s.DB.WithContext(ctx).Table("heartbeats").Order("overlay_ip ASC").Pluck("overlay_ip", &ips).Error; err != nil {
+			fatalf("blocklist: read fleet: %v", err)
+		}
+		target := eng.BlocklistVersion(ctx) + 1
+		r, err := eng.Start(ctx, rollout.StartConfig{
+			Lane: rollout.LaneBlocklist, Description: "blocklist change",
+			TargetVersion: target, PrevVersion: target - 1, Hosts: ips,
+			CanarySize: *canary, WaveSize: *waveSize, Observe: *observe, MissingAfter: *missingAfter, Actor: *actor,
+		})
+		switch {
+		case errors.Is(err, rollout.ErrNoHosts):
+			fmt.Println("note: no fleet heartbeats yet — the change propagates at renewal; no rollout started")
+		case errors.Is(err, rollout.ErrActiveExists):
+			fmt.Println("note: a blocklist rollout is already in flight — this change rides the latest content and converges with it")
+		case err != nil:
+			fatalf("blocklist: start rollout: %v", err)
+		default:
+			fmt.Printf("staged blocklist rollout v%d to %d host(s) (canary %d); core-api drives convergence on heartbeats\n", r.TargetVersion, len(ips), *canary)
+		}
+	}
+
 	switch sub {
 	case "add":
 		f := resolve()
@@ -813,13 +854,21 @@ func cmdBlocklist(args []string) {
 			fatalf("blocklist add: %v", err)
 		default:
 			fmt.Printf("blocklisted %s\n", f)
+			startRollout()
 		}
 	case "remove":
 		f := resolve()
+		var active int64
+		s.DB.WithContext(ctx).Table("revocations").Where("fingerprint = ? AND state = ?", f, revocation.StateActive).Count(&active)
 		if err := reg.Lift(ctx, f, *actor); err != nil {
 			fatalf("blocklist remove: %v", err)
 		}
+		if active == 0 {
+			fmt.Printf("not blocklisted: %s\n", f)
+			return
+		}
 		fmt.Printf("lifted blocklist for %s\n", f)
+		startRollout()
 	case "list":
 		rows, err := reg.List(ctx)
 		if err != nil {
@@ -832,6 +881,25 @@ func cmdBlocklist(args []string) {
 		fmt.Printf("%-64s %-7s %-5s %s\n", "FINGERPRINT", "STATE", "BULK", "REASON")
 		for _, r := range rows {
 			fmt.Printf("%-64s %-7s %-5t %s\n", r.Fingerprint, r.State, r.Bulk, r.Reason)
+		}
+	case "status":
+		r, hosts, err := eng.StatusLane(ctx, rollout.LaneBlocklist)
+		if errors.Is(err, rollout.ErrNone) {
+			fmt.Println("no blocklist rollout")
+			return
+		}
+		if err != nil {
+			fatalf("blocklist status: %v", err)
+		}
+		converged := 0
+		for _, h := range hosts {
+			if h.Status == rollout.HostConverged {
+				converged++
+			}
+		}
+		fmt.Printf("blocklist rollout v%d: state=%s wave=%d  %d/%d hosts converged\n", r.TargetVersion, r.State, r.ActiveWave, converged, len(hosts))
+		for _, h := range hosts {
+			fmt.Printf("  %-16s wave=%d %s\n", h.OverlayIP, h.Wave, h.Status)
 		}
 	default:
 		fatalf("blocklist: unknown subcommand %q", sub)

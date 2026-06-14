@@ -18,6 +18,7 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/enrollment"
 	"github.com/jeks313/nebula-control-plane/internal/joinkey"
 	"github.com/jeks313/nebula-control-plane/internal/jws"
+	"github.com/jeks313/nebula-control-plane/internal/rollout"
 	"github.com/jeks313/nebula-control-plane/internal/wire"
 	"github.com/slackhq/nebula/cert"
 )
@@ -28,6 +29,7 @@ func (e enrollEnv) coreAPI() http.Handler {
 		CABundlePEM: e.caPEM, Pool: e.pool, CertLifetime: 24 * time.Hour,
 		Lighthouses:     []bundle.Lighthouse{{OverlayIP: "100.64.0.1", PublicAddrs: []string{"1.2.3.4:4242"}}},
 		BlocklistSource: e.rev.ActiveFingerprints,
+		Rollout:         rollout.New(e.store.DB, nil),
 	}).Handler()
 }
 

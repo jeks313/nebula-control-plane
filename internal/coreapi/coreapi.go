@@ -26,22 +26,24 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/signer"
 	"github.com/jeks313/nebula-control-plane/internal/store"
 	"github.com/jeks313/nebula-control-plane/internal/wire"
+	"github.com/slackhq/nebula/cert"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
 // Heartbeat is the latest reported state for a device (one row per overlay IP).
 type Heartbeat struct {
-	ID                   int64  `gorm:"column:id;primaryKey"`
-	OverlayIP            string `gorm:"column:overlay_ip"`
-	DeviceName           string `gorm:"column:device_name"`
-	PilotVersion         string `gorm:"column:pilot_version"`
-	NebulaVersion        string `gorm:"column:nebula_version"`
-	CertNotAfter         int64  `gorm:"column:cert_not_after"`
-	AppliedBundleVersion int    `gorm:"column:applied_bundle_version"`
-	ClockOffsetMs        int    `gorm:"column:clock_offset_ms"`
-	Health               string `gorm:"column:health"`
-	LastSeen             int64  `gorm:"column:last_seen"`
+	ID                      int64  `gorm:"column:id;primaryKey"`
+	OverlayIP               string `gorm:"column:overlay_ip"`
+	DeviceName              string `gorm:"column:device_name"`
+	PilotVersion            string `gorm:"column:pilot_version"`
+	NebulaVersion           string `gorm:"column:nebula_version"`
+	CertNotAfter            int64  `gorm:"column:cert_not_after"`
+	AppliedBundleVersion    int    `gorm:"column:applied_bundle_version"`
+	AppliedBlocklistVersion int    `gorm:"column:applied_blocklist_version"`
+	ClockOffsetMs           int    `gorm:"column:clock_offset_ms"`
+	Health                  string `gorm:"column:health"`
+	LastSeen                int64  `gorm:"column:last_seen"`
 }
 
 func (Heartbeat) TableName() string { return "heartbeats" }
@@ -100,6 +102,7 @@ func New(cfg Config) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/certs/renew", s.handleRenew)
+	mux.HandleFunc("GET /v1/config", s.handleConfig)
 	mux.HandleFunc("POST /v1/heartbeat", s.handleHeartbeat)
 	return mux
 }
@@ -127,6 +130,17 @@ func (s *Server) lighthouses(ctx context.Context) []bundle.Lighthouse {
 		return s.cfg.Lighthouses
 	}
 	return lhs
+}
+
+// blocklistVersion is the current blocklist-lane generation Core stamps on every
+// bundle (7.1b), so a host can report back which blocklist generation it carries
+// and the blocklist rollout can drive the healthy fleet to converge. 0 with no
+// rollout engine or no blocklist rollout yet.
+func (s *Server) blocklistVersion(ctx context.Context) int {
+	if s.cfg.Rollout == nil {
+		return 0
+	}
+	return s.cfg.Rollout.BlocklistVersion(ctx)
 }
 
 // blocklist returns the fleet's active revoked-cert fingerprints for a bundle
@@ -196,13 +210,14 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		OverlayIP: dev.OverlayIP, DeviceName: dev.DeviceName,
 		PilotVersion: req.PilotVersion, NebulaVersion: req.NebulaVersion,
 		CertNotAfter: certNotAfter, AppliedBundleVersion: req.AppliedBundleVersion,
-		ClockOffsetMs: req.ClockOffsetMs, Health: req.Health, LastSeen: s.now().UnixNano(),
+		AppliedBlocklistVersion: req.AppliedBlocklistVersion,
+		ClockOffsetMs:           req.ClockOffsetMs, Health: req.Health, LastSeen: s.now().UnixNano(),
 	}
 	if err := s.cfg.Store.DB.WithContext(ctx).Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "overlay_ip"}},
 		DoUpdates: clause.AssignmentColumns([]string{
 			"device_name", "pilot_version", "nebula_version", "cert_not_after",
-			"applied_bundle_version", "clock_offset_ms", "health", "last_seen",
+			"applied_bundle_version", "applied_blocklist_version", "clock_offset_ms", "health", "last_seen",
 		}),
 	}).Create(&hb).Error; err != nil {
 		wire.WriteError(w, wire.CodeInternal, "persist heartbeat failed")
@@ -220,14 +235,14 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 
 	wire.WriteJSON(w, http.StatusOK, wire.HeartbeatResponse{
 		ProtocolVersion: wire.ProtocolVersion,
-		Commands:        s.commandsFor(ctx, dev.OverlayIP, req.AppliedBundleVersion, certNotAfter),
+		Commands:        s.commandsFor(ctx, dev.OverlayIP, req.AppliedBundleVersion, req.AppliedBlocklistVersion, certNotAfter),
 	})
 }
 
 // commandsFor decides the typed commands to return: the near-expiry renew
 // backstop (4.6) plus, for 6.6, an apply_bundle that drives the host toward its
 // rollout target version (or back to prev after a rollback).
-func (s *Server) commandsFor(ctx context.Context, overlayIP string, appliedVersion int, certNotAfter int64) []wire.Command {
+func (s *Server) commandsFor(ctx context.Context, overlayIP string, appliedVersion, appliedBlocklist int, certNotAfter int64) []wire.Command {
 	var cmds []wire.Command
 	if s.cfg.RenewCommandThreshold > 0 && certNotAfter > 0 {
 		if time.Unix(0, certNotAfter).Sub(s.now()) < s.cfg.RenewCommandThreshold {
@@ -235,7 +250,12 @@ func (s *Server) commandsFor(ctx context.Context, overlayIP string, appliedVersi
 		}
 	}
 	if s.cfg.Rollout != nil {
+		// A single apply_bundle refetches the host's CURRENT bundle (the latest of
+		// every lane via GET /v1/config), so emit at most one even when both the
+		// policy and blocklist lanes want this host to converge.
 		if cmd, ok := s.cfg.Rollout.CommandFor(ctx, overlayIP, appliedVersion); ok {
+			cmds = append(cmds, cmd)
+		} else if cmd, ok := s.cfg.Rollout.BlocklistCommandFor(ctx, overlayIP, appliedBlocklist); ok {
 			cmds = append(cmds, cmd)
 		}
 	}
@@ -302,7 +322,7 @@ func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
 	}
 	nb := s.now().Add(-5 * time.Minute)
 	notAfter := nb.Add(s.cfg.CertLifetime)
-	cert, certPEM, err := s.cfg.Signer.Issue(ctx, "renew:"+dev.DeviceName, signer.Template{
+	crt, certPEM, err := s.cfg.Signer.Issue(ctx, "renew:"+dev.DeviceName, signer.Template{
 		Name:      dev.DeviceName,
 		Networks:  []netip.Prefix{netip.PrefixFrom(overlay, s.cfg.Pool.Bits())},
 		Groups:    groups,
@@ -315,23 +335,13 @@ func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	b := bundle.Bundle{
-		BundleVersion: s.bundleVersion(ctx, dev.OverlayIP),
-		IssuedAt:      s.now().UTC().Format(time.RFC3339),
-		Device:        bundle.Device{Name: dev.DeviceName, OverlayIP: dev.OverlayIP, Groups: groups},
-		Certificate:   string(certPEM),
-		CABundle:      []string{string(s.cfg.CABundlePEM)},
-		Firewall:      bundle.CompileFirewall(s.cfg.Policy, groups),
-		Lighthouses:   s.lighthouses(ctx),
-		Blocklist:     s.blocklist(ctx),
-		NotAfter:      notAfter.UTC().Format(time.RFC3339),
-	}
+	b := s.assembleBundle(ctx, dev, groups, string(certPEM), notAfter)
 	bundleJWS, err := bundle.Sign(s.cfg.ConfigBackend, s.cfg.ConfigKeyID, b)
 	if err != nil {
 		wire.WriteError(w, wire.CodeInternal, "bundle sign failed")
 		return
 	}
-	fp, _ := cert.Fingerprint()
+	fp, _ := crt.Fingerprint()
 	// Track the host's CURRENT fingerprint: it rotates with the key on every
 	// renewal, so a blocklist must target the live fingerprint (M7.1/7.3).
 	_ = s.cfg.Store.DB.WithContext(ctx).Model(&enrollment.Enrollment{}).
@@ -340,4 +350,59 @@ func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
 		fmt.Sprintf(`{"overlay_ip":%q,"fingerprint":%q}`, dev.OverlayIP, fp))
 
 	wire.WriteJSON(w, http.StatusOK, wire.RenewResponse{ProtocolVersion: wire.ProtocolVersion, Bundle: bundleJWS})
+}
+
+// assembleBundle builds the host's current signed-config bundle payload: its
+// policy firewall, the live lighthouses + blocklist, and both lane versions. The
+// caller supplies the leaf cert (a fresh one on renew; the stored one on a config
+// refresh) and its expiry.
+func (s *Server) assembleBundle(ctx context.Context, dev enrollment.Enrollment, groups []string, certPEM string, notAfter time.Time) bundle.Bundle {
+	return bundle.Bundle{
+		BundleVersion:    s.bundleVersion(ctx, dev.OverlayIP),
+		BlocklistVersion: s.blocklistVersion(ctx),
+		IssuedAt:         s.now().UTC().Format(time.RFC3339),
+		Device:           bundle.Device{Name: dev.DeviceName, OverlayIP: dev.OverlayIP, Groups: groups},
+		Certificate:      certPEM,
+		CABundle:         []string{string(s.cfg.CABundlePEM)},
+		Firewall:         bundle.CompileFirewall(s.cfg.Policy, groups),
+		Lighthouses:      s.lighthouses(ctx),
+		Blocklist:        s.blocklist(ctx),
+		NotAfter:         notAfter.UTC().Format(time.RFC3339),
+	}
+}
+
+// handleConfig implements GET /v1/config (spec §9): return the host's CURRENT
+// signed config bundle built from its EXISTING cert — no key rotation, no
+// re-issue. This is the cheap refresh a Pilot does on an apply_bundle command so a
+// blocklist/policy/lighthouse change propagates fast (7.1b) without loading the
+// Signer or churning the cert/fingerprint.
+func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	ctx := r.Context()
+
+	dev, ok := s.device(ctx, r)
+	if !ok {
+		wire.WriteError(w, wire.CodeAccountNotAllowed, "no enrolled device at this overlay address")
+		return
+	}
+	if len(dev.CertPEM) == 0 {
+		wire.WriteError(w, wire.CodeInternal, "device has no stored certificate")
+		return
+	}
+	var groups []string
+	_ = json.Unmarshal([]byte(dev.Groups), &groups)
+
+	// NotAfter comes from the host's existing cert (we are not re-issuing it).
+	notAfter := s.now().Add(s.cfg.CertLifetime)
+	if c, _, err := cert.UnmarshalCertificateFromPEM(dev.CertPEM); err == nil {
+		notAfter = c.NotAfter()
+	}
+
+	b := s.assembleBundle(ctx, dev, groups, string(dev.CertPEM), notAfter)
+	bundleJWS, err := bundle.Sign(s.cfg.ConfigBackend, s.cfg.ConfigKeyID, b)
+	if err != nil {
+		wire.WriteError(w, wire.CodeInternal, "bundle sign failed")
+		return
+	}
+	wire.WriteJSON(w, http.StatusOK, wire.ConfigResponse{ProtocolVersion: wire.ProtocolVersion, Bundle: bundleJWS})
 }

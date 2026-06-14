@@ -43,16 +43,21 @@ type Firewall struct {
 
 // Bundle is the config bundle payload (spec §6).
 type Bundle struct {
-	ProtocolVersion int             `json:"protocol_version"`
-	Type            string          `json:"type"`
-	BundleVersion   int             `json:"bundle_version"`
-	IssuedAt        string          `json:"issued_at"`
-	Device          Device          `json:"device"`
-	Certificate     string          `json:"certificate"` // leaf cert PEM
-	CABundle        []string        `json:"ca_bundle"`   // CA cert PEM(s)
-	Firewall        *Firewall       `json:"firewall,omitempty"`
-	Config          json.RawMessage `json:"config,omitempty"`
-	Lighthouses     []Lighthouse    `json:"lighthouses"`
+	ProtocolVersion int    `json:"protocol_version"`
+	Type            string `json:"type"`
+	BundleVersion   int    `json:"bundle_version"`
+	// BlocklistVersion is the blocklist-lane generation this bundle reflects (7.1b),
+	// tracked separately from BundleVersion (the policy-lane version) so a blocklist
+	// rollout converges independently of a policy rollout. The host reports it back
+	// as applied_blocklist_version.
+	BlocklistVersion int             `json:"blocklist_version,omitempty"`
+	IssuedAt         string          `json:"issued_at"`
+	Device           Device          `json:"device"`
+	Certificate      string          `json:"certificate"` // leaf cert PEM
+	CABundle         []string        `json:"ca_bundle"`   // CA cert PEM(s)
+	Firewall         *Firewall       `json:"firewall,omitempty"`
+	Config           json.RawMessage `json:"config,omitempty"`
+	Lighthouses      []Lighthouse    `json:"lighthouses"`
 	// Blocklist is the fleet's revoked cert fingerprints (hex sha256), rendered
 	// into nebula's pki.blocklist (M7.1). Enforced PEER-SIDE: every host refuses to
 	// handshake with a blocklisted fingerprint (§4.7). It rides inside the signed

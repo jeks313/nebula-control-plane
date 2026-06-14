@@ -85,6 +85,7 @@ var cliSurface = map[string]surfaceEntry{
 	"blocklist add":      {why: "security break-glass: blocklist a compromised host's cert (7.1) — must work even when the console is down (when you most need to kill a host). The console blocklist view + dual-control bulk-revoke land in 7.2/UI-5; single-host add is CLI-only until then"},
 	"blocklist remove":   {why: "security break-glass: lift a blocklist entry (7.1); CLI-only until the UI-5 blocklist view (7.2)"},
 	"blocklist list":     {why: "local store inspection of the cert blocklist (7.1); the console blocklist view lands in 7.2/UI-5"},
+	"blocklist status":   {why: "local inspection of the blocklist-lane rollout convergence (7.1b); the console propagation-status view lands in 7.2/UI-5"},
 	"seed-demo":          {why: "DEV/DEMO ONLY: writes a synthetic fleet straight into the store (heartbeats arrive from agents, not the API) — never a console capability"},
 	"core-api":           {why: "server launcher, not an operation"},
 	"admin-api":          {why: "server launcher, not an operation"},
