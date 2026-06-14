@@ -5,11 +5,11 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -19,12 +19,11 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/drift"
 	"github.com/jeks313/nebula-control-plane/internal/enrollclient"
 	"github.com/jeks313/nebula-control-plane/internal/heartbeat"
-	"github.com/jeks313/nebula-control-plane/internal/hostkey"
-	"github.com/jeks313/nebula-control-plane/internal/nebulaconfig"
 	"github.com/jeks313/nebula-control-plane/internal/paths"
+	"github.com/jeks313/nebula-control-plane/internal/pilotservice"
+	"github.com/jeks313/nebula-control-plane/internal/pilotsetup"
 	"github.com/jeks313/nebula-control-plane/internal/renew"
 	"github.com/jeks313/nebula-control-plane/internal/supervisor"
-	"gopkg.in/yaml.v3"
 )
 
 // version is overridden at build time via -ldflags "-X main.version=...".
@@ -38,6 +37,12 @@ func main() {
 		os.Exit(2)
 	}
 	switch os.Args[1] {
+	case "install":
+		cmdInstall(os.Args[2:])
+	case "status":
+		cmdStatus(os.Args[2:])
+	case "uninstall":
+		cmdUninstall(os.Args[2:])
 	case "init":
 		cmdInit(os.Args[2:])
 	case "enroll":
@@ -63,6 +68,9 @@ func usage() {
 	fmt.Fprint(os.Stderr, `pilot — Nebula Control Plane host agent
 
 usage:
+  pilot install -gateway <url> -core <url> -config-pub <pem> (-join-key <secret> | -aws-sigv4) [-mesh <id>] [-name N] [-groups a,b]
+  pilot status [-mesh <id>]
+  pilot uninstall [-mesh <id>] [-purge]
   pilot init [-dir <path>] [-values <values.yml>] [-am-lighthouse]
   pilot enroll -gateway <url> -join-key <secret> -config-pub <pem> [-dir <path>] [-name N] [-groups a,b]
   pilot renew -core <url> -config-pub <pem> [-dir <path>]
@@ -71,6 +79,11 @@ usage:
   pilot version
 
 commands:
+  install     one-shot, idempotent host join: clock-check -> init -> enroll ->
+              write+enable a per-mesh systemd service (pilot@<mesh>) -> supervise.
+              Re-runnable; per-mesh (a host can join multiple meshes). Linux/systemd.
+  status      show a mesh's local state (key/cert/config) + service state.
+  uninstall   disable+stop a mesh's service (-purge also deletes its identity).
   init        lay out the host dir, generate the host key (P256), and render
               config.yml. Does NOT overwrite an existing host key.
   enroll      join the mesh: gen key -> nonce -> signed submit -> poll -> verify
@@ -191,57 +204,13 @@ func cmdInit(args []string) {
 	_ = fs.Parse(args)
 
 	layout := paths.New(*dir)
-	if err := layout.Ensure(); err != nil {
-		fatalf("init: %v", err)
-	}
-
-	// 1. Host key (M1.4): generate once; never overwrite a live key.
-	keyGenerated := false
-	if _, err := os.Stat(layout.HostKey()); errors.Is(err, os.ErrNotExist) {
-		kp, err := hostkey.Generate()
-		if err != nil {
-			fatalf("init: %v", err)
-		}
-		if err := kp.WritePrivateKey(layout.HostKey()); err != nil {
-			fatalf("init: %v", err)
-		}
-		if err := kp.WritePublicKey(layout.HostPub()); err != nil {
-			fatalf("init: %v", err)
-		}
-		keyGenerated = true
-	} else if err != nil {
-		fatalf("init: stat host key: %v", err)
-	}
-
-	// 2. Config (M1.7): policy from values file (if any), PKI paths from layout.
-	var v nebulaconfig.Values
-	if *valuesPath != "" {
-		raw, err := os.ReadFile(*valuesPath)
-		if err != nil {
-			fatalf("init: read values: %v", err)
-		}
-		if err := yaml.Unmarshal(raw, &v); err != nil {
-			fatalf("init: parse values: %v", err)
-		}
-	}
-	if *amLH {
-		v.AmLighthouse = true
-	}
-	v.CACertPath = layout.CABundle()
-	v.CertPath = layout.HostCert()
-	v.KeyPath = layout.HostKey()
-	v.Defaults()
-
-	cfg, err := nebulaconfig.Render(v)
+	res, err := pilotsetup.Init(pilotsetup.InitParams{Layout: layout, ValuesPath: *valuesPath, AmLighthouse: *amLH})
 	if err != nil {
 		fatalf("init: %v", err)
 	}
-	if err := os.WriteFile(layout.Config(), cfg, 0644); err != nil {
-		fatalf("init: write config: %v", err)
-	}
 
 	fmt.Printf("pilot init: base dir %s\n", layout.Base)
-	if keyGenerated {
+	if res.KeyGenerated {
 		fmt.Printf("  generated host key   %s\n", layout.HostKey())
 		fmt.Printf("  wrote public key     %s  (submit to control plane for signing)\n", layout.HostPub())
 	} else {
@@ -382,4 +351,177 @@ func cmdSupervise(args []string) {
 		os.Exit(1)
 	}
 	log.Info("pilot supervise stopped")
+}
+
+// cmdInstall is the one-shot, idempotent host join (ADR 0008 Phase 1): clock-check
+// -> enroll -> write+enable a per-mesh systemd service -> supervise. Per-mesh (a
+// host can join multiple meshes; each gets its own /var/lib/pilot/<mesh> dir +
+// pilot@<mesh> service) and safe to re-run. enroll itself ensures the dir, reuses
+// the live host key, and writes config.yml from the signed bundle — so install does
+// not separately init or set local config (the config, incl. the TUN/port, is
+// Harbor's signed bundle; a local override would be reverted by drift control).
+func cmdInstall(args []string) {
+	fs := flag.NewFlagSet("install", flag.ExitOnError)
+	mesh := fs.String("mesh", "default", "mesh id — namespaces the install (/var/lib/pilot/<mesh>, service pilot@<mesh>)")
+	gateway := fs.String("gateway", "", "enrollment gateway base URL (required)")
+	core := fs.String("core", "", "Core API base URL over the mesh, for renew/heartbeat (required)")
+	configPub := fs.String("config-pub", "", "pinned config-signing public key PEM (required)")
+	joinKey := fs.String("join-key", "", "join key secret (required unless -aws-sigv4)")
+	awsSigV4 := fs.Bool("aws-sigv4", false, "attest via this instance's IAM role (IMDS) instead of a join key")
+	region := fs.String("region", "", "STS region for -aws-sigv4 (default: IMDS-derived)")
+	name := fs.String("name", "", "requested device name (cosmetic)")
+	groups := fs.String("groups", "", "requested groups (advisory; cloud-trust / join key decides)")
+	nebulaPath := fs.String("nebula", "/usr/local/bin/nebula", "path to the nebula binary the service runs")
+	timeout := fs.Duration("timeout", 60*time.Second, "max time to wait for the enroll result")
+	clockServer := fs.String("clock-server", "pool.ntp.org", "NTP server for the pre-flight clock check")
+	maxSkew := fs.Duration("max-skew", 5*time.Second, "max tolerated clock skew (fail-closed)")
+	skipClock := fs.Bool("skip-clock-check", false, "skip the pre-flight clock check (airgapped hosts)")
+	_ = fs.Parse(args)
+
+	if *gateway == "" || *core == "" || *configPub == "" {
+		fmt.Fprintln(os.Stderr, "pilot install: -gateway, -core and -config-pub are required")
+		os.Exit(2)
+	}
+	if *awsSigV4 == (*joinKey != "") { // exactly one credential source
+		fatalf("install: provide either -join-key or -aws-sigv4 (not both, not neither)")
+	}
+	if !validMeshID(*mesh) {
+		fatalf("install: invalid -mesh %q (letters/digits/_/-, start alphanumeric, <=32 chars)", *mesh)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// 1. Pre-flight clock check — identity ops (nonce/cert/attestation) are
+	// clock-sensitive, so fail closed on skew unless explicitly skipped.
+	if !*skipClock {
+		r, err := clock.Query(ctx, *clockServer, 5*time.Second)
+		if err != nil {
+			fatalf("install: clock check failed (use -skip-clock-check to bypass): %v", err)
+		}
+		if absDur(r.Offset) > *maxSkew {
+			fatalf("install: clock skew %s exceeds max %s — fail-closed (fix the clock or -skip-clock-check)",
+				r.Offset.Round(time.Millisecond), *maxSkew)
+		}
+	}
+
+	base := filepath.Join(pilotservice.StateRoot, *mesh)
+	layout := paths.New(base)
+
+	pubPEM, err := os.ReadFile(*configPub)
+	if err != nil {
+		fatalf("install: read -config-pub: %v", err)
+	}
+	pinned, err := enrollclient.ParsePinnedConfigPub(pubPEM)
+	if err != nil {
+		fatalf("install: %v", err)
+	}
+
+	// 2. Enroll unless this mesh already holds a signed cert (idempotent re-run:
+	// don't re-enroll an enrolled host — just (re)install the service).
+	if fileExists(layout.HostCert()) {
+		fmt.Printf("install: mesh %q already enrolled (%s present) — ensuring the service\n", *mesh, layout.HostCert())
+	} else {
+		res, err := enrollclient.Enroll(ctx, enrollclient.Params{
+			GatewayURL: *gateway, JoinKey: *joinKey, AWSSigV4: *awsSigV4, Region: *region, Layout: layout,
+			RequestedName: *name, RequestedGroups: splitCSV(*groups), PinnedConfigPub: pinned, PollTimeout: *timeout,
+		})
+		if err != nil {
+			fatalf("install: enroll: %v", err)
+		}
+		switch res.Status {
+		case "issued":
+			fmt.Printf("install: enrolled mesh %q — overlay IP %s\n", *mesh, res.OverlayIP)
+		case "pending":
+			fmt.Println("install: enrollment submitted — awaiting manual approval.")
+			fmt.Printf("  Re-run `pilot install -mesh %s ...` after approval to finish; the service is NOT yet started.\n", *mesh)
+			return
+		case "denied":
+			fatalf("install: enrollment denied: %s", res.Reason)
+		}
+	}
+
+	// 3. Place the pin where the service's `supervise` reads it (-config-pub).
+	if err := os.WriteFile(filepath.Join(base, "config-signing.pub"), pubPEM, 0644); err != nil {
+		fatalf("install: write config-signing.pub: %v", err)
+	}
+
+	// 4. Install + enable the per-mesh service; it runs `supervise` (hand-off to ADR 0003).
+	if err := pilotservice.Install(pilotservice.Spec{
+		Mesh: *mesh, StateDir: base, CoreURL: *core, NebulaPath: *nebulaPath,
+	}); err != nil {
+		fatalf("install: service: %v", err)
+	}
+	fmt.Printf("install: service pilot@%s enabled + started (supervising nebula; renew/heartbeat to %s)\n", *mesh, *core)
+	fmt.Printf("  status: pilot status -mesh %s    logs: journalctl -u pilot@%s -f\n", *mesh, *mesh)
+}
+
+// cmdStatus reports a mesh's local identity/config state + its service state.
+func cmdStatus(args []string) {
+	fs := flag.NewFlagSet("status", flag.ExitOnError)
+	mesh := fs.String("mesh", "default", "mesh id")
+	_ = fs.Parse(args)
+	base := filepath.Join(pilotservice.StateRoot, *mesh)
+	layout := paths.New(base)
+	fmt.Printf("mesh %q  (%s)\n", *mesh, base)
+	fmt.Printf("  host key:   %s\n", existWord(layout.HostKey()))
+	fmt.Printf("  host cert:  %s\n", existWord(layout.HostCert()))
+	fmt.Printf("  ca bundle:  %s\n", existWord(layout.CABundle()))
+	fmt.Printf("  config:     %s\n", existWord(layout.Config()))
+	if rep, err := pilotservice.Status(*mesh); err != nil {
+		fmt.Printf("  service:    %v\n", err)
+	} else {
+		fmt.Printf("  service:    %s\n", rep)
+	}
+}
+
+// cmdUninstall disables+stops a mesh's service; -purge also deletes its identity.
+func cmdUninstall(args []string) {
+	fs := flag.NewFlagSet("uninstall", flag.ExitOnError)
+	mesh := fs.String("mesh", "default", "mesh id")
+	purge := fs.Bool("purge", false, "also delete the mesh's identity + state dir (irreversible)")
+	_ = fs.Parse(args)
+	if !validMeshID(*mesh) {
+		fatalf("uninstall: invalid -mesh %q", *mesh)
+	}
+	if err := pilotservice.Uninstall(*mesh); err != nil {
+		fatalf("uninstall: %v", err)
+	}
+	fmt.Printf("uninstall: service pilot@%s disabled + stopped\n", *mesh)
+	base := filepath.Join(pilotservice.StateRoot, *mesh)
+	if *purge {
+		if err := os.RemoveAll(base); err != nil {
+			fatalf("uninstall: purge %s: %v", base, err)
+		}
+		fmt.Printf("  purged %s (identity destroyed)\n", base)
+	} else {
+		fmt.Printf("  kept state at %s (re-run install to re-enable; -purge to delete)\n", base)
+	}
+}
+
+// validMeshID accepts ids safe as both a path segment and a systemd instance name:
+// start alphanumeric, then [A-Za-z0-9_-], length 1..32.
+func validMeshID(s string) bool {
+	if s == "" || len(s) > 32 {
+		return false
+	}
+	for i, r := range s {
+		ok := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
+		if i > 0 {
+			ok = ok || r == '_' || r == '-'
+		}
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func fileExists(p string) bool { _, err := os.Stat(p); return err == nil }
+
+func existWord(p string) string {
+	if fileExists(p) {
+		return "present  (" + p + ")"
+	}
+	return "MISSING  (" + p + ")"
 }
