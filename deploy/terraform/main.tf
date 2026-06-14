@@ -251,16 +251,17 @@ resource "aws_iam_instance_profile" "node" {
 # ── Nodes ───────────────────────────────────────────────────────────────────
 locals {
   base_nodes = {
-    lighthouse = { role = "lighthouse", eip = true } # stable address for static_host_map
-    harbor     = { role = "harbor", eip = true }     # stable control-plane address
-    client     = { role = "client", eip = false }    # cloud test member
+    harbor = { role = "harbor", eip = true }  # control-plane mesh node — routes core-api over the overlay, needs a real TUN
+    client = { role = "client", eip = false } # cloud test member
   }
-  # The gateway is an EC2 node only when gateway_runtime = "ec2"; under "fargate"
-  # it's a serverless container (gateway_fargate.tf) and gets no VM.
-  ec2_gateway = var.gateway_runtime == "ec2" ? { gateway = { role = "gateway", eip = true } } : {}
-  nodes       = merge(local.base_nodes, local.ec2_gateway)
+  # The lighthouse and gateway are EC2 nodes only under their "ec2" runtime; under
+  # "fargate" each becomes a serverless container (lighthouse_fargate.tf /
+  # gateway_fargate.tf) fronted by an NLB, and gets no VM.
+  ec2_lighthouse = var.lighthouse_runtime == "ec2" ? { lighthouse = { role = "lighthouse", eip = true } } : {} # stable address for static_host_map
+  ec2_gateway    = var.gateway_runtime == "ec2" ? { gateway = { role = "gateway", eip = true } } : {}
+  nodes          = merge(local.base_nodes, local.ec2_lighthouse, local.ec2_gateway)
   sg_for = {
-    lighthouse = aws_security_group.lighthouse.id
+    lighthouse = aws_security_group.lighthouse.id # used by the EC2 node when present
     harbor     = aws_security_group.harbor.id
     gateway    = aws_security_group.gateway.id # used by the EC2 node when present
     client     = aws_security_group.client.id

@@ -19,8 +19,18 @@ output "instance_ids" {
 }
 
 output "lighthouse_addr" {
-  description = "Lighthouse underlay address for static_host_map / genesis -lighthouse-addr."
-  value       = "${local.public_ip["lighthouse"]}:${var.nebula_port}"
+  description = "Lighthouse underlay address for static_host_map / genesis -lighthouse-addr. EC2: the node's Elastic IP; Fargate: the NLB's Elastic IP."
+  value       = var.lighthouse_runtime == "fargate" ? "${one(aws_eip.lighthouse_nlb[*].public_ip)}:${var.nebula_port}" : "${lookup(local.public_ip, "lighthouse", "")}:${var.nebula_port}"
+}
+
+output "lighthouse_runtime" {
+  description = "Which lighthouse runtime is active (ec2 | fargate)."
+  value       = var.lighthouse_runtime
+}
+
+output "lighthouse_ecr_repo" {
+  description = "ECR repo URL for the Fargate lighthouse image (empty unless lighthouse_runtime=fargate). Push to it with deploy/fargate/build-push.sh lighthouse."
+  value       = one(aws_ecr_repository.lighthouse[*].repository_url)
 }
 
 output "gateway_url" {
@@ -46,6 +56,11 @@ output "gateway_ecr_repo" {
 output "region" {
   description = "AWS region (for the build/deploy scripts)."
   value       = var.region
+}
+
+output "name_prefix" {
+  description = "Resource name prefix (for the bootstrap's ECS/Secrets Manager calls — cluster/service/secret are <name_prefix>-<component>)."
+  value       = var.name_prefix
 }
 
 output "bootstrap_hint" {
