@@ -208,7 +208,7 @@ Lifecycle siblings: `pilot status` (installed? enrolled? healthy? per mesh), `pi
 | **Pin establishment** | pure TOFU · **fingerprint-confirm** · pre-shared (MDM) | **Fingerprint-confirm** default; pre-shared for hands-free/hardened; pure-TOFU only behind HTTPS for low-security. |
 | **Multi-mesh service** | **N templated `pilot@<mesh>`** · one pilot, many meshes | **N services** — independent lifecycle/self-update/isolation; supervise unchanged. |
 | **Service install** | **pilot writes the unit** · external script/Ansible | **pilot writes it** — the whole point is no script/package/Ansible. |
-| **Platforms** | systemd · **systemd + launchd** · +Windows SCM | **systemd (Linux) + launchd (macOS)** done behind one interface (`service_linux.go`/`service_darwin.go`); Windows SCM is the remaining `service_other.go` stub. |
+| **Platforms** | systemd · systemd + launchd · **+Windows SCM** | **systemd (Linux) + launchd (macOS) + Windows SCM** all done behind one interface (`service_linux.go`/`service_darwin.go`/`service_windows.go`); `service_other.go` is now only the `!linux && !darwin && !windows` stub (e.g. the *BSDs). |
 
 ## Phased plan
 
@@ -230,11 +230,19 @@ Lifecycle siblings: `pilot status` (installed? enrolled? healthy? per mesh), `pi
   **Validated on real macOS 26 (arm64):** the darwin/arm64 binary runs, `clock-check`
   queries NTP, the rendered plist passes `plutil -lint`, and a full
   `install → status (running) → uninstall → -purge` cycle exercises the launchctl
-  lifecycle with `pilot supervise` running as the launchd daemon. `install -dry-run`
-  previews the resolved paths + service definition (no enroll/write/root). Remaining:
-  **Windows SCM** (still the `service_other.go` stub) and sign/notarize the universal
-  binary per platform (the macOS daemon ran unsigned from `/usr/local/bin` under sudo;
-  notarization is for distributed installs, not local dev).
+  lifecycle with `pilot supervise` running as the launchd daemon.
+  ✅ **Windows SCM** done — `service_windows.go` creates a per-mesh auto-start Win32
+  service via `golang.org/x/sys/windows/svc/mgr`; `supervise` detects
+  `svc.IsWindowsService()` and runs under `svc.Run`, translating SCM Stop/Shutdown
+  into ctx cancellation, redirecting its (consoleless) output to `<StateDir>\pilot.log`.
+  Recovery mirrors the siblings via `SetRecoveryActions` **plus**
+  `SetRecoveryActionsOnNonCrashFailures(true)` (the SCM otherwise treats a nonzero-exit
+  STOP as clean and never restarts). Cross-compile-verified (`GOOS=windows`); a Windows
+  test client is wired into the demo Terraform (`deploy/terraform/windows.tf`, opt-in
+  `enable_windows_client`) for live validation. `install -dry-run` previews the resolved
+  paths + service definition on every platform (no enroll/write/root). Remaining:
+  sign/notarize the universal binary per platform (macOS notarization + Windows
+  Authenticode) — for *distributed* installs, not local dev.
 
 ## Consequences
 

@@ -81,7 +81,8 @@ usage:
 commands:
   install     one-shot, idempotent host join: clock-check -> init -> enroll ->
               write+enable a per-mesh service -> supervise. Re-runnable; per-mesh
-              (a host can join multiple meshes). Linux (systemd) + macOS (launchd).
+              (a host can join multiple meshes). Linux (systemd), macOS (launchd),
+              Windows (SCM).
   status      show a mesh's local state (key/cert/config) + service state.
   uninstall   disable+stop a mesh's service (-purge deletes its identity; -all tears
               down every mesh + the shared unit for a full host cleanup).
@@ -282,72 +283,81 @@ func cmdSupervise(args []string) {
 	logFormat := fs.String("log-format", "auto", "log format: auto (text on a TTY, JSON as a service) | text | json")
 	logLevel := fs.String("log-level", "info", "log level: debug | info | warn | error")
 	_ = fs.Parse(args)
-	log := clilog.Setup(clilog.Options{Format: *logFormat, Level: *logLevel})
 
+	// Validate required flags BEFORE any service-mode setup: under the Windows SCM
+	// a bare os.Exit here (after dispatch) would look like a failed start and trip
+	// the restart recovery on a permanent fault. install always passes -config, so
+	// this is a guard for hand-run / mis-edited argv.
 	if *configPath == "" {
 		fmt.Fprintln(os.Stderr, "pilot supervise: -config is required")
 		os.Exit(2)
 	}
 
-	// translate SIGINT/SIGTERM into ctx cancellation for a clean shutdown
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+	// On Windows the SCM launches us without a console; send our logs + nebula's
+	// stdout/stderr to <dir>/pilot.log before the logger is built. No-op elsewhere.
+	prepareServiceLogging(*dir)
+	log := clilog.Setup(clilog.Options{Format: *logFormat, Level: *logLevel})
 
-	sup := &supervisor.Supervisor{
-		NebulaPath:     *nebulaPath,
-		ConfigPath:     *configPath,
-		ExpectedSHA256: *sha,
-	}
-	installReload(ctx, sup, log) // SIGHUP -> hot reload nebula (Unix); no-op on Windows
-	log.Info("pilot supervise starting", "config", *configPath, "nebula", *nebulaPath, "version", version)
+	// serve runs the supervise work until ctx is cancelled. runSupervisor supplies
+	// that ctx: SIGINT/SIGTERM on Unix, the SCM Stop/Shutdown control on Windows.
+	serve := func(ctx context.Context) error {
+		sup := &supervisor.Supervisor{
+			NebulaPath:     *nebulaPath,
+			ConfigPath:     *configPath,
+			ExpectedSHA256: *sha,
+		}
+		installReload(ctx, sup, log) // SIGHUP -> hot reload nebula (Unix); no-op on Windows
+		log.Info("pilot supervise starting", "config", *configPath, "nebula", *nebulaPath, "version", version)
 
-	if *core != "" {
-		if *configPub == "" {
-			fatalf("supervise: -core requires -config-pub")
-		}
-		pubPEM, err := os.ReadFile(*configPub)
-		if err != nil {
-			fatalf("supervise: read -config-pub: %v", err)
-		}
-		pinned, err := enrollclient.ParsePinnedConfigPub(pubPEM)
-		if err != nil {
-			fatalf("supervise: %v", err)
-		}
-		layout := paths.New(*dir)
-		mgr := renew.New(renew.Config{
-			Layout: layout, CoreURL: *core, PinnedConfigPub: pinned,
-			Reload: sup.Reload,
-		})
-		go func() { _ = mgr.Run(ctx) }()
+		if *core != "" {
+			if *configPub == "" {
+				return fmt.Errorf("supervise: -core requires -config-pub")
+			}
+			pubPEM, err := os.ReadFile(*configPub)
+			if err != nil {
+				return fmt.Errorf("supervise: read -config-pub: %w", err)
+			}
+			pinned, err := enrollclient.ParsePinnedConfigPub(pubPEM)
+			if err != nil {
+				return fmt.Errorf("supervise: %w", err)
+			}
+			layout := paths.New(*dir)
+			mgr := renew.New(renew.Config{
+				Layout: layout, CoreURL: *core, PinnedConfigPub: pinned,
+				Reload: sup.Reload,
+			})
+			go func() { _ = mgr.Run(ctx) }()
 
-		// Heartbeat + typed command channel (4.6): report state; act on the
-		// closed command set. Core-issued renew reuses the renewal path;
-		// apply_bundle (7.1b) does a config-only refresh (GET /v1/config) so a
-		// blocklist/policy/lighthouse change applies fast without a cert re-issue.
-		hb := heartbeat.New(heartbeat.Config{
-			CoreURL: *core, Layout: layout, PilotVersion: version, PinnedConfigPub: pinned,
-			Handlers: heartbeat.Handlers{
-				Renew:   mgr.RenewNow,
-				Restart: sup.Restart,
-				ApplyBundle: func(ctx context.Context, _ int) error {
-					if _, err := enrollclient.FetchConfig(ctx, enrollclient.RenewParams{
-						CoreURL: *core, Layout: layout, PinnedConfigPub: pinned,
-					}); err != nil {
-						return err
-					}
-					return sup.Reload()
+			// Heartbeat + typed command channel (4.6): report state; act on the
+			// closed command set. Core-issued renew reuses the renewal path;
+			// apply_bundle (7.1b) does a config-only refresh (GET /v1/config) so a
+			// blocklist/policy/lighthouse change applies fast without a cert re-issue.
+			hb := heartbeat.New(heartbeat.Config{
+				CoreURL: *core, Layout: layout, PilotVersion: version, PinnedConfigPub: pinned,
+				Handlers: heartbeat.Handlers{
+					Renew:   mgr.RenewNow,
+					Restart: sup.Restart,
+					ApplyBundle: func(ctx context.Context, _ int) error {
+						if _, err := enrollclient.FetchConfig(ctx, enrollclient.RenewParams{
+							CoreURL: *core, Layout: layout, PinnedConfigPub: pinned,
+						}); err != nil {
+							return err
+						}
+						return sup.Reload()
+					},
 				},
-			},
-		})
-		go func() { _ = hb.Run(ctx) }()
+			})
+			go func() { _ = hb.Run(ctx) }()
 
-		// Drift detection (M6.7): re-assert the signed config over any local edit.
-		dm := drift.New(drift.Config{Layout: layout, PinnedConfigPub: pinned, Reload: sup.Reload})
-		go func() { _ = dm.Run(ctx) }()
-		log.Info("pilot background tasks enabled", "renew", true, "heartbeat", true, "drift", true, "core", *core)
+			// Drift detection (M6.7): re-assert the signed config over any local edit.
+			dm := drift.New(drift.Config{Layout: layout, PinnedConfigPub: pinned, Reload: sup.Reload})
+			go func() { _ = dm.Run(ctx) }()
+			log.Info("pilot background tasks enabled", "renew", true, "heartbeat", true, "drift", true, "core", *core)
+		}
+		return sup.Run(ctx)
 	}
 
-	if err := sup.Run(ctx); err != nil {
+	if err := runSupervisor(serve, log); err != nil {
 		log.Error("pilot supervise exited", "err", err)
 		os.Exit(1)
 	}
@@ -372,7 +382,7 @@ func cmdInstall(args []string) {
 	region := fs.String("region", "", "STS region for -aws-sigv4 (default: IMDS-derived)")
 	name := fs.String("name", "", "requested device name (cosmetic)")
 	groups := fs.String("groups", "", "requested groups (advisory; cloud-trust / join key decides)")
-	nebulaPath := fs.String("nebula", "/usr/local/bin/nebula", "path to the nebula binary the service runs")
+	nebulaPath := fs.String("nebula", defaultNebulaPath, "path to the nebula binary the service runs")
 	timeout := fs.Duration("timeout", 60*time.Second, "max time to wait for the enroll result")
 	clockServer := fs.String("clock-server", "pool.ntp.org", "NTP server for the pre-flight clock check")
 	maxSkew := fs.Duration("max-skew", 5*time.Second, "max tolerated clock skew (fail-closed)")
