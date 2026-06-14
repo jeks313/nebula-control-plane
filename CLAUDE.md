@@ -108,8 +108,8 @@ need the cloud, verified once in the minimal Tier-2 harness).
 > This is a fast summary — re-read those for exact state.
 
 **M0–M6 complete; M7.1 done; mid-milestone DIVERGENCE to ADR 0005 (pull-based gateways) for a
-real-topology live demo — ADR 0005 Phase 1 done, next is its Phase 2/3, then back to 7.2.** Schema
-at migration **000014**. M0 feasibility PASSED (2026-06-11: SoftHSM P256 CA signs certs,
+real-topology live demo — ADR 0005 Phases 1+2 done, next is Phase 3 (Terraform demo node), then
+back to 7.2.** Schema at migration **000015**. M0 feasibility PASSED (2026-06-11: SoftHSM P256 CA,
 tunnel forms — design §M0 results; spike under `spike/m0/`, `make m0-*`). The trust
 spine is built end-to-end **on Linux** (Windows/macOS parity deferred to M10):
 - **M1 Pilot** — supervises `nebula`, host keygen, enroll, renew, render, drift-revert.
@@ -183,11 +183,11 @@ bootstrap; reuse result-TTL; pinned-cert-sufficient).
   `enrollment.Config.Results` is now a `ResultSink` interface (`*queue.Durable` still satisfies it →
   co-located mode unchanged). `gateway -collect-addr…` + `gateway collect-keygen`; `harbor collect`
   (replaces `enroll worker` for the split topology). Proven by unit tests + a real-binary mTLS check.
-- ⏭️ **Phase 2 — the gateway registry (NEXT).** `internal/gatewayreg` mirroring `internal/lighthouse`
-  (address + pinned cert + state, audited) + `harbor gateway add|remove|list`; the collector polls
-  all registered gateways (swap the single `-gateway-url` flag for the registry). Console surface
-  deferred with the other UI work.
-- ⏭️ **Phase 3 — the demo node (Terraform).** `deploy/terraform`: add a standalone OFF-mesh gateway
+- ✅ **Phase 2 — the gateway registry.** `internal/gatewayreg` (migration 000015 `gateways`;
+  Add/Remove/List/Active, audited, validates the pinned cert, reactivates-in-place) + `harbor gateway
+  add|remove|list`. `harbor collect` polls all active registered gateways by default (re-read each
+  cycle), `-gateway-url` kept as a single-gateway override. Console surface deferred with the UI work.
+- ⏭️ **Phase 3 — the demo node (Terraform) — NEXT.** `deploy/terraform`: add a standalone OFF-mesh gateway
   EC2 with its own SG (`:8443` public + the collect port from Harbor's source only; **no** Nebula
   UDP); harbor STOPS exposing the gateway publicly and instead reaches out to the gateway's collect
   port; `user_data` bootstraps `cmd/gateway`; register it with `harbor gateway add`. Today's
