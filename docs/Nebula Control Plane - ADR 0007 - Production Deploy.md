@@ -1,0 +1,151 @@
+---
+title: "ADR 0007 — Production Deploy"
+created: 2026-06-14
+status: accepted
+tags: [nebula, adr, production, deploy, kms, aurora, postgres, saml, entra-id, ha, observability, terraform]
+---
+
+# ADR 0007 — Production Deploy
+
+**Status:** Accepted (target architecture for `deploy/prod/`; phased)
+**Date:** 2026-06-14
+**Decision owners:** Chris Hyde
+
+## Context
+
+The cloud deploy proven live on 2026-06-14 (`deploy/terraform`, both-Fargate gateway +
+lighthouse) is deliberately **lab-grade**: the CA + config-signing keys are `0600` files
+on the harbor node; `harbor.db` and the enrollment queue are local **SQLite**; the console
+uses the **dev mock-IdP**; public enroll is **plaintext HTTP** behind the NLB; everything
+is **single-AZ**; images are **alpine**. That tree stays as-is for demo/iteration work.
+
+`deploy/prod/` is a **separate, self-contained copy** of that baseline (repointed to its
+own tree; the demo is untouched). **This ADR is the design to bring `deploy/prod/` to
+production grade**, and it is grounded in a code assessment of what harbor already does.
+
+### Key finding — harbor was built for production; the demo just runs the lab-mode options
+
+This is the framing that should govern the work: the production primitives are **already
+in the codebase**, so prod is overwhelmingly *provision the managed infra + flip lab→prod
+flags + a handful of small, already-hooked code changes* — **not** a rebuild.
+
+- **Datastore is already multi-dialect.** `store.Open` switches the GORM dialector on
+  `-driver sqlite|postgres` (`internal/store/store.go:45`); pgx is vendored; all 15
+  `gormigrate` migrations have hand-typed Postgres SQL; every subcommand carries
+  `-driver/-dsn`. **Aurora is a DSN swap, not new persistence code.**
+- **Signing is already backend-pluggable.** `signer.Backend` (PublicKey +
+  SignDigest→ASN.1-DER, `internal/signer/signer.go:23`) is consumed by **both** the
+  nebula-cert path and the ES256 JWS config-signing path, with a **working pkcs11/SoftHSM
+  backend** proving the abstraction over real hardware, and `store.Key` already has
+  `Backend`/`URI` columns documented `kms | softhsm | local`. **KMS = implement the
+  already-designed backend (~100 lines), not design signing.**
+- **Console auth is already production-complete.** `internal/adminauth` ships generic
+  **OIDC** (Auth-Code+PKCE), a **SAML 2.0 SP** (signed assertions, RelayState/InResponseTo,
+  ForceAuthn step-up, SP metadata), and **GitHub OAuth** — all fail-closed to RBAC roles,
+  server-side sessions, CSRF. The demo only *looks* mock-only because genesis runs
+  `-mock-idp -environment development`. **Entra ID SSO = configure the existing SAML SP.**
+- **harbor already runs as N instances.** It is stateless-per-request against a shared DB;
+  the correctness-critical concurrency paths (IPAM unique+retry, queue claim/ack, join-key
+  max-uses) are multi-instance-safe. HA needs four small shared-state fixes, **not** a
+  redesign and **no** leader election.
+
+What is genuinely net-new is narrow and enumerated below.
+
+## Decision
+
+Target architecture for `deploy/prod/`:
+
+1. **Keys → AWS KMS.** The CA signing key and the config-signing key become KMS
+   `ECC_NIST_P256` `SIGN_VERIFY` keys; harbor signs via `kms:Sign`/`kms:GetPublicKey`. Keys
+   never leave KMS; the genesis ceremony stops writing `ca.key`/`config-signing.key`.
+2. **Database → Aurora PostgreSQL (Multi-AZ).** `harbor.db` moves to Aurora (DSN swap). The
+   enrollment **queue** — the one SQLite-pinned component — moves to **SQS + DLQ** (or a
+   Postgres-dialect queue) behind the existing `queue.Queue` seam.
+3. **IdP → Azure AD / Entra ID via SAML** for the admin console (configure the existing
+   SAML SP). Step-by-step in the companion runbook (below).
+4. **HA / multi-AZ.** ≥2 harbor Cores across AZs (+ the four shared-state fixes), ≥2
+   gateways, ≥3 lighthouses, Aurora Multi-AZ.
+5. **Edge TLS → ACM on an ALB** for public enroll (+ WAF/Shield). Collect stays
+   leaf-pinned mTLS; the lighthouse keeps the UDP NLB (`preserve_client_ip` proven live
+   2026-06-14). Multi-AZ subnets.
+6. **Distroless images** — per **ADR 0006**.
+7. **Observability + backup/DR.** `/metrics` + `/healthz` + `/readyz`, CloudWatch for the
+   harbor node(s), SNS alarms (wire the existing `signer.OnAlarm`), Aurora PITR, KMS
+   multi-Region replica, audit export to S3 Object-Lock.
+
+## What exists vs. net-new (the honest inventory)
+
+| Area | Already in harbor | Net-new **code** (small, hooked) | Net-new **terraform/ops** |
+|---|---|---|---|
+| **Postgres/Aurora** | multi-dialect store, all 15 PG migrations, pgx | PG **connection-pool** tuning (`store.go:63` hook); **queue** PG-dialect or SQS backend; audit **advisory lock** | Aurora cluster (Multi-AZ), SG, subnet group, Secrets Manager DSN, migrate-as-init job |
+| **KMS** | `signer.Backend` iface + working pkcs11 backend; `store.Key.Backend/URI` cols | `internal/signer/kms.go` (~100 LOC, aws-sdk-go-v2); `"kms"` case in 3 dispatch switches + `-kms-*-arn` flags | 2× `aws_kms_key` (ECC_P256) + least-priv IAM (`kms:Sign`/`GetPublicKey` only) + CloudTrail |
+| **Entra SAML IdP** | full SAML 2.0 SP (`internal/adminauth/saml.go`), `-saml-*` flags, fail-closed RBAC | OIDC client-secret-from-file *(SAML already uses key files)*; schedule `SessionStore.GC` | register the Enterprise App; inject metadata + SP keypair; sessions ride Aurora |
+| **HA** | N stateless instances; IPAM/queue/joinkey concurrency-safe | 4 fixes: audit advisory lock, **nonce replay** shared store, signer **breaker** shared, **rollout** `FOR UPDATE` | ≥2 Cores multi-AZ; ≥2 gw / ≥3 lh; pre-deploy migrate step |
+| **Edge TLS** | in-gateway TLS wired; collect mTLS real | *(none if ACM/ALB path)* | ALB + ACM for enroll; WAF/Shield; multi-AZ subnets |
+| **Obs / DR** | slog, hash-chained audit, `signer.OnAlarm` hook | `/metrics`+`/healthz`+`/readyz`; wire `OnAlarm`→SNS; optional `audit export` | CloudWatch (EC2 harbor), SNS alarms, Aurora PITR, KMS multi-Region, S3 WORM audit |
+
+The recurring theme: the **terraform/ops** column is the bulk of the work; the **code**
+column is a short list of small, localized changes against hooks that already exist.
+
+## Phased plan
+
+Ordered so each phase de-risks the next; KMS + Aurora are the foundation.
+
+- **Phase 1 — Datastore (Aurora).** `aws_rds_cluster` (aurora-postgresql, Multi-AZ) +
+  instances + subnet group + SG (5432 from the harbor SG only) + Secrets Manager DSN;
+  add a `case "postgres"` pool-tuning block at `store.go:63`; **decide the queue backend**
+  (SQS+DLQ recommended — the queue is ephemeral per-gateway today); run `harbor migrate up`
+  as a one-shot init job against the Aurora **writer**; add Postgres CI integration tests.
+- **Phase 2 — KMS.** `internal/signer/kms.go` (implement `signer.Backend` via `kms.Sign`
+  MessageType=DIGEST / `GetPublicKey`); add `"kms"` to `loadBackend`/`genesis`/`ca-init`
+  (`cmd/harbor/main.go:597,1781,342`) + `-kms-ca-key-arn`/`-kms-config-key-arn`; terraform
+  two ECC_P256 keys + least-priv IAM; update the genesis ceremony to pre-create the keys
+  and **stop writing/scp-ing** `ca.key`/`config-signing.key`; populate `store.Key.URI`.
+- **Phase 3 — IdP (Entra SAML).** Configure the existing SAML SP per the **runbook**;
+  custody a **stable SP keypair**; add OIDC client-secret-from-file (SAML already uses key
+  files); schedule `SessionStore.GC`; sessions persist via Aurora (Phase 1). Pin a
+  `-role-map` from the Entra admin group to `admin` and verify before cutover.
+- **Phase 4 — HA.** ≥2 Cores across AZs (ASG or Fargate `desired_count≥2`, each its own
+  mesh node in `group:control-plane`); land the four shared-state fixes — audit advisory
+  lock (`audit.go:64`), pluggable shared **nonce replay** store, shared **signer breaker**,
+  rollout `Evaluate` under `SELECT … FOR UPDATE` (`rollout.go:229`); raise gateways to ≥2
+  and register ≥3 lighthouses across AZs.
+- **Phase 5 — Edge/TLS.** Move public **enroll** to an **ALB + ACM** cert (gateway stays
+  `-insecure` behind the trusted proxy — the path `cmd/gateway/main.go` already anticipates),
+  attach **WAF** (rate rules + managed groups), tighten `gateway_cidr`; carve subnets across
+  ≥2 AZs. Collect + the lighthouse UDP NLB are unchanged.
+- **Phase 6 — Images.** Distroless per **ADR 0006** (gateway env-var config + `cmd/nebula-boot`).
+- **Phase 7 — Obs/DR.** `/metrics`+`/healthz`+`/readyz` on core-api/admin/gateway; ship
+  EC2-harbor logs to CloudWatch; SNS alarms (wire `signer.OnAlarm`, breaker trips,
+  audit-verify failures); Aurora PITR + final-snapshot + deletion-protection; KMS
+  multi-Region replica keys; export the hash-chained audit to S3 Object-Lock; raise log
+  retention + customer-managed CMKs + non-zero secret recovery windows.
+
+## Consequences
+
+- **+** A genuinely production-grade posture — non-exportable CA in KMS, Multi-AZ managed
+  DB with PITR, enterprise SSO, HA control plane, TLS+WAF at the edge — reached mostly via
+  managed AWS services + a short, well-scoped code list, because the architecture
+  anticipated it.
+- **+** The demo (`deploy/terraform`) is untouched and stays fast to iterate on.
+- **−** Real net-new code, even if small: the KMS backend, the queue backend, the four HA
+  shared-state fixes, metrics/health endpoints, and a few secret-from-file hooks. None are
+  architecture changes, but all need tests (the Postgres path currently has **zero**
+  runtime test coverage).
+- **−** More moving parts + cost: Aurora, KMS, ALB/WAF, multi-AZ, CloudWatch/SNS.
+- **−** Operational ceremony grows: the genesis ceremony now creates KMS keys; key rotation
+  (CA + config-signing) is designed (staged/active/draining/retired) but **unimplemented**
+  and becomes a real prod need.
+
+## Relationship to other work
+
+- **ADR 0006 (Distroless images)** — Phase 6; the prod images are distroless.
+- **ADR 0005 (Pull-based gateways)** — the off-mesh gateway + collect mTLS carried forward.
+- **ADR 0004 (SSO-driven user enrollment)** — *reuses* this ADR's IdP (adminauth); it's a
+  feature built on the same SAML/OIDC, not a prod-readiness blocker for the
+  console+machine-enrollment scope.
+- **ADR 0003 (self-update/distribution)** — the KMS/PKI fork here mirrors 0003/0004.
+- **Implementation Plan M9 / M9.5** — already names the HA targets (shared nonce/audit,
+  Aurora, SQS); this ADR is their deploy-shaped expression.
+- **`deploy/prod/`** — the tree this ADR drives; **companion runbook:** `Nebula Control
+  Plane - Runbook - Entra ID SAML SSO for the Console.md`.
