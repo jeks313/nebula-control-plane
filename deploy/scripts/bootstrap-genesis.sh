@@ -27,8 +27,8 @@
 # the exact enroll commands: the CLOUD client joins KEYLESS via aws-sigv4 attestation
 # (its IAM role); the off-cloud iMac joins via a join key with manual approval.
 #
-# Requires locally: terraform, jq, go, ssh, scp, openssl  (+ aws & docker, and AWS creds
-# in the env — e.g. `aws-vault exec ... -- bash ...` — when gateway_runtime=fargate).
+# Requires locally: terraform, jq, go, ssh, scp, openssl  (+ aws & a container engine
+# [podman or docker], and AWS creds in the env, when gateway_runtime=fargate).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -64,8 +64,10 @@ HB_IP="$(val '.public_ips.value.harbor')"
 GW_IP="$(val '.public_ips.value.gateway')"          # off-mesh gateway EC2 node (empty when gateway_runtime=fargate)
 CL_IP="$(val '.public_ips.value.client')"
 LH_ADDR="$(val '.lighthouse_addr.value')"
-GW_URL="$(val '.gateway_url.value')"                # public enroll URL (node IP or NLB DNS)
-GW_COLLECT="$(val '.gateway_collect_addr.value')"   # gateway's Harbor-facing collect URL
+GW_URL="$(val '.gateway_url.value')"                # PUBLIC enroll URL (off-cloud clients; public NLB DNS / node IP)
+GW_URL_INTERNAL="$(val '.gateway_url_internal.value')" # IN-VPC enroll URL (cloud client; internal NLB DNS / node IP)
+GW_COLLECT="$(val '.gateway_collect_addr.value')"   # gateway's Harbor-facing collect URL (in-VPC; internal NLB / node IP)
+[[ -n "$GW_URL_INTERNAL" ]] || GW_URL_INTERNAL="$GW_URL" # older state without the internal output
 GATEWAY_RUNTIME="$(val '.gateway_runtime.value')"; GATEWAY_RUNTIME="${GATEWAY_RUNTIME:-ec2}"
 LIGHTHOUSE_RUNTIME="$(val '.lighthouse_runtime.value')"; LIGHTHOUSE_RUNTIME="${LIGHTHOUSE_RUNTIME:-ec2}"
 NAME_PREFIX="$(val '.name_prefix.value')"; NAME_PREFIX="${NAME_PREFIX:-ncp}"
@@ -87,7 +89,9 @@ fi
 # populate the config secret, force the ECS deploy). Run the bootstrap under the same
 # AWS creds you used for terraform (e.g. `aws-vault exec nebula -- bash ...`).
 if [[ "$GATEWAY_RUNTIME" == "fargate" ]]; then
-  for t in aws docker; do command -v "$t" >/dev/null || { echo "missing tool (gateway_runtime=fargate): $t" >&2; exit 1; }; done
+  command -v aws >/dev/null || { echo "missing tool (gateway_runtime=fargate): aws" >&2; exit 1; }
+  command -v "${CONTAINER_ENGINE:-podman}" >/dev/null || command -v docker >/dev/null || {
+    echo "missing container engine (gateway_runtime=fargate): install podman or docker, or set CONTAINER_ENGINE" >&2; exit 1; }
 fi
 
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
@@ -268,22 +272,31 @@ else
   echo "    gateway image pushed, secret populated, ECS deployment forced (off-mesh Fargate; NLB enroll + Harbor-only collect)"
 fi
 
-echo "==> [harbor] register the gateway + start the pull collector + imac join key"
+echo "==> [harbor] register the gateway + start the pull collector"
 rcp "$WORK/gw-collect.crt" "$SSH_USER@$HB_IP:/tmp/gw-collect.crt"
-IMAC_KEY="$(rsh "$HB_IP" "set -e
+rsh "$HB_IP" "set -e
   cd ~/ncp
   DSN=~/ncp/harbor.db; G=~/ncp/genesis
   install -m0644 /tmp/gw-collect.crt gw-collect.crt; rm -f /tmp/gw-collect.crt
-  harbor gateway add -dsn \$DSN -name gw1 -url '$GW_COLLECT' -cert ~/ncp/gw-collect.crt -actor alice >/dev/null 2>&1 || true
+  # Idempotent register: add only if this URL isn't already listed, then VERIFY it is —
+  # do NOT swallow a failed registration (a collector with zero gateways drains nothing).
+  if ! harbor gateway list -dsn \$DSN 2>/dev/null | grep -Fq '$GW_COLLECT'; then
+    harbor gateway add -dsn \$DSN -name gw1 -url '$GW_COLLECT' -cert ~/ncp/gw-collect.crt -actor alice
+  fi
+  harbor gateway list -dsn \$DSN 2>/dev/null | grep -Fq '$GW_COLLECT' \
+    || { echo 'FATAL: gateway gw1 ($GW_COLLECT) not registered with harbor — the collector would pull nothing' >&2; exit 1; }
   sudo systemctl reset-failed ncp-collect ncp-core ncp-admin 2>/dev/null || true
   # Run AS ec2-user so harbor.db stays ec2-user-owned (CLI/console can write results).
   sudo systemd-run --uid=$SSH_USER --gid=$SSH_USER --unit ncp-collect --collect /usr/local/bin/harbor collect -pool '$POOL' \
     -dsn \$DSN -ca-cert \$G/ca.crt -ca-key \$G/ca.key -config-key \$G/config-signing.key \
     -hmac-key ~/ncp/hmac.b64 -lighthouse '$LH' -cloudtrust-db \
     -client-cert ~/ncp/harbor-collect.crt -client-key ~/ncp/harbor-collect.key >/dev/null
-  # imac (off-cloud, no AWS identity) joins via a join key with manual approval.
-  harbor joinkey create -dsn \$DSN -name imac -groups laptops 2>/dev/null | grep -o 'njk_[A-Za-z0-9_-]*' || true")"
+  echo registered"
 echo "    gateway registered + collector pulling (attestation enabled)"
+
+# imac (off-cloud, no AWS identity) joins via a join key with manual approval.
+echo "==> [harbor] create the imac join key"
+IMAC_KEY="$(rsh "$HB_IP" "harbor joinkey create -dsn ~/ncp/harbor.db -name imac -groups laptops 2>/dev/null | grep -o 'njk_[A-Za-z0-9_-]*' || true")"
 
 # ── 8. harbor: core-api (renew/heartbeat) + admin console (mock-IdP) ─────────
 echo "==> [harbor] start core-api + admin console on the overlay ($HARBOR_OVERLAY, mesh-only)"
@@ -310,23 +323,26 @@ cat <<EOF
 ────────────────────────────────────────────────────────────────────────────
  GENESIS BOOTSTRAP COMPLETE  (control plane + data plane)
 ────────────────────────────────────────────────────────────────────────────
- Gateway (off-mesh): $GW_URL  (enroll)  ·  collect $GW_COLLECT  (Harbor-only, mTLS)
-                     Harbor PULLS it — the gateway initiates nothing, no mesh identity (ADR 0005)
+ Gateway (off-mesh): enroll(public) $GW_URL  ·  enroll(in-VPC) $GW_URL_INTERNAL
+                     collect $GW_COLLECT  (Harbor-only, mTLS) — Harbor PULLS it, gateway
+                     initiates nothing, no mesh identity (ADR 0005). In-VPC clients use the
+                     INTERNAL enroll URL (a public NLB isn't reachable from inside the VPC).
  Lighthouse        : $LH_OVERLAY @ $LH_ADDR  (pool $POOL)
  Harbor (mesh)     : $HARBOR_OVERLAY  — core-api :$CORE_PORT, console :$ADMIN_PORT (mesh-only)
  Config-signing pin: deploy/terraform/config-signing.pub  (give this to clients)
  Cloud-trust       : account $ACCOUNT / role $ROLE -> groups [workloads], auto-issue
 
- Enroll the CLOUD CLIENT — KEYLESS via aws-sigv4 attestation (its IAM role):
+ Enroll the CLOUD CLIENT — KEYLESS via aws-sigv4 attestation (its IAM role). It's IN the
+ VPC, so it enrolls via the INTERNAL gateway URL:
    scp -i $SSH_KEY deploy/terraform/config-signing.pub $SSH_USER@$CL_IP:/tmp/
    ssh -i $SSH_KEY $SSH_USER@$CL_IP \\
-     'sudo pilot enroll -dir /etc/nebula -gateway $GW_URL -aws-sigv4 -region $REGION \\
+     'sudo pilot enroll -dir /etc/nebula -gateway $GW_URL_INTERNAL -aws-sigv4 -region $REGION \\
         -config-pub /tmp/config-signing.pub -name aws-client && \\
       sudo systemd-run --unit ncp-nebula --collect pilot supervise -dir /etc/nebula \\
         -config /etc/nebula/config.yml -core http://$HARBOR_OVERLAY:$CORE_PORT -config-pub /tmp/config-signing.pub'
    # auto-issued (account is trusted, auto_issue=true) — no join key involved.
 
- Enroll the OFF-CLOUD iMac — join key, MANUAL approval:
+ Enroll the OFF-CLOUD iMac — join key, MANUAL approval (uses the PUBLIC enroll URL):
    imac join secret: ${IMAC_KEY:-<existed already; re-create with: harbor joinkey create -name imac -groups laptops>}
    pilot enroll -dir ~/.nebula -gateway $GW_URL -join-key ${IMAC_KEY:-<imac-key>} \\
      -config-pub deploy/terraform/config-signing.pub -name imac

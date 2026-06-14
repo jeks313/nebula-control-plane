@@ -34,13 +34,18 @@ output "lighthouse_ecr_repo" {
 }
 
 output "gateway_url" {
-  description = "Public enrollment gateway URL pilots target (the off-mesh gateway, ADR 0005). EC2: the node's public IP; Fargate: the NLB DNS name."
+  description = "PUBLIC enrollment URL for OFF-CLOUD clients (the iMac). EC2: the node's public IP; Fargate: the internet-facing NLB's DNS name. (In-VPC clients must use gateway_url_internal — a public NLB is not reachable from inside the VPC by DNS.)"
   value       = var.gateway_runtime == "fargate" ? "http://${one(aws_lb.gateway[*].dns_name)}:${var.gateway_port}" : "http://${lookup(local.public_ip, "gateway", "")}:${var.gateway_port}"
 }
 
+output "gateway_url_internal" {
+  description = "IN-VPC enrollment URL (e.g. the cloud client). EC2: same as the node (private); Fargate: the INTERNAL NLB's private DNS name."
+  value       = var.gateway_runtime == "fargate" ? "http://${one(aws_lb.gateway_internal[*].dns_name)}:${var.gateway_port}" : "http://${try(aws_instance.node["gateway"].private_ip, "")}:${var.gateway_port}"
+}
+
 output "gateway_collect_addr" {
-  description = "The gateway's Harbor-facing collect endpoint — what `harbor gateway add -url` registers. EC2: the node's private IP; Fargate: the NLB DNS name."
-  value       = var.gateway_runtime == "fargate" ? "https://${one(aws_lb.gateway[*].dns_name)}:${var.collect_port}" : "https://${try(aws_instance.node["gateway"].private_ip, "")}:${var.collect_port}"
+  description = "The gateway's Harbor-facing collect endpoint — what `harbor gateway add -url` registers. Must be reachable from Harbor inside the VPC. EC2: the node's private IP; Fargate: the INTERNAL NLB's private DNS name."
+  value       = var.gateway_runtime == "fargate" ? "https://${one(aws_lb.gateway_internal[*].dns_name)}:${var.collect_port}" : "https://${try(aws_instance.node["gateway"].private_ip, "")}:${var.collect_port}"
 }
 
 output "gateway_runtime" {

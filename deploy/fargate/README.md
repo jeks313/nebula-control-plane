@@ -26,15 +26,22 @@ serverless, and the example deploy uses it by default.
 
 - an **ECS Fargate service** in the `edge` subnet running `cmd/gateway` (a tiny alpine
   image: the static binary + an entrypoint that materializes config — `Dockerfile`),
-- a **network load balancer** for a stable address (Fargate task IPs are ephemeral),
-  with the ADR-0005 posture enforced at the NLB's security group: **`:8443` (enroll)
-  public, `:9443` (collect) from Harbor's SG only**,
+- **two network load balancers** for stable addresses (Fargate task IPs are ephemeral) —
+  this split is required because an *internet-facing* NLB is **not reachable from inside
+  the VPC** by DNS, so in-VPC consumers (Harbor pulling collect; the cloud client
+  enrolling) need a private path:
+  - a **public (internet-facing) NLB** carrying **`:8443` enroll only** — for off-cloud
+    clients (the iMac),
+  - an **internal NLB** carrying **`:8443` enroll + `:9443` collect** — for in-VPC
+    consumers. The ADR-0005 posture holds: **collect is reachable only from Harbor's SG**
+    (on the internal NLB); enroll is public on the internet-facing NLB,
 - config (nonce key + leaf-pinned mTLS certs) injected from **Secrets Manager**,
 - CloudWatch logs, a least-privilege task execution role.
 
-`gateway_url` / `gateway_collect_addr` outputs resolve to the NLB DNS name
-automatically. The **genesis bootstrap does the gateway Fargate wiring for you** —
-build/push the image, populate the secret, force the deploy (see "Run it" below).
+Outputs: `gateway_url` (public enroll, off-cloud), `gateway_url_internal` (in-VPC enroll),
+`gateway_collect_addr` (internal collect) resolve to the right NLB automatically. The
+**genesis bootstrap does the gateway Fargate wiring for you** — build/push the image,
+populate the secret, force the deploy, register + verify the gateway (see "Run it").
 
 `gateway_runtime = "ec2"` puts it back on a VM (the original ADR-0005 path) — unchanged.
 
