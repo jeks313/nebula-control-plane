@@ -31,6 +31,7 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/dualcontrol"
 	"github.com/jeks313/nebula-control-plane/internal/enrollment"
 	"github.com/jeks313/nebula-control-plane/internal/fleet"
+	"github.com/jeks313/nebula-control-plane/internal/gatewayreg"
 	"github.com/jeks313/nebula-control-plane/internal/genesis"
 	"github.com/jeks313/nebula-control-plane/internal/httpserve"
 	"github.com/jeks313/nebula-control-plane/internal/ipam"
@@ -84,6 +85,8 @@ func main() {
 		cmdFleet(os.Args[2:])
 	case "lighthouse":
 		cmdLighthouse(os.Args[2:])
+	case "gateway":
+		cmdGateway(os.Args[2:])
 	case "blocklist":
 		cmdBlocklist(os.Args[2:])
 	case "rollout":
@@ -125,8 +128,11 @@ usage:
   harbor enroll pending    [db flags]        list enrollments awaiting approval
   harbor enroll approve    <id> -approver A  [core flags]  approve a pending host
   harbor core-api          -addr ADDR [core flags]  mesh-only API (renew/heartbeat)
-  harbor collect           -gateway-url URL -gateway-cert C -client-cert C -client-key K [core flags]
-                           ADR-0005 pull collector: drain an off-mesh gateway over mTLS
+  harbor collect           -client-cert C -client-key K [core flags]   ADR-0005 pull collector:
+                           drain registered gateways over mTLS (or one via -gateway-url/-gateway-cert)
+  harbor gateway add       -name N -url https://host:port -cert GW.crt -actor A [db flags]
+  harbor gateway remove    -name N -actor A [db flags]
+  harbor gateway list      [db flags]
   harbor admin-api         -addr ADDR [-dev-auth] [db flags]  mesh-only admin API (console)
   harbor seed-demo         [db flags]      DEV ONLY: populate a synthetic fleet for the console demo
   harbor fleet             [-expiry-within D] [-stale-after D] [-alert] [db flags]
@@ -685,16 +691,8 @@ func cmdCollect(args []string) {
 	_ = fs.Parse(args)
 	log := lf.setup()
 
-	if *gwURL == "" || *gwCertPath == "" || *clientCertPath == "" || *clientKeyPath == "" {
-		fatalf("collect: -gateway-url, -gateway-cert, -client-cert and -client-key are required")
-	}
-	gwPEM, err := os.ReadFile(*gwCertPath)
-	if err != nil {
-		fatalf("collect: read -gateway-cert: %v", err)
-	}
-	gwPin, err := collect.PinFromCertPEM(gwPEM)
-	if err != nil {
-		fatalf("collect: -gateway-cert: %v", err)
+	if *clientCertPath == "" || *clientKeyPath == "" {
+		fatalf("collect: -client-cert and -client-key are required")
 	}
 	clientCert, err := tls.LoadX509KeyPair(*clientCertPath, *clientKeyPath)
 	if err != nil {
@@ -706,21 +704,65 @@ func cmdCollect(args []string) {
 	sink := collect.NewCaptureSink()
 	cons := cf.buildConsumer(s, sink)
 	coll := collect.New(collect.Config{Processor: cons, Sink: sink, ClientCert: clientCert, Batch: *batch, Logger: log})
-	gw := collect.Gateway{Name: "gateway", URL: *gwURL, ServerCertPin: gwPin}
+
+	// Gateways to poll: a single ad-hoc gateway from flags (Phase-1 override), or —
+	// the default — every ACTIVE gateway in the registry (Phase 2), re-read each
+	// cycle so `harbor gateway add/remove` takes effect live.
+	mode := "registry"
+	var gateways func() []collect.Gateway
+	if *gwURL != "" {
+		mode = "single-flag"
+		if *gwCertPath == "" {
+			fatalf("collect: -gateway-url requires -gateway-cert")
+		}
+		gwPEM, err := os.ReadFile(*gwCertPath)
+		if err != nil {
+			fatalf("collect: read -gateway-cert: %v", err)
+		}
+		gwPin, err := collect.PinFromCertPEM(gwPEM)
+		if err != nil {
+			fatalf("collect: -gateway-cert: %v", err)
+		}
+		gw := collect.Gateway{Name: "gateway", URL: *gwURL, ServerCertPin: gwPin}
+		gateways = func() []collect.Gateway { return []collect.Gateway{gw} }
+	} else {
+		reg := gatewayreg.New(s.DB, nil)
+		gateways = func() []collect.Gateway {
+			rows, err := reg.Active(context.Background())
+			if err != nil {
+				log.Warn("collect: read gateway registry", "err", err)
+				return nil
+			}
+			out := make([]collect.Gateway, 0, len(rows))
+			for _, row := range rows {
+				pin, err := collect.PinFromCertPEM([]byte(row.CertPEM))
+				if err != nil {
+					log.Warn("collect: skipping gateway with an unparseable pinned cert", "name", row.Name, "err", err)
+					continue
+				}
+				out = append(out, collect.Gateway{Name: row.Name, URL: row.URL, ServerCertPin: pin})
+			}
+			return out
+		}
+	}
 
 	if *once {
-		n, err := coll.CollectOnce(context.Background(), gw)
-		if err != nil {
-			fatalf("collect: %v", err)
+		total := 0
+		for _, gw := range gateways() {
+			n, err := coll.CollectOnce(context.Background(), gw)
+			if err != nil {
+				fatalf("collect %s: %v", gw.Name, err)
+			}
+			total += n
 		}
-		fmt.Printf("collected %d candidate(s)\n", n)
+		fmt.Printf("collected %d candidate(s)\n", total)
 		return
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	log.Info("harbor collect running", "gateway", *gwURL, "interval", interval.String())
-	_ = coll.Run(ctx, func() []collect.Gateway { return []collect.Gateway{gw} }, *interval)
+	log.Info("harbor collect running", "mode", mode, "interval", interval.String())
+	_ = coll.Run(ctx, gateways, *interval)
 	log.Info("harbor collect stopped")
 }
 
@@ -829,6 +871,75 @@ func cmdLighthouse(args []string) {
 		}
 	default:
 		fatalf("lighthouse: unknown subcommand %q", sub)
+	}
+}
+
+// cmdGateway manages the pull-based enrollment-gateway registry (ADR 0005). The
+// collector (`harbor collect`) polls the active gateways here over leaf-pinned
+// mTLS. Adding a gateway pins its self-signed server cert; removing it stops the
+// collector polling it. Mirrors `harbor lighthouse`.
+func cmdGateway(args []string) {
+	if len(args) < 1 {
+		fatalf("gateway: want add|remove|list")
+	}
+	sub := args[0]
+	fs := flag.NewFlagSet("gateway "+sub, flag.ExitOnError)
+	driver, dsn := dbFlags(fs)
+	name := fs.String("name", "", "gateway name")
+	url := fs.String("url", "", "gateway collect URL (https://host:port)")
+	certPath := fs.String("cert", "", "gateway's server cert PEM (its leaf is pinned)")
+	actor := fs.String("actor", "operator", "admin identity for the audit trail")
+	_ = fs.Parse(args[1:])
+
+	s := openStore(*driver, *dsn)
+	defer s.Close()
+	audit := func(c context.Context, a, ac, t, d string) error { _, e := s.AppendAudit(c, a, ac, t, d); return e }
+	reg := gatewayreg.New(s.DB, audit)
+	ctx := context.Background()
+
+	switch sub {
+	case "add":
+		if *name == "" || *url == "" || *certPath == "" {
+			fatalf("gateway add: -name, -url and -cert are required")
+		}
+		certPEM, err := os.ReadFile(*certPath)
+		if err != nil {
+			fatalf("gateway add: read -cert: %v", err)
+		}
+		if _, err := reg.Add(ctx, *name, *url, string(certPEM), *actor); err != nil {
+			fatalf("gateway add: %v", err)
+		}
+		pin, _ := collect.PinFromCertPEM(certPEM)
+		fmt.Printf("registered gateway %s (%s)\npinned leaf (sha256): %x\n", *name, *url, pin)
+	case "remove":
+		if *name == "" {
+			fatalf("gateway remove: -name is required")
+		}
+		if err := reg.Remove(ctx, *name, *actor); err != nil {
+			fatalf("gateway remove: %v", err)
+		}
+		fmt.Printf("removed gateway %s (no longer polled)\n", *name)
+	case "list":
+		rows, err := reg.List(ctx)
+		if err != nil {
+			fatalf("gateway list: %v", err)
+		}
+		if len(rows) == 0 {
+			fmt.Println("no gateways registered")
+			return
+		}
+		fmt.Printf("%-16s %-9s %-36s %s\n", "NAME", "STATE", "URL", "PIN")
+		for _, r := range rows {
+			var pinStr string
+			if pin, err := collect.PinFromCertPEM([]byte(r.CertPEM)); err == nil {
+				pinStr = fmt.Sprintf("%x", pin[:8])
+			} else {
+				pinStr = "(bad cert)"
+			}
+			fmt.Printf("%-16s %-9s %-36s %s…\n", r.Name, r.State, r.URL, pinStr)
+		}
+	default:
+		fatalf("gateway: unknown subcommand %q", sub)
 	}
 }
 

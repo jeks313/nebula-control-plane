@@ -141,8 +141,18 @@ which is exactly what the pull/off-mesh model grants it.
   unpinned client certs and serves the pinned Harbor client). Open questions #2–#5
   took their minimal answers (fixed-interval poll; admin-paste pin bootstrap; reuse
   the existing result-TTL; pinned-cert-is-sufficient since Core re-verifies).
-- **Phase 2 — the registry.** Gateway registry store + admin CRUD (mirror lighthouse)
-  + console/CLI surfaces; Harbor polls all registered gateways.
+- ✅ **Phase 2 — the registry.** Gateway registry store + admin CRUD (mirror lighthouse)
+  + console/CLI surfaces; Harbor polls all registered gateways. **Implemented
+  (2026-06-14):** `internal/gatewayreg` (migration 000015 `gateways`; `Add`/`Remove`/
+  `List`/`Active`, audited, validates the pinned cert PEM, reactivates a removed name
+  in place) + `harbor gateway add|remove|list`. `harbor collect` now polls **all
+  active registered gateways** by default (re-read each cycle, so add/remove takes
+  effect live), with the single `-gateway-url`/`-gateway-cert` flags kept as a
+  Phase-1 override. *Proven:* `gatewayreg` unit tests (add/remove/list/active/dup/
+  reactivate/bad-cert) + a real-binary smoke (register → `collect` registry-mode
+  handshakes + claims → remove → nothing polled; audit chain intact). Console surface
+  deferred with the other UI work. (No "last active" invariant — a gateway is an
+  off-mesh sink, so removing the last one only pauses public enrollment.)
 - **Phase 3 — the demo node.** A standalone public gateway EC2 (own SG: `:8443`
   public + the poll port restricted to Harbor; **not** on the mesh), registered with
   Harbor — the real public-edge/Core split, with no Postgres.
