@@ -151,12 +151,14 @@ CA/cert/config, and overlay IP. Install is therefore **per-mesh, additive, names
 - **Collision guards** install enforces: distinct **listen ports** and distinct **tun device
   names**, plus **disjoint overlay CIDRs** across the meshes a host joins (dev `10.44/16`,
   prod `10.45/16`). Overlapping CIDRs would require policy routing — **out of scope**; install
-  refuses it. *(Concretely: pilot's config renderer defaults `tun.dev` to `nebula1`
-  (`internal/nebulaconfig/render.go` — `TunDev`/`tun_dev`, template `tun.dev: {{ .TunDev }}`);
-  two meshes on one host would collide on it. For multi-mesh, pilot must set a **per-mesh**
-  `TunDev` — e.g. `nebula-<mesh-short>` — and likewise a per-mesh listen port when it generates
-  the nebula config. The template already parameterizes both, so it's a config-generation
-  change, not a template change.)*
+  refuses it. *(Concretely: `tun.dev` defaults to `nebula1` and the listen port to `4242`
+  (`internal/nebulaconfig/render.go`); two meshes on one host collide on both. For ENROLLED
+  hosts the config is rendered from Harbor's **signed bundle** (pilot's `enroll` writes it and
+  drift control reverts local edits), so the per-mesh `TunDev` + port must be set **Harbor-side**
+  in the bundle / mesh config policy — pilot's local renderer (`pilot init` / `pilotsetup`) only
+  governs standalone/pre-enroll configs like a lighthouse. The `install` command's own
+  namespacing (per-mesh state dir + `pilot@<mesh>` service) is already collision-free; the
+  tun/port is the remaining multi-mesh item, owned by Harbor's bundle rendering — task #27.)*
 - **Per-mesh identity, one shared anchor:** each mesh has its own CA + config-signing pin
   (delivered via its org-signed meshinfo); the **one pinned org root** trusts them all.
 - **Service model: N templated services** (independent lifecycle / self-update / failure
