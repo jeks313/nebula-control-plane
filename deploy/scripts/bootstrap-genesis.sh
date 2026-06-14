@@ -12,8 +12,11 @@
 #   4. lighthouse: install ca + lighthouse cert; start nebula
 #   5. harbor:     install ca + control-plane cert; start nebula (Harbor joins the mesh)
 #   6. harbor:     publish a cloud-trust config (this AWS account -> groups, auto-issue)
-#   7. harbor:     enrollment plane (gateway + worker, attestation-enabled) + the imac
-#                  join key (manual approval)
+#   7. gateway:    the OFF-MESH enrollment gateway (ADR 0005) on its OWN node — public
+#                  enroll + a Harbor-only mTLS collect port over a local queue; Harbor
+#                  registers it (`harbor gateway add`) + runs `harbor collect` to PULL
+#                  + issue + push results back (no shared queue, no mesh identity on the
+#                  gateway). Plus the imac join key (manual approval).
 #   8. harbor:     core-api (renew/heartbeat, -host-cert verified) + admin console
 #                  (mock-IdP), both bound to Harbor's OVERLAY IP (mesh-only)
 #
@@ -53,11 +56,13 @@ echo "==> reading terraform outputs"
 OUT="$(terraform -chdir="$TFDIR" output -json)"
 LH_IP="$(jq -r '.public_ips.value.lighthouse' <<<"$OUT")"
 HB_IP="$(jq -r '.public_ips.value.harbor' <<<"$OUT")"
+GW_IP="$(jq -r '.public_ips.value.gateway' <<<"$OUT")"      # off-mesh enrollment gateway (ADR 0005)
 CL_IP="$(jq -r '.public_ips.value.client' <<<"$OUT")"
 LH_ADDR="$(jq -r '.lighthouse_addr.value' <<<"$OUT")"
-GW_URL="$(jq -r '.gateway_url.value' <<<"$OUT")"
-echo "    lighthouse=$LH_IP  harbor=$HB_IP  client=$CL_IP"
-echo "    lighthouse underlay=$LH_ADDR  gateway=$GW_URL  harbor-overlay=$HARBOR_OVERLAY"
+GW_URL="$(jq -r '.gateway_url.value' <<<"$OUT")"            # public enroll URL (the gateway node)
+GW_COLLECT="$(jq -r '.gateway_collect_addr.value' <<<"$OUT")" # gateway's Harbor-facing collect URL (intra-VPC)
+echo "    lighthouse=$LH_IP  harbor=$HB_IP  gateway=$GW_IP  client=$CL_IP"
+echo "    lighthouse underlay=$LH_ADDR  enroll=$GW_URL  collect=$GW_COLLECT  harbor-overlay=$HARBOR_OVERLAY"
 
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 LH="$LH_OVERLAY=$LH_ADDR"
@@ -68,7 +73,7 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
   ( cd "$ROOT" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "$WORK/harbor" ./cmd/harbor \
     && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "$WORK/pilot" ./cmd/pilot \
     && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "$WORK/gateway" ./cmd/gateway )
-  for ip in "$LH_IP" "$HB_IP" "$CL_IP"; do
+  for ip in "$LH_IP" "$HB_IP" "$GW_IP" "$CL_IP"; do
     echo "    -> $ip"
     rcp "$WORK/harbor" "$WORK/pilot" "$WORK/gateway" "$SSH_USER@$ip:/tmp/"
     rsh "$ip" 'sudo install -m0755 /tmp/harbor /tmp/pilot /tmp/gateway /usr/local/bin/ && rm -f /tmp/harbor /tmp/pilot /tmp/gateway'
@@ -163,25 +168,59 @@ JSON
   echo ok"
 echo "    cloud-trust published (account $ACCOUNT -> [workloads], auto-issue)"
 
-# ── 7. harbor: enrollment plane (attestation-enabled) + imac join key ───────
-echo "==> [harbor] start gateway + enroll worker (-cloudtrust-db) + imac join key"
+# ── 7. enrollment plane: OFF-MESH gateway node + Harbor's pull collector (ADR 0005) ─
+# The gateway is now a SEPARATE, off-mesh node: it serves the public enroll port and
+# a Harbor-only mTLS collect port over its LOCAL queue, and initiates nothing. Harbor
+# PULLS from it (re-verifying every candidate), issues, and pushes results back. mTLS
+# is leaf-pinned: each side self-signs, the peer pins the leaf (no CA).
+GW_PORT="${GW_URL##*:}"
+COLLECT_PORT="${GW_COLLECT##*:}"
+
+echo "==> [harbor] mint the collector's client identity + the shared nonce key"
+rsh "$HB_IP" "set -e
+  cd ~/ncp; umask 077
+  [ -f hmac.b64 ] || openssl rand 32 | basenc --base64url | tr -d '=' > hmac.b64
+  [ -f harbor-collect.key ] || gateway collect-keygen -cn harbor-collector \
+    -cert-out harbor-collect.crt -key-out harbor-collect.key >/dev/null
+  echo ok"
+rcp "$SSH_USER@$HB_IP:ncp/harbor-collect.crt" "$WORK/harbor-collect.crt"  # Harbor's pinned client cert
+rcp "$SSH_USER@$HB_IP:ncp/hmac.b64"           "$WORK/hmac.b64"            # shared nonce key (gateway mints, Core verifies)
+
+echo "==> [gateway] mint server identity + start the off-mesh gateway (enroll :$GW_PORT, collect :$COLLECT_PORT)"
+rcp "$WORK/harbor-collect.crt" "$SSH_USER@$GW_IP:/tmp/harbor-collect.crt"
+rcp "$WORK/hmac.b64"           "$SSH_USER@$GW_IP:/tmp/hmac.b64"
+rsh "$GW_IP" "set -e
+  sudo install -d -o $SSH_USER -g $SSH_USER -m0750 /opt/ncp-gw
+  cd /opt/ncp-gw; umask 077
+  [ -f gw-collect.key ] || gateway collect-keygen -cn gateway-1 -cert-out gw-collect.crt -key-out gw-collect.key >/dev/null
+  [ -f qkey.b64 ] || openssl rand 32 | basenc --base64url | tr -d '=' > qkey.b64
+  install -m0644 /tmp/harbor-collect.crt harbor-collect.crt
+  install -m0644 /tmp/hmac.b64 hmac.b64; rm -f /tmp/harbor-collect.crt /tmp/hmac.b64
+  sudo systemctl reset-failed ncp-gateway 2>/dev/null || true
+  sudo systemd-run --uid=$SSH_USER --gid=$SSH_USER --unit ncp-gateway --collect --working-directory=/opt/ncp-gw /usr/local/bin/gateway \
+    -insecure -addr 0.0.0.0:$GW_PORT -hmac-key /opt/ncp-gw/hmac.b64 \
+    -queue-dsn /opt/ncp-gw/queue.db -queue-key /opt/ncp-gw/qkey.b64 \
+    -collect-addr 0.0.0.0:$COLLECT_PORT -collect-cert /opt/ncp-gw/gw-collect.crt \
+    -collect-key /opt/ncp-gw/gw-collect.key -harbor-client-cert /opt/ncp-gw/harbor-collect.crt >/dev/null
+  cat gw-collect.crt" > "$WORK/gw-collect.crt"
+echo "    gateway up (off-mesh; public enroll + Harbor-only collect)"
+
+echo "==> [harbor] register the gateway + start the pull collector + imac join key"
+rcp "$WORK/gw-collect.crt" "$SSH_USER@$HB_IP:/tmp/gw-collect.crt"
 IMAC_KEY="$(rsh "$HB_IP" "set -e
   cd ~/ncp
-  DSN=~/ncp/harbor.db; QDSN=~/ncp/queue.db; G=~/ncp/genesis
-  umask 077
-  [ -f hmac.b64 ]  || openssl rand 32 | basenc --base64url | tr -d '=' > hmac.b64
-  [ -f queue.b64 ] || openssl rand 32 | basenc --base64url | tr -d '=' > queue.b64
-  sudo systemctl reset-failed ncp-gateway ncp-worker ncp-core ncp-admin 2>/dev/null || true
-  # Run AS ec2-user so harbor.db + queue.db stay ec2-user-owned (a plain 'enroll
-  # approve' / the console can then write the issued-bundle result).
-  sudo systemd-run --uid=$SSH_USER --gid=$SSH_USER --unit ncp-gateway --collect /usr/local/bin/gateway \
-    -addr 0.0.0.0:${GW_URL##*:} -hmac-key ~/ncp/hmac.b64 -queue-dsn \$QDSN -queue-key ~/ncp/queue.b64 >/dev/null
-  sudo systemd-run --uid=$SSH_USER --gid=$SSH_USER --unit ncp-worker --collect /usr/local/bin/harbor enroll worker -pool '$POOL' \
+  DSN=~/ncp/harbor.db; G=~/ncp/genesis
+  install -m0644 /tmp/gw-collect.crt gw-collect.crt; rm -f /tmp/gw-collect.crt
+  harbor gateway add -dsn \$DSN -name gw1 -url '$GW_COLLECT' -cert ~/ncp/gw-collect.crt -actor alice >/dev/null 2>&1 || true
+  sudo systemctl reset-failed ncp-collect ncp-core ncp-admin 2>/dev/null || true
+  # Run AS ec2-user so harbor.db stays ec2-user-owned (CLI/console can write results).
+  sudo systemd-run --uid=$SSH_USER --gid=$SSH_USER --unit ncp-collect --collect /usr/local/bin/harbor collect -pool '$POOL' \
     -dsn \$DSN -ca-cert \$G/ca.crt -ca-key \$G/ca.key -config-key \$G/config-signing.key \
-    -hmac-key ~/ncp/hmac.b64 -queue-dsn \$QDSN -queue-key ~/ncp/queue.b64 -lighthouse '$LH' -cloudtrust-db >/dev/null
+    -hmac-key ~/ncp/hmac.b64 -lighthouse '$LH' -cloudtrust-db \
+    -client-cert ~/ncp/harbor-collect.crt -client-key ~/ncp/harbor-collect.key >/dev/null
   # imac (off-cloud, no AWS identity) joins via a join key with manual approval.
   harbor joinkey create -dsn \$DSN -name imac -groups laptops 2>/dev/null | grep -o 'njk_[A-Za-z0-9_-]*' || true")"
-echo "    enrollment plane up (attestation enabled)"
+echo "    gateway registered + collector pulling (attestation enabled)"
 
 # ── 8. harbor: core-api (renew/heartbeat) + admin console (mock-IdP) ─────────
 echo "==> [harbor] start core-api + admin console on the overlay ($HARBOR_OVERLAY, mesh-only)"
@@ -208,7 +247,8 @@ cat <<EOF
 ────────────────────────────────────────────────────────────────────────────
  GENESIS BOOTSTRAP COMPLETE  (control plane + data plane)
 ────────────────────────────────────────────────────────────────────────────
- Gateway URL       : $GW_URL
+ Gateway (off-mesh): $GW_URL  (enroll)  ·  collect $GW_COLLECT  (Harbor-only, mTLS)
+                     Harbor PULLS it — the gateway initiates nothing, no mesh identity (ADR 0005)
  Lighthouse        : $LH_OVERLAY @ $LH_ADDR  (pool $POOL)
  Harbor (mesh)     : $HARBOR_OVERLAY  — core-api :$CORE_PORT, console :$ADMIN_PORT (mesh-only)
  Config-signing pin: deploy/terraform/config-signing.pub  (give this to clients)

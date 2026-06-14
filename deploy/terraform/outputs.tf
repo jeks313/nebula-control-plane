@@ -24,8 +24,13 @@ output "lighthouse_addr" {
 }
 
 output "gateway_url" {
-  description = "Enrollment gateway URL pilots target."
-  value       = "http://${local.public_ip["harbor"]}:${var.gateway_port}"
+  description = "Public enrollment gateway URL pilots target (the off-mesh gateway node, ADR 0005)."
+  value       = "http://${local.public_ip["gateway"]}:${var.gateway_port}"
+}
+
+output "gateway_collect_addr" {
+  description = "The gateway's Harbor-facing collect endpoint (intra-VPC private IP:collect_port) — what `harbor gateway add -url` registers."
+  value       = "https://${aws_instance.node["gateway"].private_ip}:${var.collect_port}"
 }
 
 output "bootstrap_hint" {

@@ -61,9 +61,15 @@ variable "nebula_port" {
 }
 
 variable "gateway_port" {
-  description = "Public TCP port for Harbor's enrollment gateway."
+  description = "Public TCP port for the enrollment gateway (nonce/enroll/poll)."
   type        = number
   default     = 8443
+}
+
+variable "collect_port" {
+  description = "TCP port for the gateway's Harbor-facing collect API (mTLS). Reachable ONLY from Harbor's security group (ADR 0005 — the protected side pulls)."
+  type        = number
+  default     = 9443
 }
 
 variable "gateway_cidr" {
