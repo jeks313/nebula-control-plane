@@ -165,3 +165,22 @@ variable "gateway_cidr" {
   type        = string
   default     = "0.0.0.0/0"
 }
+
+# ── Windows test client (ADR 0008 Phase 4 — pilot Windows SCM backend) ────────
+variable "enable_windows_client" {
+  description = <<-EOT
+    Add a Windows Server 2022 test client (in the client tier) for exercising the
+    pilot Windows SCM service backend on a real host. OFF by default — Windows
+    instances cost more and most demos don't need one. Turned on in terraform.tfvars
+    for the Phase 4 live test; a `-target=aws_instance.windows` apply brings up just
+    this box (+ the VPC/subnet it depends on) without the rest of the mesh.
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "windows_instance_type" {
+  description = "EC2 instance type for the Windows client. Windows Server needs more RAM than the Linux t3.micro; t3.medium (4 GiB) is a comfortable test default."
+  type        = string
+  default     = "t3.medium"
+}

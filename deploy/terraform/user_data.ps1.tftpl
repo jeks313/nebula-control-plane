@@ -1,0 +1,54 @@
+<powershell>
+# EC2Launch v2 runs this <powershell> block as SYSTEM on first boot. It turns the
+# stock Windows Server 2022 box into something we can drive headlessly: OpenSSH
+# Server with key auth for the Administrator, PowerShell as the default shell, and
+# the pilot state root pre-created. Transcript -> C:\Windows\Temp\ncp-bootstrap.log
+# (read it over SSH if anything misbehaves).
+$ErrorActionPreference = "Stop"
+Start-Transcript -Path "C:\Windows\Temp\ncp-bootstrap.log" -Append | Out-Null
+
+try {
+  # 1. Install OpenSSH Server (Feature on Demand) and set it to auto-start.
+  Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+  Set-Service -Name sshd -StartupType Automatic
+
+  # 2. Default shell = PowerShell, so `ssh host <cmd>` and interactive logins land
+  #    in PowerShell rather than cmd.exe.
+  New-Item -Path "HKLM:\SOFTWARE\OpenSSH" -Force | Out-Null
+  New-ItemProperty -Path "HKLM:\SOFTWARE\OpenSSH" -Name DefaultShell `
+    -Value "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -PropertyType String -Force | Out-Null
+
+  # 3. Authorize the personal key for admin SSH. Windows sshd reads admin keys from
+  #    administrators_authorized_keys (see the Match Group block in sshd_config),
+  #    and REFUSES the file unless it is owned by Administrators/SYSTEM with
+  #    inheritance stripped.
+  $sshDir   = "C:\ProgramData\ssh"
+  $authKeys = Join-Path $sshDir "administrators_authorized_keys"
+  New-Item -ItemType Directory -Path $sshDir -Force | Out-Null
+  Set-Content -Path $authKeys -Value "${ssh_public_key}" -Encoding ascii
+  icacls $authKeys /inheritance:r | Out-Null
+  icacls $authKeys /grant "Administrators:F" "SYSTEM:F" | Out-Null
+
+  # 4. Ensure the inbound firewall rule (the capability usually adds it).
+  if (-not (Get-NetFirewallRule -Name "sshd" -ErrorAction SilentlyContinue)) {
+    New-NetFirewallRule -Name sshd -DisplayName "OpenSSH Server (sshd)" `
+      -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 | Out-Null
+  }
+
+  # 5. Start sshd now (auto-start covers subsequent boots).
+  Start-Service sshd
+
+  # 6. Pre-create the pilot state root (matches pilotservice.StateRoot on Windows:
+  #    %ProgramData%\NebulaControlPlane\pilot).
+  New-Item -ItemType Directory -Path "C:\ProgramData\NebulaControlPlane\pilot" -Force | Out-Null
+
+  "ncp-windows-ready $(Get-Date -Format o)" | Out-File "C:\Windows\Temp\ncp-ready.txt" -Encoding ascii
+}
+catch {
+  "ncp-bootstrap FAILED: $($_.Exception.Message)" | Out-File "C:\Windows\Temp\ncp-ready.txt" -Encoding ascii
+  throw
+}
+finally {
+  Stop-Transcript | Out-Null
+}
+</powershell>

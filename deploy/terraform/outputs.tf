@@ -77,3 +77,13 @@ output "console_hint" {
   description = "The admin console is mesh-only (Harbor's overlay IP, default 10.44.0.2:8445). After the bootstrap, reach it from an enrolled mesh member, or SSH-tunnel ports 8445+8446 to Harbor (see deploy README / the bootstrap output)."
   value       = "mesh-only — http://<harbor-overlay>:8445 (default 10.44.0.2); not exposed in any security group by design"
 }
+
+output "windows_client_ip" {
+  description = "Public IPv4 of the Windows test client (empty unless enable_windows_client). OpenSSH comes up ~3-5 min after launch."
+  value       = one(aws_instance.windows[*].public_ip)
+}
+
+output "windows_ssh" {
+  description = "Ready-to-paste SSH command for the Windows client (admin login is Administrator; key auth via ssh_public_key_path)."
+  value       = var.enable_windows_client ? "ssh Administrator@${one(aws_instance.windows[*].public_ip)}" : "(set enable_windows_client = true)"
+}

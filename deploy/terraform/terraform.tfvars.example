@@ -16,3 +16,9 @@ instance_type       = "t3.micro"
 # gateway_cidr      = "0.0.0.0/0"
 # gateway_port      = 8443
 # nebula_port       = 4242
+
+# Windows Server test client for the pilot SCM backend (ADR 0008 Phase 4). OFF by
+# default. With it on, `terraform apply -target=aws_instance.windows` brings up just
+# the Windows box + its network deps (no mesh) for the service-mechanics test.
+# enable_windows_client = true
+# windows_instance_type = "t3.medium"
