@@ -87,7 +87,7 @@ export function Enrollments() {
                           </span>
                         </span>
                       ) : (
-                        <span className="text-ink-dim">{e.method}</span>
+                        <span className="text-ink-dim">{e.join_key_name ? `token · ${e.join_key_name}` : e.method}</span>
                       )}
                     </td>
                     <td className="px-4 py-2">

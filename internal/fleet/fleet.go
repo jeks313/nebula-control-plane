@@ -34,6 +34,102 @@ type Thresholds struct {
 	ClockSkewMs  int           // flag |clock offset| beyond this
 }
 
+// Condition tokens name the per-device health states. They are the vocabulary the
+// dashboard "why" drill-down and the /admin/v1/devices?condition= filter share.
+const (
+	CondExpired     = "expired"
+	CondExpiring    = "expiring"
+	CondStale       = "stale"
+	CondClockSkewed = "clock_skewed"
+	CondUnhealthy   = "unhealthy"
+)
+
+// conditions is the set of health states a single heartbeat is in.
+type conditions struct {
+	Expired     bool
+	Expiring    bool
+	Stale       bool
+	ClockSkewed bool
+	Unhealthy   bool
+}
+
+// classify is THE per-device health definition. Summarize (the /fleet/health
+// counts) consumes it directly, and ConditionSQL is its SQL twin (cross-checked by
+// a test against this logic), so the dashboard verdict and its /devices drill-down
+// can never drift. expired and expiring are mutually exclusive (an already-expired
+// cert is counted expired, not expiring).
+func classify(certNotAfter, lastSeen int64, clockOffsetMs int, health string, now time.Time, th Thresholds) conditions {
+	var c conditions
+	switch {
+	case certNotAfter != 0 && time.Unix(0, certNotAfter).Before(now):
+		c.Expired = true
+	case certNotAfter != 0 && time.Unix(0, certNotAfter).Sub(now) < th.ExpiryWindow:
+		c.Expiring = true
+	}
+	if th.StaleAfter > 0 && now.Sub(time.Unix(0, lastSeen)) > th.StaleAfter {
+		c.Stale = true
+	}
+	if th.ClockSkewMs > 0 && abs(clockOffsetMs) > th.ClockSkewMs {
+		c.ClockSkewed = true
+	}
+	if health != "" && health != "ok" {
+		c.Unhealthy = true
+	}
+	return c
+}
+
+// ConditionSQL returns a portable SQL predicate (and bind args) selecting the
+// heartbeats rows matching a health condition, computed from the SAME thresholds
+// and clock as Rollup/classify. ok=false for an unknown token. The predicates are
+// the SQL twin of classify()'s Go comparisons — a test asserts /devices?condition=X
+// returns exactly the rows /fleet/health counts — so the verdict and its drill-down
+// stay consistent. Referenced columns all exist on the heartbeats table; works on
+// both sqlite and postgres (plain integer/string comparisons, no DB date funcs).
+func ConditionSQL(cond string, now time.Time, th Thresholds) (string, []any, bool) {
+	nowNs := now.UnixNano()
+	switch cond {
+	case CondExpired:
+		return "cert_not_after != 0 AND cert_not_after < ?", []any{nowNs}, true
+	case CondExpiring:
+		// not yet expired (>= now) AND notAfter.Sub(now) < ExpiryWindow.
+		return "cert_not_after != 0 AND cert_not_after >= ? AND cert_not_after < ?",
+			[]any{nowNs, nowNs + th.ExpiryWindow.Nanoseconds()}, true
+	case CondStale:
+		if th.StaleAfter <= 0 {
+			return "1 = 0", nil, true // disabled threshold matches nothing (mirrors classify's guard)
+		}
+		// now.Sub(lastSeen) > StaleAfter  <=>  last_seen < now - StaleAfter.
+		return "last_seen < ?", []any{nowNs - th.StaleAfter.Nanoseconds()}, true
+	case CondClockSkewed:
+		if th.ClockSkewMs <= 0 {
+			return "1 = 0", nil, true
+		}
+		// abs(clock_offset_ms) > ClockSkewMs.
+		return "(clock_offset_ms > ? OR clock_offset_ms < ?)", []any{th.ClockSkewMs, -th.ClockSkewMs}, true
+	case CondUnhealthy:
+		return "health <> '' AND health <> 'ok'", nil, true
+	}
+	return "", nil, false
+}
+
+// conditionLink maps a device-condition reason code to its Devices drill-down. Non
+// device reasons (audit, rollout) have no /devices target and return "".
+func conditionLink(code string) string {
+	switch code {
+	case "CERTS_EXPIRED":
+		return "/devices?condition=" + CondExpired
+	case "CERTS_EXPIRING":
+		return "/devices?condition=" + CondExpiring
+	case "HOSTS_STALE":
+		return "/devices?condition=" + CondStale
+	case "CLOCK_SKEWED":
+		return "/devices?condition=" + CondClockSkewed
+	case "HOSTS_UNHEALTHY":
+		return "/devices?condition=" + CondUnhealthy
+	}
+	return ""
+}
+
 // Device is a per-host view for the at-risk list.
 type Device struct {
 	OverlayIP, Name string
@@ -121,7 +217,9 @@ const (
 func Rollup(rep Report, audit AuditState, rolloutState string, th Thresholds) Health {
 	rs := []Reason{} // never nil — the contract is always a JSON array
 	add := func(sev Severity, code string, count int, detail string) {
-		rs = append(rs, Reason{Code: code, Severity: sev, Count: count, Detail: detail})
+		// Device-condition reasons carry a deep-link to the Devices list pre-filtered
+		// to that condition (UI Implementation Plan §3.4); non-device reasons get "".
+		rs = append(rs, Reason{Code: code, Severity: sev, Count: count, Detail: detail, Link: conditionLink(code)})
 	}
 
 	// Critical — something is actually broken or down.
@@ -202,29 +300,28 @@ func Generate(ctx context.Context, s *store.Store, now time.Time, th Thresholds)
 func Summarize(rows []hb, now time.Time, th Thresholds) Report {
 	rep := Report{Total: len(rows)}
 	for _, r := range rows {
-		notAfter := time.Unix(0, r.CertNotAfter)
-		lastSeen := time.Unix(0, r.LastSeen)
 		d := Device{
-			OverlayIP: r.OverlayIP, Name: r.DeviceName, CertNotAfter: notAfter,
-			LastSeen: lastSeen, ClockOffsetMs: r.ClockOffsetMs, Health: r.Health,
+			OverlayIP: r.OverlayIP, Name: r.DeviceName, CertNotAfter: time.Unix(0, r.CertNotAfter),
+			LastSeen: time.Unix(0, r.LastSeen), ClockOffsetMs: r.ClockOffsetMs, Health: r.Health,
 		}
 
-		switch {
-		case r.CertNotAfter != 0 && notAfter.Before(now):
+		c := classify(r.CertNotAfter, r.LastSeen, r.ClockOffsetMs, r.Health, now, th)
+		if c.Expired {
 			rep.Expired++
-			d.Reasons = append(d.Reasons, "expired")
-		case r.CertNotAfter != 0 && notAfter.Sub(now) < th.ExpiryWindow:
+			d.Reasons = append(d.Reasons, CondExpired)
+		}
+		if c.Expiring {
 			rep.ExpiringSoon++
-			d.Reasons = append(d.Reasons, "expiring")
+			d.Reasons = append(d.Reasons, CondExpiring)
 		}
-		if th.StaleAfter > 0 && now.Sub(lastSeen) > th.StaleAfter {
+		if c.Stale {
 			rep.Stale++
-			d.Reasons = append(d.Reasons, "stale")
+			d.Reasons = append(d.Reasons, CondStale)
 		}
-		if th.ClockSkewMs > 0 && abs(r.ClockOffsetMs) > th.ClockSkewMs {
+		if c.ClockSkewed {
 			rep.ClockSkewed++
 		}
-		if r.Health != "" && r.Health != "ok" {
+		if c.Unhealthy {
 			rep.Unhealthy++
 		}
 		if len(d.Reasons) > 0 {

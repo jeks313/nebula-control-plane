@@ -244,7 +244,20 @@ Verdict-first, single scannable column:
 - Everything else per the Admin UI Plan, with §5's design language and §8's
   dual-control/preview patterns applied uniformly.
 
-> ⬜ **Planned change — device provenance + scope filters (requested 2026-06-13):**
+> ✅ **Delivered (2026-06-13) — device provenance + scope filters.** Shipped as a
+> backend predecessor + the riding UI. `GET /admin/v1/devices` now joins each
+> heartbeat to its **authoritative enrollment** (the latest *issued* row for that
+> `overlay_ip`, mirroring `coreapi.device()`) via a batched lookup (no SQL JOIN — the
+> codebase has none), surfacing `attest_provider/account/principal/region` for attested
+> hosts, `join_key_name` for token hosts (resolved through `join_keys`, including
+> revoked keys), and the issued `groups`. New scope filters `?provider=` /
+> `?attest_account=` / `?join_key=` resolve an authoritative-enrollment allow-set, and
+> the handler **keyset-fills** the page against it in Go (bounded bind-params, correct
+> `next_after` at any fleet size). Migration 000012 adds `enrollments(overlay_ip,
+> status)` for the per-page lookup. UI: a **"Joined via"** column + groups, with each
+> provenance value clickable to filter, and removable active-filter chips. (Original
+> request below.)
+>
 > The **Devices list** should show, per host, **how it joined the mesh** — its
 > *enrollment provenance*:
 > - **Cloud-attested hosts:** the attesting **site** = provider + account (e.g. `AWS ·
@@ -313,7 +326,12 @@ Verdict-first, single scannable column:
 >   how loudly it warns. Changing scope/admission widens who can join the mesh — treat it
 >   as the highest-stakes edit (extra confirmation + a prominent diff in the approval).
 
-> ⬜ **Planned change — show the join-key name on Enrollments (requested 2026-06-13):**
+> ✅ **Delivered (2026-06-13) — join-key name on Enrollments.** `EnrollmentView` now
+> carries `join_key_name`, resolved server-side from `join_key_id` via the shared
+> id→name map (revoked keys still resolve; falls back to `token` if the key is gone).
+> The Enrollments Method column shows `token · <name>`. Built on the same
+> `enrollment → join_key` linkage as the device-provenance slice. (Original request below.)
+>
 > On the **Enrollments screen**, a token-method enrollment shows just `token` in the
 > Method column — show the **name of the join key** it used instead (e.g. `token ·
 > laptops-2026`), mirroring how attested rows already show `AWS · <account>`.
@@ -326,7 +344,17 @@ Verdict-first, single scannable column:
 > - **Shares the device-provenance note above:** that `enrollment → join_key` linkage is
 >   the same one the Devices-list join-key column needs — build it once and reuse it.
 
-> ⬜ **Planned change — drill-down from dashboard "Why" reasons (requested 2026-06-13):**
+> ✅ **Delivered (2026-06-13) — dashboard "Why" drill-downs.** `fleet.Rollup` now
+> server-populates the existing `Reason.link` for the five device-condition codes
+> (`CERTS_EXPIRED`→`/devices?condition=expired`, `CERTS_EXPIRING`→`expiring`,
+> `HOSTS_STALE`→`stale`, `CLOCK_SKEWED`→`clock_skewed`, `HOSTS_UNHEALTHY`→`unhealthy`);
+> audit/rollout reasons get no `/devices` link. `GET /admin/v1/devices` accepts the
+> matching `?condition=` filter, whose SQL predicate (`fleet.ConditionSQL`) is the twin
+> of the `fleet.classify` Go logic that drives the verdict — a test asserts the
+> `?condition=X` count equals the `/fleet/health` total, so the drill-down can't drift
+> from the "why". The dashboard renders each linked reason as a `react-router` link; the
+> Devices page reads `?condition=` from the URL. (Original request below.)
+>
 > Each **"Why" reason** on the Fleet dashboard should be a **link to the relevant detail,
 > pre-filtered to that condition** — e.g. "2 certs expiring within 168h" → the **Devices**
 > view showing exactly those expiring hosts. Reason-code → destination:
@@ -1027,6 +1055,26 @@ The v1 UI-0…UI-6 pretended the backend was done. Reframe as a **backend track*
     authoring, blast-radius, server-computed diff overlay**), the CodeMirror DSL editor
     with rich per-span diagnostics, canary-rollout monitor + drift panel, and Network/
     IPAM — all need the A1 policy-analysis engine + new endpoints.
+- ✅ **Device provenance + /devices filtering (2026-06-13) — backend predecessor + UI.**
+  The keystone slice that unblocked three §3.4 planned changes at once (provenance + scope
+  filters, join-key name on Enrollments, dashboard "why" drill-downs — see those callouts).
+  Backend: `GET /admin/v1/devices` enriches each row with provenance + issued groups from
+  the **authoritative** (latest-issued) enrollment via a batched lookup (no SQL JOIN — the
+  codebase has none); scope filters (`provider`/`attest_account`/`join_key`) resolve an
+  allow-set and the handler **keyset-fills** the page in Go (bounded bind-params, correct
+  `next_after`); the `condition` filter reuses `fleet.ConditionSQL` (the SQL twin of the
+  `fleet.classify` verdict logic — a test pins `?condition=X` count == `/fleet/health`
+  total, so the drill-down can't drift). `EnrollmentView.join_key_name`; `fleet.Reason.link`
+  populated for the device-condition codes; migration 000012 indexes
+  `enrollments(overlay_ip, status)`. UI: Devices "Joined via" + groups columns with
+  click-to-filter and removable filter chips (now `useInfiniteQuery` so the drill-down
+  never silently caps), Enrollments `token · <name>`, clickable dashboard "why" rows.
+  `seed-demo` now issues a provenance-bearing enrollment per heartbeat (2 AWS accounts + 3
+  join keys) so the whole feature demos. Adversarially reviewed (5-agent + verify pass):
+  14 confirmed of 32 → fixed the material ones (the UI 200-row cap and the unbounded
+  `IN (...)` bind-param cliff, replaced by the keyset-fill loop; single join-key-map load;
+  added pagination + populated-conformance tests). Verified: full Go suite + `go vet` + 4
+  cross-builds + migrate up/down/up + UI build + 46 UI tests.
 - **UI-5 — Trust ops** *(M7–M8):* revocation/blocklist + propagation SLO; CA/key
   rotation wizards; lighthouse fleet management.
 - **UI-6 — Enterprise** *(M9):* detections + reconciliation, full Settings, Access/

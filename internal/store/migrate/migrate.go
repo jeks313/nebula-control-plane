@@ -37,6 +37,7 @@ var migrations = []*gormigrate.Migration{
 	sqlMigration("000009_sessions"),
 	sqlMigration("000010_admin_tokens"),
 	sqlMigration("000011_enroll_evidence"),
+	sqlMigration("000012_enroll_overlay_index"),
 }
 
 // Up applies all pending migrations.

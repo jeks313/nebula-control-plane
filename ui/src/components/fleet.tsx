@@ -105,12 +105,12 @@ export function ConvergenceCard() {
   const devices = useDevices()
   const rollout = useCurrentRollout()
   return (
-    <Tile title="Fleet convergence" hint={truncatedHint(devices.data?.next_after)}>
+    <Tile title="Fleet convergence" hint={truncatedHint(devices.data?.pages[0]?.next_after)}>
       {devices.isPending && <StateBlock kind="loading" message="…" />}
       {devices.isError && <ErrorState error={devices.error} fallback="Couldn't load devices." />}
       {devices.data &&
         (() => {
-          const ds = devices.data.devices
+          const ds = devices.data.pages[0].devices
           if (ds.length === 0) return <StateBlock kind="empty" message="No hosts reporting yet." />
           const target = targetBundleVersion(ds, rollout.data?.active ? rollout.data.rollout?.target_version : undefined)
           const c = convergence(ds, target)
@@ -140,12 +140,12 @@ export function ConvergenceCard() {
 export function RenewalCliffCard() {
   const devices = useDevices()
   return (
-    <Tile title="Renewal cliff" hint={truncatedHint(devices.data?.next_after)}>
+    <Tile title="Renewal cliff" hint={truncatedHint(devices.data?.pages[0]?.next_after)}>
       {devices.isPending && <StateBlock kind="loading" message="…" />}
       {devices.isError && <ErrorState error={devices.error} fallback="Couldn't load devices." />}
       {devices.data &&
         (() => {
-          const ds = devices.data.devices
+          const ds = devices.data.pages[0].devices
           if (ds.length === 0) return <StateBlock kind="empty" message="No certs to track yet." />
           const b = expiryBuckets(ds, Date.now())
           const soon = soonestExpiring(ds, 5)
@@ -179,12 +179,12 @@ export function RenewalCliffCard() {
 export function VersionLandscapeCard() {
   const devices = useDevices()
   return (
-    <Tile title="Version landscape" hint={truncatedHint(devices.data?.next_after)}>
+    <Tile title="Version landscape" hint={truncatedHint(devices.data?.pages[0]?.next_after)}>
       {devices.isPending && <StateBlock kind="loading" message="…" />}
       {devices.isError && <ErrorState error={devices.error} fallback="Couldn't load devices." />}
       {devices.data &&
         (() => {
-          const ds = devices.data.devices
+          const ds = devices.data.pages[0].devices
           if (ds.length === 0) return <StateBlock kind="empty" message="No hosts reporting yet." />
           return (
             <div className="flex flex-col gap-4">

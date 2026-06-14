@@ -45,7 +45,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Device inventory (from heartbeats), keyset-paginated on overlay_ip. */
+        /**
+         * Device inventory (from heartbeats), keyset-paginated on overlay_ip.
+         * @description Each row carries provenance (how the host joined) and the groups it was issued, from its authoritative (latest issued) enrollment. Optional scope filters (provider, attest_account, join_key) and the health-condition filter narrow the list; the condition filter is the dashboard "why" drill-down, computed with the same thresholds as /fleet/health.
+         */
         get: operations["listDevices"];
         put?: never;
         post?: never;
@@ -537,6 +540,17 @@ export interface components {
             health?: string;
             /** Format: date-time */
             last_seen?: string;
+            /** @description provenance: cloud-attestation provider, e.g. aws (attested hosts only) */
+            attest_provider?: string;
+            /** @description provenance: attested account/subscription/project */
+            attest_account?: string;
+            /** @description provenance: attested ARN/principal/service-account */
+            attest_principal?: string;
+            attest_region?: string;
+            /** @description provenance: join-key name for token-enrolled hosts */
+            join_key_name?: string;
+            /** @description groups the host was issued (from its authoritative enrollment) */
+            groups?: string[];
         };
         DeviceList: {
             devices: components["schemas"]["Device"][];
@@ -833,6 +847,8 @@ export interface components {
             pubkey_hash: string;
             method: string;
             join_key_id?: number;
+            /** @description name of the join key (resolved from join_key_id); token enrollments only */
+            join_key_name?: string;
             groups: string[];
             /** @description pending | issued | denied */
             status: string;
@@ -941,6 +957,14 @@ export interface operations {
                 limit?: number;
                 /** @description cursor: overlay_ip of the last row from the previous page */
                 after?: string;
+                /** @description scope: attestation provider, e.g. aws */
+                provider?: string;
+                /** @description scope: attested account/subscription/project */
+                attest_account?: string;
+                /** @description scope: join-key name the host token-enrolled with */
+                join_key?: string;
+                /** @description health drill-down (matches the dashboard verdict) */
+                condition?: "expired" | "expiring" | "stale" | "clock_skewed" | "unhealthy";
             };
             header?: never;
             path?: never;
@@ -957,6 +981,7 @@ export interface operations {
                     "application/json": components["schemas"]["DeviceList"];
                 };
             };
+            400: components["responses"]["Problem"];
             401: components["responses"]["Unauthorized"];
         };
     };

@@ -382,38 +382,176 @@ type Device struct {
 	ClockOffsetMs        int    `json:"clock_offset_ms"`
 	Health               string `json:"health,omitempty"`
 	LastSeen             string `json:"last_seen,omitempty"`
+	// Provenance — how the host joined, from its authoritative (latest issued)
+	// enrollment. Cloud-attested hosts carry the attestation evidence; token-enrolled
+	// hosts carry the join-key name. Groups are the groups the host was issued.
+	AttestProvider  string   `json:"attest_provider,omitempty"`
+	AttestAccount   string   `json:"attest_account,omitempty"`
+	AttestPrincipal string   `json:"attest_principal,omitempty"`
+	AttestRegion    string   `json:"attest_region,omitempty"`
+	JoinKeyName     string   `json:"join_key_name,omitempty"`
+	Groups          []string `json:"groups,omitempty"`
 }
 
 // GET /admin/v1/devices?limit=N&after=OVERLAY_IP — device inventory from
 // heartbeats, keyset-paginated on overlay_ip (same cursor shape as /audit).
 // `count` is the page size; `next_after` (when present) is the cursor for the
 // next page — never assume `count` is the fleet total.
+//
+// Each row is enriched with provenance + issued groups from its authoritative
+// (latest issued) enrollment. Optional filters narrow the list: scope filters
+// (provider, attest_account, join_key) match how the host joined; the condition
+// filter (expired|expiring|stale|clock_skewed|unhealthy) is the dashboard "why"
+// drill-down, computed with the same thresholds/clock as /fleet/health so the
+// count matches the verdict. Filters are applied in SQL before the limit, so the
+// keyset cursor stays correct.
 func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	limit := queryInt(r, "limit", 200, 1, 2000)
 	after := r.URL.Query().Get("after")
-	q := s.cfg.Store.DB.WithContext(r.Context()).Order("overlay_ip ASC").Limit(limit)
-	if after != "" {
-		q = q.Where("overlay_ip > ?", after)
+	provider := r.URL.Query().Get("provider")
+	account := r.URL.Query().Get("attest_account")
+	joinKey := r.URL.Query().Get("join_key")
+	condition := r.URL.Query().Get("condition")
+	scoped := provider != "" || account != "" || joinKey != ""
+
+	var condSQL string
+	var condArgs []any
+	if condition != "" {
+		ok := false
+		// One s.now() for the whole request (the page is eventual-consistency anyway: a
+		// later page request re-evaluates against a fresh clock — fine for a monitoring
+		// list, and the keyset cursor guarantees no row is skipped or duplicated).
+		if condSQL, condArgs, ok = fleet.ConditionSQL(condition, s.now(), s.cfg.Thresholds); !ok {
+			writeProblem(w, http.StatusBadRequest, "bad condition",
+				"condition must be one of: expired, expiring, stale, clock_skewed, unhealthy")
+			return
+		}
 	}
-	var rows []deviceHB
-	if err := q.Find(&rows).Error; err != nil {
-		s.fail(w, r, "list devices failed", err)
+
+	// Join-key id->name map, loaded at most once per request (for the join_key scope
+	// filter and/or token-host provenance).
+	var names map[int64]string
+	ensureNames := func() error {
+		if names == nil {
+			m, err := s.joinKeyNameMap(ctx)
+			if err != nil {
+				return err
+			}
+			names = m
+		}
+		return nil
+	}
+
+	// Scope filter -> an allow-set of overlay IPs (the authoritative-enrollment match).
+	var allow map[string]bool
+	if scoped {
+		if joinKey != "" {
+			if err := ensureNames(); err != nil {
+				s.fail(w, r, "join key lookup failed", err)
+				return
+			}
+		}
+		a, err := s.overlayIPsForScope(ctx, provider, account, joinKey, names)
+		if err != nil {
+			s.fail(w, r, "scope filter failed", err)
+			return
+		}
+		if len(a) == 0 { // nothing matches the scope — short-circuit.
+			writeJSON(w, http.StatusOK, map[string]any{"devices": []Device{}, "count": 0})
+			return
+		}
+		allow = a
+	}
+
+	// Keyset-walk heartbeats in overlay_ip order, applying the condition predicate in
+	// SQL and the scope allow-set in Go, until we have a page. Filtering scope in Go
+	// (rather than a giant `overlay_ip IN (...)`) keeps each query's bind-parameter
+	// count bounded by `limit` regardless of fleet size.
+	var kept []deviceHB
+	hitLimit := false
+	cursor := after
+	for {
+		q := s.cfg.Store.DB.WithContext(ctx).Order("overlay_ip ASC").Limit(limit)
+		if cursor != "" {
+			q = q.Where("overlay_ip > ?", cursor)
+		}
+		if condSQL != "" {
+			q = q.Where(condSQL, condArgs...)
+		}
+		var rows []deviceHB
+		if err := q.Find(&rows).Error; err != nil {
+			s.fail(w, r, "list devices failed", err)
+			return
+		}
+		if len(rows) == 0 {
+			break
+		}
+		cursor = rows[len(rows)-1].OverlayIP
+		for _, h := range rows {
+			if scoped && !allow[h.OverlayIP] {
+				continue
+			}
+			kept = append(kept, h)
+			if len(kept) == limit {
+				hitLimit = true
+				break
+			}
+		}
+		if hitLimit || len(rows) < limit {
+			break
+		}
+	}
+
+	prov, err := s.deviceProvenance(ctx, overlayIPs(kept))
+	if err != nil {
+		s.fail(w, r, "device provenance failed", err)
 		return
 	}
-	out := make([]Device, len(rows))
-	for i, h := range rows {
-		out[i] = Device{
+	for _, p := range prov {
+		if p.JoinKeyID != 0 {
+			if err := ensureNames(); err != nil {
+				s.fail(w, r, "join key lookup failed", err)
+				return
+			}
+			break
+		}
+	}
+
+	out := make([]Device, len(kept))
+	for i, h := range kept {
+		d := Device{
 			OverlayIP: h.OverlayIP, Name: h.DeviceName,
 			PilotVersion: h.PilotVersion, NebulaVersion: h.NebulaVersion,
 			CertNotAfter: rfc3339(h.CertNotAfter), AppliedBundleVersion: h.AppliedBundleVersion,
 			ClockOffsetMs: h.ClockOffsetMs, Health: h.Health, LastSeen: rfc3339(h.LastSeen),
 		}
+		if p, ok := prov[h.OverlayIP]; ok {
+			d.Groups = p.Groups
+			switch {
+			case p.AttestProvider != "":
+				d.AttestProvider, d.AttestAccount = p.AttestProvider, p.AttestAccount
+				d.AttestPrincipal, d.AttestRegion = p.AttestPrincipal, p.AttestRegion
+			case p.JoinKeyID != 0:
+				d.JoinKeyName = names[p.JoinKeyID]
+			}
+		}
+		out[i] = d
 	}
+
 	resp := map[string]any{"devices": out, "count": len(out)}
-	if len(out) == limit {
+	if hitLimit { // a full page — there may be more beyond the last kept row.
 		resp["next_after"] = out[len(out)-1].OverlayIP
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func overlayIPs(rows []deviceHB) []string {
+	ips := make([]string, len(rows))
+	for i, h := range rows {
+		ips[i] = h.OverlayIP
+	}
+	return ips
 }
 
 // AuditRow is one audit-log entry in the API.

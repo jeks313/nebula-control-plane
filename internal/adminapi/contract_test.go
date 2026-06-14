@@ -12,6 +12,7 @@ import (
 
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/jeks313/nebula-control-plane/internal/adminapi"
+	"github.com/jeks313/nebula-control-plane/internal/joinkey"
 	"github.com/jeks313/nebula-control-plane/internal/lighthouse"
 	"github.com/jeks313/nebula-control-plane/internal/rollout"
 	"github.com/jeks313/nebula-control-plane/internal/store"
@@ -50,6 +51,15 @@ func newSrv(t *testing.T) (*adminapi.Server, *httptest.Server) {
 	}
 	now := time.Unix(1_700_000_000, 0).UTC()
 	hbInsert(t, s.DB, "100.64.0.2", "web-1", now.Add(30*24*time.Hour), now, "ok")
+	hbInsert(t, s.DB, "100.64.0.3", "ec2-1", now.Add(30*24*time.Hour), now, "ok")
+	// Populated provenance so the response-conformance visitor exercises a fully
+	// populated Device body (attest_* + join_key_name + groups) against the schema.
+	_, jk, jerr := joinkey.Create(context.Background(), s, joinkey.Params{Name: "fleet-key", Groups: []string{"web"}}, now)
+	if jerr != nil {
+		t.Fatal(jerr)
+	}
+	issued(t, s, "c-token", "100.64.0.2", jk.ID, "", "", "", "", []string{"web"})
+	issued(t, s, "c-aws", "100.64.0.3", 0, "aws", "111122223333", "arn:aws:sts::111122223333:assumed-role/web/i-1", "eu-central-1", []string{"fleet", "db"})
 	_, _ = s.AppendAudit(context.Background(), "alice", "policy-publish", "fw", "")
 	reg := lighthouse.New(s.DB, audit)
 	_, _ = reg.Add(context.Background(), "100.64.0.1", "lh1", []string{"1.2.3.4:4242"}, "op")
