@@ -70,7 +70,7 @@ func usage() {
 usage:
   pilot install -gateway <url> -core <url> -config-pub <pem> (-join-key <secret> | -aws-sigv4) [-mesh <id>] [-name N] [-groups a,b]
   pilot status [-mesh <id>]
-  pilot uninstall [-mesh <id>] [-purge]
+  pilot uninstall [-mesh <id>] [-purge] | -all
   pilot init [-dir <path>] [-values <values.yml>] [-am-lighthouse]
   pilot enroll -gateway <url> -join-key <secret> -config-pub <pem> [-dir <path>] [-name N] [-groups a,b]
   pilot renew -core <url> -config-pub <pem> [-dir <path>]
@@ -83,7 +83,8 @@ commands:
               write+enable a per-mesh systemd service (pilot@<mesh>) -> supervise.
               Re-runnable; per-mesh (a host can join multiple meshes). Linux/systemd.
   status      show a mesh's local state (key/cert/config) + service state.
-  uninstall   disable+stop a mesh's service (-purge also deletes its identity).
+  uninstall   disable+stop a mesh's service (-purge deletes its identity; -all tears
+              down every mesh + the shared unit for a full host cleanup).
   init        lay out the host dir, generate the host key (P256), and render
               config.yml. Does NOT overwrite an existing host key.
   enroll      join the mesh: gen key -> nonce -> signed submit -> poll -> verify
@@ -475,12 +476,38 @@ func cmdStatus(args []string) {
 	}
 }
 
-// cmdUninstall disables+stops a mesh's service; -purge also deletes its identity.
+// cmdUninstall disables+stops a mesh's service; -purge also deletes its identity;
+// -all tears down every mesh + the shared unit (full host cleanup). The pilot/nebula
+// binaries are always left in place (a mesh teardown shouldn't delete host binaries).
 func cmdUninstall(args []string) {
 	fs := flag.NewFlagSet("uninstall", flag.ExitOnError)
 	mesh := fs.String("mesh", "default", "mesh id")
 	purge := fs.Bool("purge", false, "also delete the mesh's identity + state dir (irreversible)")
+	all := fs.Bool("all", false, "tear down ALL meshes + remove the shared systemd unit (full host cleanup; implies -purge)")
 	_ = fs.Parse(args)
+
+	if *all {
+		meshes := listMeshes()
+		if len(meshes) == 0 {
+			fmt.Printf("uninstall -all: no meshes under %s\n", pilotservice.StateRoot)
+		}
+		for _, m := range meshes {
+			if err := pilotservice.Uninstall(m); err != nil {
+				fmt.Fprintf(os.Stderr, "uninstall: pilot@%s: %v\n", m, err)
+			} else {
+				fmt.Printf("uninstall: service pilot@%s disabled + stopped\n", m)
+			}
+			base := filepath.Join(pilotservice.StateRoot, m)
+			if err := os.RemoveAll(base); err != nil {
+				fatalf("uninstall: purge %s: %v", base, err)
+			}
+			fmt.Printf("  purged %s\n", base)
+		}
+		removeHostArtifacts()
+		fmt.Println("uninstall -all: complete (the pilot + nebula binaries are left in place)")
+		return
+	}
+
 	if !validMeshID(*mesh) {
 		fatalf("uninstall: invalid -mesh %q", *mesh)
 	}
@@ -489,14 +516,47 @@ func cmdUninstall(args []string) {
 	}
 	fmt.Printf("uninstall: service pilot@%s disabled + stopped\n", *mesh)
 	base := filepath.Join(pilotservice.StateRoot, *mesh)
-	if *purge {
-		if err := os.RemoveAll(base); err != nil {
-			fatalf("uninstall: purge %s: %v", base, err)
-		}
-		fmt.Printf("  purged %s (identity destroyed)\n", base)
-	} else {
-		fmt.Printf("  kept state at %s (re-run install to re-enable; -purge to delete)\n", base)
+	if !*purge {
+		fmt.Printf("  kept state at %s (re-run install to re-enable; -purge to delete; -all for full cleanup)\n", base)
+		return
 	}
+	if err := os.RemoveAll(base); err != nil {
+		fatalf("uninstall: purge %s: %v", base, err)
+	}
+	fmt.Printf("  purged %s (identity destroyed)\n", base)
+	// If that was the last mesh, also remove the shared unit (full cleanup).
+	if len(listMeshes()) == 0 {
+		removeHostArtifacts()
+	}
+}
+
+// removeHostArtifacts removes the shared systemd template unit + the (now-empty)
+// state root — the host-level footprint shared across meshes. The pilot/nebula
+// binaries are intentionally left (a mesh teardown shouldn't delete host binaries).
+func removeHostArtifacts() {
+	if err := pilotservice.RemoveTemplate(); err != nil {
+		fmt.Fprintf(os.Stderr, "uninstall: remove shared unit: %v\n", err)
+	} else {
+		fmt.Printf("  removed the shared systemd unit %s\n", pilotservice.UnitTemplatePath)
+	}
+	if err := os.Remove(pilotservice.StateRoot); err == nil {
+		fmt.Printf("  removed %s\n", pilotservice.StateRoot)
+	}
+}
+
+// listMeshes returns the mesh ids that have a state dir under StateRoot.
+func listMeshes() []string {
+	ents, err := os.ReadDir(pilotservice.StateRoot)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range ents {
+		if e.IsDir() {
+			out = append(out, e.Name())
+		}
+	}
+	return out
 }
 
 // validMeshID accepts ids safe as both a path segment and a systemd instance name:
