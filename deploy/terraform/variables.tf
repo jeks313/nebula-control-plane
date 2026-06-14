@@ -49,9 +49,9 @@ variable "nebula_version" {
 }
 
 variable "nebula_sha256" {
-  description = "sha256 of nebula-linux-amd64.tar.gz for nebula_version. Empty skips verification (a supply-chain gap; set it for real use)."
+  description = "sha256 of nebula-linux-amd64.tar.gz for nebula_version (verified in user_data before install). Empty skips verification (a supply-chain gap). Update this whenever nebula_version changes."
   type        = string
-  default     = ""
+  default     = "99ac335caeb69d02a6b6b00a3d4b5d0a36ec3971df480a1cc50e6db378342955" # v1.10.3 linux-amd64
 }
 
 variable "nebula_port" {

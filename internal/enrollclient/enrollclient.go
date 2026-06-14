@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jeks313/nebula-control-plane/internal/awsattest"
 	"github.com/jeks313/nebula-control-plane/internal/bundle"
 	"github.com/jeks313/nebula-control-plane/internal/hostkey"
 	"github.com/jeks313/nebula-control-plane/internal/jws"
@@ -31,7 +32,9 @@ import (
 // Params configures an enrollment run.
 type Params struct {
 	GatewayURL      string
-	JoinKey         string
+	JoinKey         string // token method; empty when AWSSigV4 is set
+	AWSSigV4        bool   // attest via the instance role (IMDS) instead of a join key (M5)
+	Region          string // STS region for AWS attestation; default = the IMDS-derived region
 	Layout          paths.Layout
 	RequestedName   string
 	RequestedGroups []string
@@ -39,6 +42,34 @@ type Params struct {
 	HTTPClient      *http.Client
 	PollTimeout     time.Duration
 	Now             func() time.Time
+
+	imds awsattest.IMDSConfig // testability seam: override the IMDS endpoint (zero = real 169.254.169.254)
+}
+
+// enrollCredential builds the method + credential for the enroll request: an
+// AWS-SigV4 presigned STS identity (bound to this nonce + pubkey) when AWSSigV4 is
+// set, else the join-key token.
+func (p Params) enrollCredential(ctx context.Context, nonce, pubkeyHash string) (string, json.RawMessage, error) {
+	if p.AWSSigV4 {
+		creds, region, err := awsattest.FetchInstanceCredentials(ctx, p.imds)
+		if err != nil {
+			return "", nil, fmt.Errorf("enrollclient: fetch instance credentials (IMDS): %w", err)
+		}
+		if p.Region != "" {
+			region = p.Region
+		}
+		pres, err := awsattest.Sign(creds, region, nonce, pubkeyHash, p.Now())
+		if err != nil {
+			return "", nil, fmt.Errorf("enrollclient: sign attestation: %w", err)
+		}
+		cred, _ := json.Marshal(pres)
+		return wire.MethodAWSSigV4, cred, nil
+	}
+	if p.JoinKey == "" {
+		return "", nil, fmt.Errorf("enrollclient: a join key is required (or set AWSSigV4)")
+	}
+	cred, _ := json.Marshal(map[string]string{"token": p.JoinKey})
+	return wire.MethodToken, cred, nil
 }
 
 // Result is the outcome of an enrollment run.
@@ -83,10 +114,14 @@ func Enroll(ctx context.Context, p Params) (Result, error) {
 		if err != nil {
 			return Result{}, err
 		}
+		method, credential, err := p.enrollCredential(ctx, nonce, pubkeyHash)
+		if err != nil {
+			return Result{}, err
+		}
 		req := wire.EnrollRequest{
 			ProtocolVersion: wire.ProtocolVersion, Type: "enroll",
 			IssuedAt: p.Now().UTC().Format(time.RFC3339), Nonce: nonce,
-			Method: wire.MethodToken, Credential: json.RawMessage(`{"token":"` + p.JoinKey + `"}`),
+			Method: method, Credential: credential,
 		}
 		req.CSR = wire.CSR{
 			Curve: "P256", PublicKey: base64.RawURLEncoding.EncodeToString(pubBytes),

@@ -120,14 +120,19 @@ func cmdEnroll(args []string) {
 	fs := flag.NewFlagSet("enroll", flag.ExitOnError)
 	dir := fs.String("dir", "", "host directory (default: platform-specific)")
 	gateway := fs.String("gateway", "", "enrollment gateway base URL (required)")
-	joinKey := fs.String("join-key", "", "join key secret (required)")
+	joinKey := fs.String("join-key", "", "join key secret (required unless -aws-sigv4)")
+	awsSigV4 := fs.Bool("aws-sigv4", false, "attest via this instance's IAM role (IMDS) instead of a join key (M5)")
+	region := fs.String("region", "", "STS region for -aws-sigv4 (default: the instance's IMDS-derived region)")
 	configPub := fs.String("config-pub", "", "pinned config-signing public key PEM (required)")
 	name := fs.String("name", "", "requested device name (cosmetic)")
-	groups := fs.String("groups", "", "requested groups (advisory; the join key decides)")
+	groups := fs.String("groups", "", "requested groups (advisory; the join key / cloud-trust config decides)")
 	timeout := fs.Duration("timeout", 60*time.Second, "max time to wait for the result")
 	_ = fs.Parse(args)
-	if *gateway == "" || *joinKey == "" || *configPub == "" {
-		fatalf("enroll: -gateway, -join-key and -config-pub are required")
+	if *gateway == "" || *configPub == "" {
+		fatalf("enroll: -gateway and -config-pub are required")
+	}
+	if *awsSigV4 == (*joinKey != "") { // exactly one credential source
+		fatalf("enroll: provide either -join-key or -aws-sigv4 (not both, not neither)")
 	}
 
 	pubPEM, err := os.ReadFile(*configPub)
@@ -144,7 +149,7 @@ func cmdEnroll(args []string) {
 
 	layout := paths.New(*dir)
 	res, err := enrollclient.Enroll(ctx, enrollclient.Params{
-		GatewayURL: *gateway, JoinKey: *joinKey, Layout: layout,
+		GatewayURL: *gateway, JoinKey: *joinKey, AWSSigV4: *awsSigV4, Region: *region, Layout: layout,
 		RequestedName: *name, RequestedGroups: splitCSV(*groups),
 		PinnedConfigPub: pinned, PollTimeout: *timeout,
 	})
@@ -158,8 +163,8 @@ func cmdEnroll(args []string) {
 		fmt.Printf("  start the node: pilot supervise -config %s\n", layout.Config())
 	case "pending":
 		fmt.Println("enroll: submitted — awaiting manual approval.")
-		fmt.Println("  This host joined via a join key, which requires an admin to approve it")
-		fmt.Println("  before a certificate is issued. Re-run enroll later, or have an admin approve it.")
+		fmt.Println("  This enrollment requires an admin to approve it before a certificate is")
+		fmt.Println("  issued. Re-run enroll later to fetch the bundle once it's approved.")
 	case "denied":
 		fatalf("enroll denied: %s", res.Reason)
 	}

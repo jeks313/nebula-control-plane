@@ -81,6 +81,7 @@ var cliSurface = map[string]surfaceEntry{
 	"genesis":            {why: "cluster bootstrap — runs offline before any server/CA exists"},
 	"ca-init":            {why: "CA / HSM bootstrap — offline key ceremony"},
 	"issue-cert":         {why: "break-glass direct cert issuance (decision 10: CLI-only break-glass path)"},
+	"cloudtrust publish": {why: "operator/bootstrap publish of the cloud-trust config (two distinct operators, like genesis); the console's POST /cloudtrust/propose is the day-to-day path, this is for bootstrap/break-glass before the API is up"},
 	"seed-demo":          {why: "DEV/DEMO ONLY: writes a synthetic fleet straight into the store (heartbeats arrive from agents, not the API) — never a console capability"},
 	"core-api":           {why: "server launcher, not an operation"},
 	"admin-api":          {why: "server launcher, not an operation"},
