@@ -37,12 +37,19 @@ you; or build+copy by hand:
   scp /tmp/{harbor,pilot,gateway} ec2-user@<this-ip>:/tmp/ && \
     sudo install -m0755 /tmp/{harbor,pilot,gateway} /usr/local/bin/
 
-Role-specific next steps:
+Role-specific next steps (all handled by bootstrap-genesis.sh):
   lighthouse -> pilot init -am-lighthouse; receive ca.crt + lighthouse cert from
-                genesis; run nebula. (handled by bootstrap-genesis.sh)
-  harbor     -> harbor migrate up; harbor genesis ...; run gateway + enroll
-                worker (+ core-api on the overlay). (handled by the script)
-  client     -> pilot enroll -gateway <harbor gw> -join-key <secret>
-                -config-pub <pin>; then pilot supervise.
+                genesis; run nebula.
+  harbor     -> pilot init (its own control-plane key); harbor migrate up; harbor
+                genesis (-core-pub issues Harbor's control-plane cert); run nebula
+                (joins the mesh); cloudtrust publish; gateway + enroll worker
+                (-cloudtrust-db) + core-api (-host-cert) + admin console (mock-IdP),
+                core-api/console bound to the overlay (mesh-only).
+  client     -> KEYLESS join via this instance's IAM role:
+                pilot enroll -gateway <harbor gw> -aws-sigv4 -region <region>
+                  -config-pub <pin>
+                then: pilot supervise -core http://<harbor-overlay>:8444 -config-pub <pin>
+                (off-cloud hosts without an AWS identity use -join-key instead, with
+                 manual approval.)
 See docs/Nebula Control Plane - Genesis Runbook.md.
 EOF

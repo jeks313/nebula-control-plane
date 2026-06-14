@@ -29,6 +29,11 @@ output "gateway_url" {
 }
 
 output "bootstrap_hint" {
-  description = "How to run the genesis bootstrap."
-  value       = "bash ../scripts/bootstrap-genesis.sh   # reads these outputs via 'terraform output -json'"
+  description = "How to run the genesis bootstrap (control plane + data plane)."
+  value       = "SSH_KEY=~/.ssh/absolute bash ../scripts/bootstrap-genesis.sh   # reads these outputs via 'terraform output -json'"
+}
+
+output "console_hint" {
+  description = "The admin console is mesh-only (Harbor's overlay IP, default 10.44.0.2:8445). After the bootstrap, reach it from an enrolled mesh member, or SSH-tunnel ports 8445+8446 to Harbor (see deploy README / the bootstrap output)."
+  value       = "mesh-only — http://<harbor-overlay>:8445 (default 10.44.0.2); not exposed in any security group by design"
 }

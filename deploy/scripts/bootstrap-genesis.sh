@@ -1,22 +1,25 @@
 #!/usr/bin/env bash
 # Genesis bootstrap for the test topology (deploy/terraform). Run from your own
 # machine (the iMac) after `terraform apply`. It is an SSH orchestrator — it does
-# NOT need to run on any node. Steps:
+# NOT need to run on any node. It stands up the FULL control plane + data plane:
 #
-#   0. build harbor/pilot/gateway for linux/amd64 and scp them to the 3 nodes
+#   0. build harbor/pilot/gateway/nebula bits + scp them to the 3 nodes
 #   1. lighthouse: pilot init -am-lighthouse  (host key stays on the lighthouse)
-#   2. harbor:     migrate + genesis (CA + config-signing key + lighthouse cert)
-#   3. lighthouse: install the issued ca.crt + lighthouse cert; start nebula
-#   4. harbor:     start the enrollment plane (gateway + enroll worker) and create
-#                  the join keys (aws-client = auto-issue, imac = manual approval)
+#   2. harbor:     pilot init (its OWN mesh key, with the lighthouse in static_host_map)
+#   3. harbor:     migrate + genesis (CA + config-signing + lighthouse cert + HARBOR's
+#                  control-plane cert, so Harbor is a real mesh node — ADR/baseline:
+#                  the firewall routes every host to group:control-plane)
+#   4. lighthouse: install ca + lighthouse cert; start nebula
+#   5. harbor:     install ca + control-plane cert; start nebula (Harbor joins the mesh)
+#   6. harbor:     publish a cloud-trust config (this AWS account -> groups, auto-issue)
+#   7. harbor:     enrollment plane (gateway + worker, attestation-enabled) + the imac
+#                  join key (manual approval)
+#   8. harbor:     core-api (renew/heartbeat, -host-cert verified) + admin console
+#                  (mock-IdP), both bound to Harbor's OVERLAY IP (mesh-only)
 #
-# It then prints the gateway URL, the config-signing public key (the pin clients
-# verify bundles against), and the join secrets, plus the exact enroll commands
-# for the cloud client and the off-cloud iMac.
-#
-# Scope: this stands up the ENROLLMENT plane. Bringing Harbor itself onto the mesh
-# and running core-api (renew/heartbeat) over the overlay is the lifecycle follow-
-# on (see the note at the end) — not needed to enroll + ping.
+# It then prints the gateway URL, the config-signing pin, the imac join secret, and
+# the exact enroll commands: the CLOUD client joins KEYLESS via aws-sigv4 attestation
+# (its IAM role); the off-cloud iMac joins via a join key with manual approval.
 #
 # Requires locally: terraform, jq, go, ssh, scp, openssl.
 set -euo pipefail
@@ -28,12 +31,16 @@ SSH_USER="${SSH_USER:-ec2-user}"
 SKIP_BUILD=0
 [[ "${1:-}" == "--skip-build" ]] && SKIP_BUILD=1
 
-# Overlay pool + lighthouse overlay IP. IMPORTANT: do NOT use 100.64.0.0/10
-# (CGNAT) if any host also runs Tailscale — Tailscale installs an nftables rule
-# that drops 100.64.0.0/10 traffic on non-tailscale0 interfaces, which silently
-# kills the nebula data plane. Default to a private range that won't collide.
+# Overlay pool + reserved overlay IPs. IMPORTANT: do NOT use 100.64.0.0/10 (CGNAT)
+# if any host also runs Tailscale — its nftables anti-spoof rule silently drops that
+# range on non-tailscale0 interfaces, killing the nebula data plane. Default to a
+# private range that won't collide.
 POOL="${POOL:-10.44.0.0/16}"
 LH_OVERLAY="${LH_OVERLAY:-10.44.0.1}"
+HARBOR_OVERLAY="${HARBOR_OVERLAY:-10.44.0.2}"   # Harbor's own mesh address (control-plane node)
+CORE_PORT="${CORE_PORT:-8444}"                   # core-api (renew/heartbeat), mesh-only
+ADMIN_PORT="${ADMIN_PORT:-8445}"                 # admin console, mesh-only
+MOCK_IDP_PORT="${MOCK_IDP_PORT:-8446}"           # dev mock-IdP for the console login
 
 for t in terraform jq go ssh scp openssl; do command -v "$t" >/dev/null || { echo "missing tool: $t" >&2; exit 1; }; done
 [[ -f "$SSH_KEY" ]] || { echo "ssh private key not found: $SSH_KEY (set SSH_KEY=...)" >&2; exit 1; }
@@ -50,9 +57,10 @@ CL_IP="$(jq -r '.public_ips.value.client' <<<"$OUT")"
 LH_ADDR="$(jq -r '.lighthouse_addr.value' <<<"$OUT")"
 GW_URL="$(jq -r '.gateway_url.value' <<<"$OUT")"
 echo "    lighthouse=$LH_IP  harbor=$HB_IP  client=$CL_IP"
-echo "    lighthouse underlay=$LH_ADDR  gateway=$GW_URL"
+echo "    lighthouse underlay=$LH_ADDR  gateway=$GW_URL  harbor-overlay=$HARBOR_OVERLAY"
 
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
+LH="$LH_OVERLAY=$LH_ADDR"
 
 # ── 0. build + distribute binaries ──────────────────────────────────────────
 if [[ "$SKIP_BUILD" -eq 0 ]]; then
@@ -72,24 +80,38 @@ echo "==> [lighthouse] pilot init -am-lighthouse"
 rsh "$LH_IP" 'sudo pilot init -am-lighthouse -dir /etc/nebula >/dev/null && sudo cat /etc/nebula/host.pub' > "$WORK/lh-host.pub"
 echo "    got lighthouse host pubkey"
 
-# ── 2. harbor: migrate + genesis ────────────────────────────────────────────
-echo "==> [harbor] migrate + genesis"
+# ── 2. harbor: init its OWN mesh key, with the lighthouse in static_host_map ─
+echo "==> [harbor] pilot init (control-plane node key)"
+rsh "$HB_IP" "set -e
+  sudo tee /etc/nebula-values.yml >/dev/null <<YAML
+lighthouses:
+  - overlay_ip: $LH_OVERLAY
+    public_addrs: [\"$LH_ADDR\"]
+YAML
+  sudo pilot init -dir /etc/nebula -values /etc/nebula-values.yml >/dev/null
+  sudo cat /etc/nebula/host.pub" > "$WORK/hb-host.pub"
+echo "    got harbor host pubkey"
+
+# ── 3. harbor: migrate + genesis (lighthouse + HARBOR control-plane certs) ───
+echo "==> [harbor] migrate + genesis (incl. -core-pub for Harbor's control-plane cert)"
 rcp "$WORK/lh-host.pub" "$SSH_USER@$HB_IP:/tmp/lh-host.pub"
+rcp "$WORK/hb-host.pub" "$SSH_USER@$HB_IP:/tmp/hb-host.pub"
 rsh "$HB_IP" "set -e
   mkdir -p ~/ncp
   DSN=~/ncp/harbor.db
   harbor migrate up -dsn \$DSN >/dev/null
   harbor genesis -dsn \$DSN -out ~/ncp/genesis \
-    -operator-a alice -operator-b bob \
-    -pool '$POOL' -lighthouse-pub /tmp/lh-host.pub -lighthouse-ip '$LH_OVERLAY' -lighthouse-addr '$LH_ADDR' >/dev/null
+    -operator-a alice -operator-b bob -pool '$POOL' \
+    -lighthouse-pub /tmp/lh-host.pub -lighthouse-ip '$LH_OVERLAY' -lighthouse-addr '$LH_ADDR' \
+    -core-pub /tmp/hb-host.pub -core-ip '$HARBOR_OVERLAY' -core-name harbor-core >/dev/null
   echo ok"
-# pull the trust artifacts we need to distribute
-rcp "$SSH_USER@$HB_IP:ncp/genesis/ca.crt"              "$WORK/ca.crt"
-rcp "$SSH_USER@$HB_IP:ncp/genesis/lighthouse-1.crt"    "$WORK/lighthouse-1.crt"
-rcp "$SSH_USER@$HB_IP:ncp/genesis/config-signing.pub"  "$WORK/config-signing.pub"
-echo "    genesis done; pulled ca.crt + lighthouse cert + config-signing pin"
+rcp "$SSH_USER@$HB_IP:ncp/genesis/ca.crt"             "$WORK/ca.crt"
+rcp "$SSH_USER@$HB_IP:ncp/genesis/lighthouse-1.crt"   "$WORK/lighthouse-1.crt"
+rcp "$SSH_USER@$HB_IP:ncp/genesis/harbor-core.crt"    "$WORK/harbor-core.crt"
+rcp "$SSH_USER@$HB_IP:ncp/genesis/config-signing.pub" "$WORK/config-signing.pub"
+echo "    genesis done; pulled ca.crt + lighthouse + harbor-core certs + config-signing pin"
 
-# ── 3. lighthouse: install issued cert + start nebula ───────────────────────
+# ── 4. lighthouse: install issued cert + start nebula ───────────────────────
 echo "==> [lighthouse] install cert + start nebula"
 rcp "$WORK/ca.crt"           "$SSH_USER@$LH_IP:/tmp/ca.crt"
 rcp "$WORK/lighthouse-1.crt" "$SSH_USER@$LH_IP:/tmp/host.crt"
@@ -99,77 +121,131 @@ rsh "$LH_IP" 'set -e
   rm -f /tmp/ca.crt /tmp/host.crt
   sudo systemd-run --unit ncp-nebula --collect /usr/local/bin/nebula -config /etc/nebula/config.yml >/dev/null
   echo started'
-echo "    lighthouse nebula running (systemd unit ncp-nebula)"
+echo "    lighthouse nebula running"
 
-# ── 4. harbor: enrollment plane + join keys ─────────────────────────────────
-echo "==> [harbor] start gateway + enroll worker, create join keys"
-JOIN="$(rsh "$HB_IP" "set -e
+# ── 5. harbor: install control-plane cert + join the mesh ───────────────────
+echo "==> [harbor] install control-plane cert + start nebula (joins the mesh at $HARBOR_OVERLAY)"
+rcp "$WORK/ca.crt"          "$SSH_USER@$HB_IP:/tmp/ca.crt"
+rcp "$WORK/harbor-core.crt" "$SSH_USER@$HB_IP:/tmp/host.crt"
+rsh "$HB_IP" 'set -e
+  sudo install -m0644 /tmp/ca.crt   /etc/nebula/ca.crt
+  sudo install -m0644 /tmp/host.crt /etc/nebula/host.crt
+  rm -f /tmp/ca.crt /tmp/host.crt
+  sudo systemd-run --unit ncp-nebula --collect /usr/local/bin/nebula -config /etc/nebula/config.yml >/dev/null
+  echo started'
+echo "    harbor nebula running (control-plane node)"
+
+# ── 6. derive this account from the client's IMDS + publish cloud-trust ──────
+echo "==> deriving AWS account/role/region from the client IMDS + publishing cloud-trust"
+IMDS="$(rsh "$CL_IP" 'set -e
+  T=$(curl -sX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
+  DOC=$(curl -s -H "X-aws-ec2-metadata-token: $T" http://169.254.169.254/latest/dynamic/instance-identity/document)
+  ROLE=$(curl -s -H "X-aws-ec2-metadata-token: $T" http://169.254.169.254/latest/meta-data/iam/security-credentials/)
+  echo "$DOC" | tr -d "\n"; echo; echo "$ROLE"')"
+ACCOUNT="$(jq -r .accountId <<<"$(head -n1 <<<"$IMDS")")"
+REGION="$(jq -r .region    <<<"$(head -n1 <<<"$IMDS")")"
+ROLE="$(tail -n1 <<<"$IMDS")"
+echo "    account=$ACCOUNT region=$REGION role=$ROLE"
+rsh "$HB_IP" "set -e
+  cat > ~/ncp/cloudtrust.json <<JSON
+{
+  \"default_groups\": [\"fleet\"],
+  \"aws\": [
+    { \"account\": \"$ACCOUNT\",
+      \"arn_patterns\": [\"arn:aws:sts::$ACCOUNT:assumed-role/$ROLE/*\"],
+      \"groups\": [\"workloads\"],
+      \"auto_issue\": true }
+  ]
+}
+JSON
+  harbor cloudtrust publish -dsn ~/ncp/harbor.db -config ~/ncp/cloudtrust.json \
+    -operator-a alice -operator-b bob >/dev/null
+  echo ok"
+echo "    cloud-trust published (account $ACCOUNT -> [workloads], auto-issue)"
+
+# ── 7. harbor: enrollment plane (attestation-enabled) + imac join key ───────
+echo "==> [harbor] start gateway + enroll worker (-cloudtrust-db) + imac join key"
+IMAC_KEY="$(rsh "$HB_IP" "set -e
   cd ~/ncp
-  DSN=~/ncp/harbor.db
-  QDSN=~/ncp/queue.db
-  G=~/ncp/genesis
+  DSN=~/ncp/harbor.db; QDSN=~/ncp/queue.db; G=~/ncp/genesis
   umask 077
   [ -f hmac.b64 ]  || openssl rand 32 | basenc --base64url | tr -d '=' > hmac.b64
   [ -f queue.b64 ] || openssl rand 32 | basenc --base64url | tr -d '=' > queue.b64
-  LH="$LH_OVERLAY=$LH_ADDR"
-  # (re)start the enrollment plane as transient systemd units, running AS
-  # ec2-user (neither gateway nor worker needs root). This keeps harbor.db +
-  # queue.db ec2-user-owned, so a plain (non-sudo) 'harbor enroll approve' can
-  # write the issued-bundle result. --uid/--gid set the process user; sudo is
-  # only to create the system transient unit.
-  sudo systemctl reset-failed ncp-gateway ncp-worker 2>/dev/null || true
+  sudo systemctl reset-failed ncp-gateway ncp-worker ncp-core ncp-admin 2>/dev/null || true
+  # Run AS ec2-user so harbor.db + queue.db stay ec2-user-owned (a plain 'enroll
+  # approve' / the console can then write the issued-bundle result).
   sudo systemd-run --uid=$SSH_USER --gid=$SSH_USER --unit ncp-gateway --collect /usr/local/bin/gateway \
     -addr 0.0.0.0:${GW_URL##*:} -hmac-key ~/ncp/hmac.b64 -queue-dsn \$QDSN -queue-key ~/ncp/queue.b64 >/dev/null
   sudo systemd-run --uid=$SSH_USER --gid=$SSH_USER --unit ncp-worker --collect /usr/local/bin/harbor enroll worker -pool '$POOL' \
     -dsn \$DSN -ca-cert \$G/ca.crt -ca-key \$G/ca.key -config-key \$G/config-signing.key \
-    -hmac-key ~/ncp/hmac.b64 -queue-dsn \$QDSN -queue-key ~/ncp/queue.b64 -lighthouse \"\$LH\" >/dev/null
-  # join keys (idempotent-ish: ignore 'already exists')
-  AWS=\$(harbor joinkey create -dsn \$DSN -name aws-client -groups workloads -auto-issue -quota 100 2>/dev/null | grep -o 'njk_[A-Za-z0-9_-]*' || true)
-  IMAC=\$(harbor joinkey create -dsn \$DSN -name imac -groups laptops 2>/dev/null | grep -o 'njk_[A-Za-z0-9_-]*' || true)
-  echo \"AWS=\$AWS\"; echo \"IMAC=\$IMAC\"")"
-AWS_KEY="$(grep -o 'AWS=njk_[A-Za-z0-9_-]*' <<<"$JOIN" | cut -d= -f2 || true)"
-IMAC_KEY="$(grep -o 'IMAC=njk_[A-Za-z0-9_-]*' <<<"$JOIN" | cut -d= -f2 || true)"
+    -hmac-key ~/ncp/hmac.b64 -queue-dsn \$QDSN -queue-key ~/ncp/queue.b64 -lighthouse '$LH' -cloudtrust-db >/dev/null
+  # imac (off-cloud, no AWS identity) joins via a join key with manual approval.
+  harbor joinkey create -dsn \$DSN -name imac -groups laptops 2>/dev/null | grep -o 'njk_[A-Za-z0-9_-]*' || true")"
+echo "    enrollment plane up (attestation enabled)"
+
+# ── 8. harbor: core-api (renew/heartbeat) + admin console (mock-IdP) ─────────
+echo "==> [harbor] start core-api + admin console on the overlay ($HARBOR_OVERLAY, mesh-only)"
+rsh "$HB_IP" "set -e
+  cd ~/ncp
+  DSN=~/ncp/harbor.db; QDSN=~/ncp/queue.db; G=~/ncp/genesis
+  # core-api: renew + heartbeat over the mesh, verifying its own control-plane cert at boot.
+  sudo systemd-run --uid=$SSH_USER --gid=$SSH_USER --unit ncp-core --collect /usr/local/bin/harbor core-api \
+    -dsn \$DSN -ca-cert \$G/ca.crt -ca-key \$G/ca.key -config-key \$G/config-signing.key \
+    -pool '$POOL' -lighthouse '$LH' -host-cert /etc/nebula/host.crt \
+    -addr $HARBOR_OVERLAY:$CORE_PORT >/dev/null
+  # admin console: issuance mode (so it can approve enrollments) + dev mock-IdP login.
+  sudo systemd-run --uid=$SSH_USER --gid=$SSH_USER --unit ncp-admin --collect /usr/local/bin/harbor admin-api \
+    -dsn \$DSN -ca-cert \$G/ca.crt -ca-key \$G/ca.key -config-key \$G/config-signing.key \
+    -hmac-key ~/ncp/hmac.b64 -queue-dsn \$QDSN -queue-key ~/ncp/queue.b64 -pool '$POOL' \
+    -addr $HARBOR_OVERLAY:$ADMIN_PORT -mock-idp -mock-idp-addr $HARBOR_OVERLAY:$MOCK_IDP_PORT \
+    -base-url http://$HARBOR_OVERLAY:$ADMIN_PORT -environment development >/dev/null
+  echo ok"
 cp "$WORK/config-signing.pub" "$ROOT/deploy/terraform/config-signing.pub"  # gitignored; the pin for clients
+echo "    core-api + admin console up"
 
 cat <<EOF
 
 ────────────────────────────────────────────────────────────────────────────
- GENESIS BOOTSTRAP COMPLETE
+ GENESIS BOOTSTRAP COMPLETE  (control plane + data plane)
 ────────────────────────────────────────────────────────────────────────────
- Gateway URL      : $GW_URL
- Lighthouse       : $LH_OVERLAY @ $LH_ADDR  (pool $POOL)
+ Gateway URL       : $GW_URL
+ Lighthouse        : $LH_OVERLAY @ $LH_ADDR  (pool $POOL)
+ Harbor (mesh)     : $HARBOR_OVERLAY  — core-api :$CORE_PORT, console :$ADMIN_PORT (mesh-only)
  Config-signing pin: deploy/terraform/config-signing.pub  (give this to clients)
+ Cloud-trust       : account $ACCOUNT / role $ROLE -> groups [workloads], auto-issue
 
- Join secrets (SENSITIVE — shown only here, on your terminal):
-   aws-client (auto-issue): ${AWS_KEY:-<existed already; re-create to see it>}
-   imac       (manual approval): ${IMAC_KEY:-<existed already; re-create to see it>}
-
- Enroll the CLOUD CLIENT (auto-issues):
+ Enroll the CLOUD CLIENT — KEYLESS via aws-sigv4 attestation (its IAM role):
    scp -i $SSH_KEY deploy/terraform/config-signing.pub $SSH_USER@$CL_IP:/tmp/
    ssh -i $SSH_KEY $SSH_USER@$CL_IP \\
-     'sudo pilot enroll -dir /etc/nebula -gateway $GW_URL \\
-        -join-key ${AWS_KEY:-<aws-key>} -config-pub /tmp/config-signing.pub -name aws-client && \\
-      sudo systemd-run --unit ncp-nebula --collect pilot supervise -config /etc/nebula/config.yml'
+     'sudo pilot enroll -dir /etc/nebula -gateway $GW_URL -aws-sigv4 -region $REGION \\
+        -config-pub /tmp/config-signing.pub -name aws-client && \\
+      sudo systemd-run --unit ncp-nebula --collect pilot supervise -dir /etc/nebula \\
+        -config /etc/nebula/config.yml -core http://$HARBOR_OVERLAY:$CORE_PORT -config-pub /tmp/config-signing.pub'
+   # auto-issued (account is trusted, auto_issue=true) — no join key involved.
 
- Enroll the OFF-CLOUD iMac (waits for manual approval):
-   pilot enroll -dir ~/.nebula -gateway $GW_URL \\
-     -join-key ${IMAC_KEY:-<imac-key>} -config-pub deploy/terraform/config-signing.pub -name imac
-   # then APPROVE it on harbor (plain ec2-user; the worker runs as ec2-user so
-   # queue.db is ec2-user-owned and the issued-bundle result writes cleanly):
+ Enroll the OFF-CLOUD iMac — join key, MANUAL approval:
+   imac join secret: ${IMAC_KEY:-<existed already; re-create with: harbor joinkey create -name imac -groups laptops>}
+   pilot enroll -dir ~/.nebula -gateway $GW_URL -join-key ${IMAC_KEY:-<imac-key>} \\
+     -config-pub deploy/terraform/config-signing.pub -name imac
+   # approve it in the CONSOLE (below) or via CLI:
    ssh -i $SSH_KEY $SSH_USER@$HB_IP \\
      'EID=\$(harbor enroll pending -dsn ~/ncp/harbor.db | awk "/imac/{print \\\$1}"); \\
       harbor enroll approve \$EID -approver alice -dsn ~/ncp/harbor.db \\
         -ca-cert ~/ncp/genesis/ca.crt -ca-key ~/ncp/genesis/ca.key \\
         -config-key ~/ncp/genesis/config-signing.key \\
         -hmac-key ~/ncp/hmac.b64 -queue-dsn ~/ncp/queue.db -queue-key ~/ncp/queue.b64 \\
-        -pool $POOL -lighthouse "$LH_OVERLAY=$LH_ADDR"'
-   # the iMac re-runs the same enroll to fetch the bundle, then: sudo nebula -config /etc/nebula/config.yml
+        -pool $POOL -lighthouse "$LH"'
+   # then re-run the iMac enroll to fetch the bundle; supervise with -core as above.
 
- Verify: from any joined node,  ping $LH_OVERLAY   (lighthouse) and ping the others.
+ Open the ADMIN CONSOLE (mesh-only — reach it from an enrolled mesh member, e.g.
+ the iMac once it has joined, in a browser):
+     http://$HARBOR_OVERLAY:$ADMIN_PORT    (mock-IdP login; approve enrollments, see
+                                            fleet health, policy, cloud-trust, etc.)
+   Off-mesh convenience (out-of-band admin path): SSH-tunnel both ports —
+     ssh -i $SSH_KEY -L $ADMIN_PORT:$HARBOR_OVERLAY:$ADMIN_PORT -L $MOCK_IDP_PORT:$HARBOR_OVERLAY:$MOCK_IDP_PORT $SSH_USER@$HB_IP
+   then browse http://$HARBOR_OVERLAY:$ADMIN_PORT through the tunnel.
 
- Lifecycle follow-on (not done here): bring Harbor onto the mesh and run
-   'harbor core-api -addr <harbor-overlay-ip>:8444 ...' so clients can renew +
-   heartbeat (pilot supervise -core). The enrollment plane above is enough to
-   join and ping.
+ Verify: from any joined node,  ping $LH_OVERLAY  and  ping $HARBOR_OVERLAY ;
+         the cloud client should appear in the console's fleet dashboard (heartbeat).
 ────────────────────────────────────────────────────────────────────────────
 EOF
