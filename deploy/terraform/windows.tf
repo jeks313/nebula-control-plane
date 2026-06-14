@@ -29,8 +29,8 @@ resource "aws_security_group" "windows_client" {
     cidr_blocks = [var.allowed_ssh_cidr]
   }
   ingress {
-    # Manual fallback only: the ed25519 key can't decrypt the EC2 password, so RDP
-    # needs a console password reset. Kept for break-glass debugging if sshd setup fails.
+    # Manual break-glass only: no EC2 key pair is attached (Windows rejects ed25519),
+    # so RDP needs a password set via SSM/console. Kept in case sshd setup fails.
     description = "RDP from you (manual fallback)"
     from_port   = 3389
     to_port     = 3389
@@ -84,10 +84,12 @@ resource "aws_security_group" "windows_client" {
 resource "aws_instance" "windows" {
   count = var.enable_windows_client ? 1 : 0
 
-  ami                         = data.aws_ssm_parameter.windows2022[0].value
-  instance_type               = var.windows_instance_type
-  subnet_id                   = aws_subnet.tier["client"].id
-  key_name                    = aws_key_pair.personal.key_name
+  ami           = data.aws_ssm_parameter.windows2022[0].value
+  instance_type = var.windows_instance_type
+  subnet_id     = aws_subnet.tier["client"].id
+  # No EC2 key_name: AWS rejects ed25519 key pairs on Windows AMIs, and we don't
+  # need one — SSH auth is the user_data-injected administrators_authorized_keys.
+  # (The EC2 key pair only governs the Windows password / RDP, unused here.)
   vpc_security_group_ids      = [aws_security_group.windows_client[0].id]
   iam_instance_profile        = aws_iam_instance_profile.node.name
   associate_public_ip_address = true
