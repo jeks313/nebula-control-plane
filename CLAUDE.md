@@ -196,9 +196,20 @@ bootstrap; reuse result-TTL; pinned-cert-sufficient).
   — `terraform apply` + the bootstrap runs the real demo (expect first-run iteration).
 - Phase 4 (deferred): long-poll, per-gateway rate/depth caps, gateway health in the fleet view.
 
-**Demo:** `cd deploy/terraform && terraform apply`, then `SSH_KEY=~/.ssh/absolute bash
-../scripts/bootstrap-genesis.sh` — stands up lighthouse + harbor (mesh) + the off-mesh gateway +
-a cloud client; prints the enroll commands + config-signing pin.
+**Deploy patterns (two):**
+- **`deploy/local/`** — single-instance PERSONAL deploy, maximally simplified: one box, localhost,
+  SQLite, software CA, **co-located** enrollment (gateway + worker share one local queue — NOT the
+  ADR-0005 pull split), admin **console via GitHub OAuth** (`NCP_GITHUB_CLIENT_ID/SECRET`, else a dev
+  mock-IdP), console UI built with `-tags ui` when `npm` is present. `local-up.sh` / `local-down.sh`.
+  GitHub-gated joins = mint a join key + approve the device in the GitHub-authed console. Console
+  bound to 127.0.0.1 (default-roles admin, safe local-only). Verified end-to-end (enroll + SPA console).
+- **`deploy/terraform/` + `deploy/scripts/bootstrap-genesis.sh`** — multi-host AWS: `terraform apply`
+  then `SSH_KEY=~/.ssh/absolute bash ../scripts/bootstrap-genesis.sh` — dedicated VPC, tiered subnets,
+  lighthouse + harbor (mesh) + the OFF-MESH gateway (Harbor pulls it) + a cloud client; prints the
+  enroll commands + config-signing pin. (Not applied to live AWS from here.)
+
+Note: the durable queue (`internal/queue`) is now safe for concurrent first-open by several processes
+(the co-located gateway+worker+admin) — AutoMigrate tolerates the benign create race.
 
 **After ADR 0005: back to 7.2 — revoke-as-DoS guards.** Reuse `internal/dualcontrol` (register a
 `revoke.bulk` Kind) for bulk-revoke (quorum ≥2) + a DB-backed rate limit (model on `signer` breaker,
