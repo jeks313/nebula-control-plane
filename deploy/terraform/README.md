@@ -1,17 +1,19 @@
 # Minimal AWS EC2 lab (Terraform)
 
-Three small EC2 nodes for trying the Nebula control plane end to end:
+Four small EC2 nodes for trying the Nebula control plane end to end:
 
 - **lighthouse** — `nebula` with `am_lighthouse`; discovery + NAT hole-punch. Elastic IP.
-- **harbor** — control plane: enrollment **gateway** (public) + **Core/core-api** (renew, heartbeat) + enroll **worker** + **admin console**, DB, CA + config-signing keys. Itself a mesh node in group `control-plane`. Elastic IP (gateway is public; core-api + console are overlay-only).
+- **harbor** — control plane: **Core/core-api** (renew, heartbeat) + **admin console** + the **pull collector** (`harbor collect`) + DB + CA/config-signing keys. Itself a mesh node in group `control-plane`. Elastic IP (core-api + console are overlay-only; harbor reaches OUT to the gateway).
+- **gateway** — the public **enrollment gateway** (ADR 0005), on its **own** node and **off the mesh**: serves public enroll + a Harbor-only mTLS collect port over a local queue; Harbor PULLS it. It holds no CA/DB and no overlay identity — a compromise yields no mesh pivot. Elastic IP.
 - **client** — a `pilot` mesh member that joins **keyless via `aws-sigv4` attestation** (its instance IAM role), then renews/heartbeats to core-api.
 
 Plus your **off-cloud iMac** (not managed here) which enrolls via a **join key
 with manual approval** — the off-cloud path. All nodes run Amazon Linux 2023, use
 **your personal SSH key**, get an **instance IAM role** (ready for M5 sigv4
 attestation), are **IMDSv2-only**, and have **encrypted EBS**. Security groups are
-**split by role**: only the lighthouse's UDP discovery and harbor's TCP gateway
-face the internet; Core's API (8444) is overlay-only. SSH is locked to your IP.
+**split by role**: only the lighthouse's UDP discovery and the gateway's TCP enroll
+port face the internet; the gateway's collect port is reachable **only from Harbor's
+security group**, and Core's API (8444) is overlay-only. SSH is locked to your IP.
 
 ---
 
@@ -91,9 +93,11 @@ SSH_KEY=~/.ssh/absolute bash ../scripts/bootstrap-genesis.sh
 Steps: lighthouse init → harbor init (its own mesh key) → genesis (CA + config-signing
 + lighthouse cert + **Harbor's `control-plane` cert**, so Harbor is a real mesh node) →
 lighthouse + harbor online → **publish a cloud-trust config** (this AWS account → groups,
-auto-issue) → enrollment plane (gateway + attestation-enabled worker) + imac join key →
-**core-api** (renew/heartbeat, boot-verifies its control-plane cert) + **admin console**
-(mock-IdP), both bound to Harbor's overlay IP (mesh-only).
+auto-issue) → **off-mesh gateway** (ADR 0005: leaf-pinned mTLS minted on each side; the
+gateway serves public enroll + a Harbor-only collect port over a local queue) +
+**`harbor gateway add`** + **`harbor collect`** (Harbor pulls + issues + pushes results
+back) + imac join key → **core-api** (renew/heartbeat, boot-verifies its control-plane
+cert) + **admin console** (mock-IdP), both bound to Harbor's overlay IP (mesh-only).
 
 It prints the gateway URL, the **config-signing pin** (`config-signing.pub`), the imac
 join secret, and the exact enroll commands: the **cloud client joins keyless via
@@ -110,8 +114,8 @@ host also runs **Tailscale** — Tailscale installs an nftables rule that drops
 nebula data plane (handshakes succeed, pings don't). This was hit and fixed live.
 
 ## What it creates
-- 3× `t3.micro` EC2 (Amazon Linux 2023), encrypted root volume, IMDSv2-only; Elastic IPs on lighthouse + harbor.
-- Three role-split security groups (lighthouse UDP, harbor gateway+UDP, client UDP; SSH locked to your IP). Only the lighthouse UDP + harbor's gateway TCP face the internet — core-api (8444), the admin console (8445) and the mock-IdP (8446) are overlay-only, in no security group by design.
+- 4× `t3.micro` EC2 (Amazon Linux 2023), encrypted root volume, IMDSv2-only; Elastic IPs on lighthouse, harbor + gateway.
+- Four role-split security groups (lighthouse UDP; harbor UDP; gateway public-enroll TCP + a collect-port TCP reachable **only from harbor's SG**; client UDP; SSH locked to your IP). Only the lighthouse UDP + the gateway's enroll TCP face the internet — the gateway's collect port is harbor-only, and core-api (8444), the admin console (8445) and the mock-IdP (8446) are overlay-only, in no security group by design.
 - An EC2 key pair from your `~/.ssh/absolute.pub`.
 - A permission-less IAM role + instance profile (enough for `sts:GetCallerIdentity`).
 

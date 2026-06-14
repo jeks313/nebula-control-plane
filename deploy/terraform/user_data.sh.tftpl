@@ -42,9 +42,14 @@ Role-specific next steps (all handled by bootstrap-genesis.sh):
                 genesis; run nebula.
   harbor     -> pilot init (its own control-plane key); harbor migrate up; harbor
                 genesis (-core-pub issues Harbor's control-plane cert); run nebula
-                (joins the mesh); cloudtrust publish; gateway + enroll worker
-                (-cloudtrust-db) + core-api (-host-cert) + admin console (mock-IdP),
+                (joins the mesh); cloudtrust publish; `harbor gateway add` (register
+                the off-mesh gateway) + `harbor collect` (PULL the gateway, issue,
+                push results back) + core-api (-host-cert) + admin console (mock-IdP),
                 core-api/console bound to the overlay (mesh-only).
+  gateway    -> OFF the mesh (no nebula). `gateway collect-keygen` mints its mTLS
+                server identity; run `gateway -collect-addr … -harbor-client-cert …`
+                so it serves public enroll + a Harbor-only collect port over a local
+                queue, initiating nothing (ADR 0005). nebula is installed but unused.
   client     -> KEYLESS join via this instance's IAM role:
                 pilot enroll -gateway <harbor gw> -aws-sigv4 -region <region>
                   -config-pub <pin>

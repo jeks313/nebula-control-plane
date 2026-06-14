@@ -107,9 +107,10 @@ need the cloud, verified once in the minimal Tier-2 harness).
 > implementation plan (per-step `✅` + "Proven:" notes); for *what/why* the design plan.
 > This is a fast summary — re-read those for exact state.
 
-**M0–M6 complete; M7.1 done; mid-milestone DIVERGENCE to ADR 0005 (pull-based gateways) for a
-real-topology live demo — ADR 0005 Phases 1+2 done, next is Phase 3 (Terraform demo node), then
-back to 7.2.** Schema at migration **000015**. M0 feasibility PASSED (2026-06-11: SoftHSM P256 CA,
+**M0–M6 complete; M7.1 done; ADR 0005 (pull-based gateways) DONE (Phases 1–3) — the next code step
+is back on the milestone track at 7.2.** A live demo (terraform apply + bootstrap-genesis.sh) can
+run now on the real off-mesh topology. Schema at migration **000015**. M0 feasibility PASSED
+(2026-06-11: SoftHSM P256 CA,
 tunnel forms — design §M0 results; spike under `spike/m0/`, `make m0-*`). The trust
 spine is built end-to-end **on Linux** (Windows/macOS parity deferred to M10):
 - **M1 Pilot** — supervises `nebula`, host keygen, enroll, renew, render, drift-revert.
@@ -187,12 +188,17 @@ bootstrap; reuse result-TTL; pinned-cert-sufficient).
   Add/Remove/List/Active, audited, validates the pinned cert, reactivates-in-place) + `harbor gateway
   add|remove|list`. `harbor collect` polls all active registered gateways by default (re-read each
   cycle), `-gateway-url` kept as a single-gateway override. Console surface deferred with the UI work.
-- ⏭️ **Phase 3 — the demo node (Terraform) — NEXT.** `deploy/terraform`: add a standalone OFF-mesh gateway
-  EC2 with its own SG (`:8443` public + the collect port from Harbor's source only; **no** Nebula
-  UDP); harbor STOPS exposing the gateway publicly and instead reaches out to the gateway's collect
-  port; `user_data` bootstraps `cmd/gateway`; register it with `harbor gateway add`. Today's
-  terraform co-locates the gateway on the harbor host (`deploy/terraform/main.tf`) — Phase 3 splits it.
+- ✅ **Phase 3 — the demo node (Terraform).** `deploy/terraform`: 4th node `gateway` (off-mesh, EIP)
+  + its own SG (`:8443` public; `collect_port` 9443 from harbor's SG only; no Nebula UDP); the gateway
+  port removed from the harbor SG (harbor reaches OUT + pulls). `bootstrap-genesis.sh` step 7 mints
+  leaf-pinned mTLS, runs the off-mesh gateway, `harbor gateway add`s it, and runs `harbor collect`
+  (replaces `enroll worker`). `terraform validate` + `bash -n` clean; **not yet applied to live AWS**
+  — `terraform apply` + the bootstrap runs the real demo (expect first-run iteration).
 - Phase 4 (deferred): long-poll, per-gateway rate/depth caps, gateway health in the fleet view.
+
+**Demo:** `cd deploy/terraform && terraform apply`, then `SSH_KEY=~/.ssh/absolute bash
+../scripts/bootstrap-genesis.sh` — stands up lighthouse + harbor (mesh) + the off-mesh gateway +
+a cloud client; prints the enroll commands + config-signing pin.
 
 **After ADR 0005: back to 7.2 — revoke-as-DoS guards.** Reuse `internal/dualcontrol` (register a
 `revoke.bulk` Kind) for bulk-revoke (quorum ≥2) + a DB-backed rate limit (model on `signer` breaker,

@@ -153,9 +153,19 @@ which is exactly what the pull/off-mesh model grants it.
   handshakes + claims → remove → nothing polled; audit chain intact). Console surface
   deferred with the other UI work. (No "last active" invariant — a gateway is an
   off-mesh sink, so removing the last one only pauses public enrollment.)
-- **Phase 3 — the demo node.** A standalone public gateway EC2 (own SG: `:8443`
+- ✅ **Phase 3 — the demo node.** A standalone public gateway EC2 (own SG: `:8443`
   public + the poll port restricted to Harbor; **not** on the mesh), registered with
-  Harbor — the real public-edge/Core split, with no Postgres.
+  Harbor — the real public-edge/Core split, with no Postgres. **Implemented
+  (2026-06-14):** `deploy/terraform` gained a 4th node `gateway` (off-mesh, EIP) with
+  its own SG (`:8443` from `gateway_cidr`; `collect_port` 9443 from **harbor's SG
+  only**; no Nebula UDP); the gateway port was **removed** from the harbor SG (harbor
+  now reaches OUT and pulls). New `collect_port` var + `gateway_url`/`gateway_collect_addr`
+  outputs (`terraform validate` clean). `deploy/scripts/bootstrap-genesis.sh` step 7
+  now mints leaf-pinned mTLS on each side, starts the off-mesh `gateway` on its node
+  (public enroll + Harbor-only collect over a local queue), `harbor gateway add`s it,
+  and runs `harbor collect` (replacing `enroll worker`). README + node `NEXT-STEPS`
+  updated. *(Not applied to live AWS here — run `terraform apply` + the bootstrap to
+  demo; expect first-run iteration on a real apply.)*
 - **Phase 4 — hardening.** Long-poll for low-latency enrollment; per-gateway rate/
   depth caps + alerting; gateway health in the fleet view.
 
