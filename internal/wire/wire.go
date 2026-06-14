@@ -97,17 +97,27 @@ type RenewResponse struct {
 	Bundle          json.RawMessage `json:"bundle"`
 }
 
+// ConfigResponse carries the host's CURRENT signed config bundle (GET /v1/config,
+// spec §9) — same shape as a renew, but built from the host's EXISTING cert with
+// no key rotation or re-issue: a config-only refresh used to fast-propagate a
+// blocklist/policy/lighthouse change (7.1b).
+type ConfigResponse struct {
+	ProtocolVersion int             `json:"protocol_version"`
+	Bundle          json.RawMessage `json:"bundle"`
+}
+
 // HeartbeatRequest is the POST /v1/heartbeat body (spec §8.2). Mesh-only,
 // attributed to the calling tunnel's overlay IP — no JWS needed.
 type HeartbeatRequest struct {
-	ProtocolVersion      int    `json:"protocol_version"`
-	Type                 string `json:"type"` // "heartbeat"
-	AppliedBundleVersion int    `json:"applied_bundle_version"`
-	CertNotAfter         string `json:"cert_not_after"` // RFC3339
-	PilotVersion         string `json:"pilot_version"`
-	NebulaVersion        string `json:"nebula_version"`
-	ClockOffsetMs        int    `json:"clock_offset_ms"`
-	Health               string `json:"health"`
+	ProtocolVersion         int    `json:"protocol_version"`
+	Type                    string `json:"type"` // "heartbeat"
+	AppliedBundleVersion    int    `json:"applied_bundle_version"`
+	AppliedBlocklistVersion int    `json:"applied_blocklist_version"`
+	CertNotAfter            string `json:"cert_not_after"` // RFC3339
+	PilotVersion            string `json:"pilot_version"`
+	NebulaVersion           string `json:"nebula_version"`
+	ClockOffsetMs           int    `json:"clock_offset_ms"`
+	Health                  string `json:"health"`
 }
 
 // Command types — a CLOSED set (spec §8.2). Pilot executes only these and

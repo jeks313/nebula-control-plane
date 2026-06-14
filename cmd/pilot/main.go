@@ -351,12 +351,22 @@ func cmdSupervise(args []string) {
 		go func() { _ = mgr.Run(ctx) }()
 
 		// Heartbeat + typed command channel (4.6): report state; act on the
-		// closed command set (Core-issued renew reuses the renewal path).
+		// closed command set. Core-issued renew reuses the renewal path;
+		// apply_bundle (7.1b) does a config-only refresh (GET /v1/config) so a
+		// blocklist/policy/lighthouse change applies fast without a cert re-issue.
 		hb := heartbeat.New(heartbeat.Config{
-			CoreURL: *core, Layout: layout, PilotVersion: version,
+			CoreURL: *core, Layout: layout, PilotVersion: version, PinnedConfigPub: pinned,
 			Handlers: heartbeat.Handlers{
 				Renew:   mgr.RenewNow,
 				Restart: sup.Restart,
+				ApplyBundle: func(ctx context.Context, _ int) error {
+					if _, err := enrollclient.FetchConfig(ctx, enrollclient.RenewParams{
+						CoreURL: *core, Layout: layout, PinnedConfigPub: pinned,
+					}); err != nil {
+						return err
+					}
+					return sup.Reload()
+				},
 			},
 		})
 		go func() { _ = hb.Run(ctx) }()

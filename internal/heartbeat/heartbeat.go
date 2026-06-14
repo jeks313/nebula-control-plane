@@ -8,6 +8,7 @@ package heartbeat
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/jeks313/nebula-control-plane/internal/bundle"
 	"github.com/jeks313/nebula-control-plane/internal/paths"
 	"github.com/jeks313/nebula-control-plane/internal/wire"
 	"github.com/slackhq/nebula/cert"
@@ -67,9 +69,14 @@ type Config struct {
 	Handlers      Handlers
 	PilotVersion  string
 	NebulaVersion string
-	HTTPClient    *http.Client
-	Now           func() time.Time
-	Logger        *slog.Logger
+	// PinnedConfigPub, if set, lets the reporter read the applied bundle +
+	// blocklist versions from the stored signed bundle (7.1b) so Core can track
+	// rollout convergence. Reporting only — the bundle is verified against the
+	// pinned key before its versions are trusted.
+	PinnedConfigPub *ecdsa.PublicKey
+	HTTPClient      *http.Client
+	Now             func() time.Time
+	Logger          *slog.Logger
 }
 
 // Reporter periodically sends heartbeats and processes the command channel.
@@ -112,6 +119,16 @@ func (r *Reporter) beat(ctx context.Context) {
 	if pem, err := os.ReadFile(r.cfg.Layout.HostCert()); err == nil {
 		if c, _, err := cert.UnmarshalCertificateFromPEM(pem); err == nil {
 			req.CertNotAfter = c.NotAfter().UTC().Format(time.RFC3339)
+		}
+	}
+	// Report which bundle/blocklist generation we're on (7.1b) so Core can drive
+	// and observe rollout convergence — read from the verified stored bundle.
+	if r.cfg.PinnedConfigPub != nil {
+		if raw, err := os.ReadFile(r.cfg.Layout.Bundle()); err == nil {
+			if b, err := bundle.Verify(raw, r.cfg.PinnedConfigPub); err == nil {
+				req.AppliedBundleVersion = b.BundleVersion
+				req.AppliedBlocklistVersion = b.BlocklistVersion
+			}
 		}
 	}
 

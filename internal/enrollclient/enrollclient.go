@@ -248,6 +248,44 @@ func Renew(ctx context.Context, p RenewParams) (Result, error) {
 	return Result{Status: "issued", OverlayIP: b.Device.OverlayIP}, nil
 }
 
+// FetchConfig pulls the host's CURRENT signed config bundle (GET /v1/config) and
+// applies the config WITHOUT rotating or rewriting the cert/key — the cheap
+// refresh a Pilot runs on an apply_bundle command so a blocklist/policy/lighthouse
+// change propagates fast (7.1b). The bundle is verified against the pinned
+// config-signing key; only the CA bundle + rendered config.yml are (re)written, so
+// a renewed host's on-disk cert is never clobbered by Core's enroll-time copy.
+func FetchConfig(ctx context.Context, p RenewParams) (Result, error) {
+	if p.HTTPClient == nil {
+		p.HTTPClient = &http.Client{Timeout: 10 * time.Second}
+	}
+	if p.PinnedConfigPub == nil {
+		return Result{}, fmt.Errorf("enrollclient: a pinned config-signing key is required")
+	}
+	r, err := http.NewRequestWithContext(ctx, http.MethodGet, p.CoreURL+"/v1/config", nil)
+	if err != nil {
+		return Result{}, err
+	}
+	code, respBody, err := (Params{HTTPClient: p.HTTPClient}).do(r)
+	if err != nil {
+		return Result{}, err
+	}
+	if code != http.StatusOK {
+		return Result{}, fmt.Errorf("enrollclient: config -> %d: %s", code, respBody)
+	}
+	var cr wire.ConfigResponse
+	if err := json.Unmarshal(respBody, &cr); err != nil {
+		return Result{}, err
+	}
+	b, err := bundle.Verify(cr.Bundle, p.PinnedConfigPub)
+	if err != nil {
+		return Result{}, fmt.Errorf("enrollclient: %w", err)
+	}
+	if err := (Params{Layout: p.Layout}).writeConfigArtifacts(b, cr.Bundle); err != nil {
+		return Result{}, err
+	}
+	return Result{Status: "config", OverlayIP: b.Device.OverlayIP}, nil
+}
+
 type ticket struct {
 	EnrollmentID    string `json:"enrollment_id"`
 	RetrievalSecret string `json:"retrieval_secret"`
@@ -366,6 +404,24 @@ func (p Params) writeArtifacts(b bundle.Bundle, rawBundleJWS []byte) error {
 		return err
 	}
 	// Retain the signed bundle so drift detection (M6.7) can re-assert it.
+	if err := os.WriteFile(p.Layout.Bundle(), rawBundleJWS, 0o644); err != nil {
+		return err
+	}
+	cfg, err := bundle.RenderNebulaConfig(b, p.Layout.CABundle(), p.Layout.HostCert(), p.Layout.HostKey())
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(p.Layout.Config(), cfg, 0o644)
+}
+
+// writeConfigArtifacts applies a CONFIG-ONLY bundle (GET /v1/config, 7.1b): it
+// refreshes the CA bundle, retains the signed bundle for drift (M6.7), and
+// re-renders config.yml — but does NOT touch the host cert/key, so a fast config
+// refresh can never clobber a renewed host's current cert with Core's stored copy.
+func (p Params) writeConfigArtifacts(b bundle.Bundle, rawBundleJWS []byte) error {
+	if err := os.WriteFile(p.Layout.CABundle(), []byte(strings.Join(b.CABundle, "\n")), 0o644); err != nil {
+		return err
+	}
 	if err := os.WriteFile(p.Layout.Bundle(), rawBundleJWS, 0o644); err != nil {
 		return err
 	}

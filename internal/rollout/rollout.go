@@ -41,6 +41,19 @@ const (
 	HostReverted  = "reverted"
 )
 
+// Lanes. A lane is an independent rollout track: at most one rollout is active
+// per lane, but lanes run concurrently — so a security/blocklist rollout (7.1)
+// never queues behind a policy canary. The policy lane reverts touched hosts to
+// prev on rollback; the blocklist lane FREEZES (stops widening) without a content
+// revert (the blocklist set is always the latest; an operator lifts a bad entry).
+const (
+	LanePolicy    = "policy"
+	LaneBlocklist = "blocklist"
+)
+
+// lanes is the fixed set Evaluate sweeps each heartbeat.
+var lanes = []string{LanePolicy, LaneBlocklist}
+
 // healthBad is the set of reported health values that fail a wave immediately.
 var healthBad = map[string]bool{"unhealthy": true, "degraded": true, "error": true, "critical": true, "red": true}
 
@@ -55,6 +68,7 @@ var (
 // Rollout is a staged rollout record.
 type Rollout struct {
 	ID            int64  `gorm:"column:id;primaryKey"`
+	Lane          string `gorm:"column:lane"`
 	Description   string `gorm:"column:description"`
 	TargetVersion int    `gorm:"column:target_version"`
 	PrevVersion   int    `gorm:"column:prev_version"`
@@ -89,10 +103,19 @@ func (Host) TableName() string { return "rollout_hosts" }
 // hb is the engine's read-only view of the heartbeats table (owned by coreapi;
 // kept as a private model here to avoid an import cycle).
 type hb struct {
-	OverlayIP            string `gorm:"column:overlay_ip"`
-	AppliedBundleVersion int    `gorm:"column:applied_bundle_version"`
-	Health               string `gorm:"column:health"`
-	LastSeen             int64  `gorm:"column:last_seen"`
+	OverlayIP               string `gorm:"column:overlay_ip"`
+	AppliedBundleVersion    int    `gorm:"column:applied_bundle_version"`
+	AppliedBlocklistVersion int    `gorm:"column:applied_blocklist_version"`
+	Health                  string `gorm:"column:health"`
+	LastSeen                int64  `gorm:"column:last_seen"`
+}
+
+// appliedFor returns the host's applied version on the given lane.
+func appliedFor(beat hb, lane string) int {
+	if lane == LaneBlocklist {
+		return beat.AppliedBlocklistVersion
+	}
+	return beat.AppliedBundleVersion
 }
 
 func (hb) TableName() string { return "heartbeats" }
@@ -117,6 +140,7 @@ func (e *Engine) SetClock(now func() time.Time) { e.now = now }
 
 // StartConfig parameterizes a new rollout.
 type StartConfig struct {
+	Lane          string // "" -> LanePolicy
 	Description   string
 	TargetVersion int
 	PrevVersion   int
@@ -135,7 +159,11 @@ func (e *Engine) Start(ctx context.Context, cfg StartConfig) (Rollout, error) {
 	if len(cfg.Hosts) == 0 {
 		return Rollout{}, ErrNoHosts
 	}
-	if _, ok, err := e.activeCurrent(ctx); err != nil {
+	lane := cfg.Lane
+	if lane == "" {
+		lane = LanePolicy
+	}
+	if _, ok, err := e.activeCurrent(ctx, lane); err != nil {
 		return Rollout{}, err
 	} else if ok {
 		return Rollout{}, ErrActiveExists
@@ -149,6 +177,7 @@ func (e *Engine) Start(ctx context.Context, cfg StartConfig) (Rollout, error) {
 	}
 	now := e.now().UTC().UnixNano()
 	r := Rollout{
+		Lane:        lane,
 		Description: cfg.Description, TargetVersion: cfg.TargetVersion, PrevVersion: cfg.PrevVersion,
 		State: StateCanary, ActiveWave: 0, WaveSize: cfg.WaveSize, MinHealthy: cfg.MinHealthy,
 		ObserveWindow: cfg.Observe.Nanoseconds(), MissingAfter: cfg.MissingAfter.Nanoseconds(),
@@ -177,7 +206,7 @@ func (e *Engine) Start(ctx context.Context, cfg StartConfig) (Rollout, error) {
 		return Rollout{}, fmt.Errorf("rollout: start: %w", err)
 	}
 	e.recordAudit(ctx, cfg.Actor, "rollout-start", fmt.Sprintf("rollout#%d", r.ID),
-		fmt.Sprintf("target=%d prev=%d hosts=%d canary=%d", cfg.TargetVersion, cfg.PrevVersion, len(cfg.Hosts), canary))
+		fmt.Sprintf("lane=%s target=%d prev=%d hosts=%d canary=%d", lane, cfg.TargetVersion, cfg.PrevVersion, len(cfg.Hosts), canary))
 	return r, nil
 }
 
@@ -186,7 +215,19 @@ func (e *Engine) Start(ctx context.Context, cfg StartConfig) (Rollout, error) {
 // auto-rolls-back and freezes. It returns whether the state changed. Safe and
 // idempotent to call on every heartbeat.
 func (e *Engine) Evaluate(ctx context.Context) (changed bool, err error) {
-	r, ok, err := e.activeCurrent(ctx)
+	for _, lane := range lanes {
+		c, lerr := e.evaluateLane(ctx, lane)
+		if lerr != nil {
+			return changed, lerr
+		}
+		changed = changed || c
+	}
+	return changed, nil
+}
+
+// evaluateLane advances the active rollout (if any) on a single lane.
+func (e *Engine) evaluateLane(ctx context.Context, lane string) (changed bool, err error) {
+	r, ok, err := e.activeCurrent(ctx, lane)
 	if err != nil || !ok {
 		return false, err
 	}
@@ -208,7 +249,7 @@ func (e *Engine) Evaluate(ctx context.Context) (changed bool, err error) {
 			if trigger == "" {
 				trigger = h.OverlayIP + " reported health=" + beat.Health
 			}
-		case hbErr == nil && beat.AppliedBundleVersion == r.TargetVersion && beat.LastSeen >= now-r.MissingAfter:
+		case hbErr == nil && appliedFor(beat, r.Lane) == r.TargetVersion && beat.LastSeen >= now-r.MissingAfter:
 			converged++
 		case e.isMissing(beat, hbErr, now, r):
 			missing++
@@ -312,7 +353,19 @@ func (e *Engine) rollback(ctx context.Context, r Rollout, trigger string) error 
 // applied_bundle_version. It also records a host as reverted once it reports the
 // prev version post-rollback.
 func (e *Engine) CommandFor(ctx context.Context, overlayIP string, reportedVersion int) (wire.Command, bool) {
-	r, ok, err := e.current(ctx)
+	return e.commandForLane(ctx, LanePolicy, overlayIP, reportedVersion)
+}
+
+// BlocklistCommandFor is CommandFor for the blocklist lane (7.1). On rollback the
+// blocklist lane FREEZES — it does NOT command a content revert (the blocklist set
+// is always the latest; an operator lifts a bad entry), so only the forward
+// "apply the target" drive is emitted.
+func (e *Engine) BlocklistCommandFor(ctx context.Context, overlayIP string, reportedVersion int) (wire.Command, bool) {
+	return e.commandForLane(ctx, LaneBlocklist, overlayIP, reportedVersion)
+}
+
+func (e *Engine) commandForLane(ctx context.Context, lane, overlayIP string, reportedVersion int) (wire.Command, bool) {
+	r, ok, err := e.current(ctx, lane)
 	if err != nil || !ok {
 		return wire.Command{}, false
 	}
@@ -327,6 +380,9 @@ func (e *Engine) CommandFor(ctx context.Context, overlayIP string, reportedVersi
 			return wire.Command{Type: wire.CmdApplyBundle, BundleVersion: r.TargetVersion}, true
 		}
 	case StateRolledBack:
+		if lane == LaneBlocklist {
+			return wire.Command{}, false // freeze: no content revert for the blocklist lane
+		}
 		// Touched hosts revert to the previous version.
 		if h.Wave <= r.ActiveWave {
 			if reportedVersion != r.PrevVersion {
@@ -344,7 +400,7 @@ func (e *Engine) CommandFor(ctx context.Context, overlayIP string, reportedVersi
 // whether a rollout governs it. In-wave hosts of an active rollout get the
 // target; everyone else (and after rollback) gets prev.
 func (e *Engine) VersionFor(ctx context.Context, overlayIP string) (int, bool) {
-	r, ok, err := e.current(ctx)
+	r, ok, err := e.current(ctx, LanePolicy)
 	if err != nil || !ok {
 		return 0, false
 	}
@@ -359,9 +415,30 @@ func (e *Engine) VersionFor(ctx context.Context, overlayIP string) (int, bool) {
 	return r.PrevVersion, true
 }
 
-// Status returns the current rollout and its hosts.
+// BlocklistVersion is the current blocklist-lane version Core stamps on every
+// bundle's BlocklistVersion: the highest target ever rolled out on the blocklist
+// lane (0 if none). The blocklist CONTENT is always the latest active set, so
+// unlike the policy lane this is a single monotonic generation — a host's
+// reported applied_blocklist_version is the generation of its last-fetched bundle,
+// and the blocklist rollout drives the healthy fleet to converge on it.
+func (e *Engine) BlocklistVersion(ctx context.Context) int {
+	var v *int
+	if err := e.db.WithContext(ctx).Model(&Rollout{}).
+		Where("lane = ?", LaneBlocklist).
+		Select("MAX(target_version)").Scan(&v).Error; err != nil || v == nil {
+		return 0
+	}
+	return *v
+}
+
+// Status returns the policy lane's current rollout and its hosts.
 func (e *Engine) Status(ctx context.Context) (Rollout, []Host, error) {
-	r, ok, err := e.current(ctx)
+	return e.StatusLane(ctx, LanePolicy)
+}
+
+// StatusLane returns a lane's current rollout and its hosts.
+func (e *Engine) StatusLane(ctx context.Context, lane string) (Rollout, []Host, error) {
+	r, ok, err := e.current(ctx, lane)
 	if err != nil {
 		return Rollout{}, nil, err
 	}
@@ -375,9 +452,15 @@ func (e *Engine) Status(ctx context.Context) (Rollout, []Host, error) {
 	return r, hosts, nil
 }
 
-// Abort cancels the current active rollout, reverting touched hosts to prev.
+// Abort cancels the policy lane's active rollout, reverting touched hosts to prev.
 func (e *Engine) Abort(ctx context.Context, actor string) error {
-	r, ok, err := e.activeCurrent(ctx)
+	return e.AbortLane(ctx, LanePolicy, actor)
+}
+
+// AbortLane cancels a lane's active rollout. For the policy lane touched hosts
+// revert to prev; for the blocklist lane the rollout simply freezes (no revert).
+func (e *Engine) AbortLane(ctx context.Context, lane, actor string) error {
+	r, ok, err := e.activeCurrent(ctx, lane)
 	if err != nil {
 		return err
 	}
@@ -389,14 +472,14 @@ func (e *Engine) Abort(ctx context.Context, actor string) error {
 		"note": "operator-aborted"}); err != nil {
 		return err
 	}
-	e.recordAudit(ctx, actor, "rollout-aborted", fmt.Sprintf("rollout#%d", r.ID), "operator abort -> revert to prev")
+	e.recordAudit(ctx, actor, "rollout-aborted", fmt.Sprintf("rollout#%d", r.ID), "operator abort (lane="+lane+")")
 	return nil
 }
 
-// current returns the highest-id rollout (the "current" one), if any.
-func (e *Engine) current(ctx context.Context) (Rollout, bool, error) {
+// current returns the highest-id rollout on a lane (the "current" one), if any.
+func (e *Engine) current(ctx context.Context, lane string) (Rollout, bool, error) {
 	var r Rollout
-	err := e.db.WithContext(ctx).Order("id DESC").First(&r).Error
+	err := e.db.WithContext(ctx).Where("lane = ?", lane).Order("id DESC").First(&r).Error
 	switch {
 	case err == nil:
 		return r, true, nil
@@ -407,9 +490,9 @@ func (e *Engine) current(ctx context.Context) (Rollout, bool, error) {
 	}
 }
 
-// activeCurrent returns the current rollout only if it is active (canary|widening).
-func (e *Engine) activeCurrent(ctx context.Context) (Rollout, bool, error) {
-	r, ok, err := e.current(ctx)
+// activeCurrent returns the lane's current rollout only if it is active (canary|widening).
+func (e *Engine) activeCurrent(ctx context.Context, lane string) (Rollout, bool, error) {
+	r, ok, err := e.current(ctx, lane)
 	if err != nil || !ok {
 		return Rollout{}, false, err
 	}

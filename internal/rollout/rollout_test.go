@@ -49,6 +49,78 @@ func heartbeat(t *testing.T, db *gorm.DB, ip string, version int, health string,
 	}
 }
 
+// heartbeatBL upserts a heartbeat reporting an applied BLOCKLIST-lane version.
+func heartbeatBL(t *testing.T, db *gorm.DB, ip string, blVersion int, health string, lastSeen time.Time) {
+	t.Helper()
+	sql := `INSERT INTO heartbeats (overlay_ip, device_name, applied_blocklist_version, health, last_seen)
+	        VALUES (?, ?, ?, ?, ?)
+	        ON CONFLICT(overlay_ip) DO UPDATE SET applied_blocklist_version=excluded.applied_blocklist_version,
+	          health=excluded.health, last_seen=excluded.last_seen`
+	if err := db.Exec(sql, ip, ip, blVersion, health, lastSeen.UnixNano()).Error; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestConcurrentLanesAndBlocklistFreeze is the M7.1b acceptance: a blocklist-lane
+// rollout runs CONCURRENTLY with a policy rollout (the engine no longer refuses a
+// 2nd active rollout on a different lane), the two lanes track convergence on
+// independent version axes, and on an unhealthy canary the blocklist lane FREEZES
+// — it issues no content-revert command (unlike the policy lane).
+func TestConcurrentLanesAndBlocklistFreeze(t *testing.T) {
+	eng, db, clk := newEngine(t)
+	ctx := context.Background()
+	hosts := []string{"100.64.0.1", "100.64.0.2"}
+
+	// A policy rollout is in flight (default lane).
+	if _, err := eng.Start(ctx, rollout.StartConfig{
+		TargetVersion: 2, PrevVersion: 1, Hosts: hosts,
+		CanarySize: 1, Observe: 10 * time.Minute, MissingAfter: 3 * time.Minute, Actor: "alice",
+	}); err != nil {
+		t.Fatalf("policy start: %v", err)
+	}
+	// A blocklist rollout starts CONCURRENTLY — a different lane is NOT refused.
+	if _, err := eng.Start(ctx, rollout.StartConfig{
+		Lane: rollout.LaneBlocklist, TargetVersion: 1, PrevVersion: 0, Hosts: hosts,
+		CanarySize: 1, Observe: 10 * time.Minute, MissingAfter: 3 * time.Minute, Actor: "alice",
+	}); err != nil {
+		t.Fatalf("blocklist start concurrent with policy must succeed, got %v", err)
+	}
+	// A 2nd blocklist rollout IS refused (one active per lane).
+	if _, err := eng.Start(ctx, rollout.StartConfig{
+		Lane: rollout.LaneBlocklist, TargetVersion: 2, PrevVersion: 1, Hosts: hosts,
+		Observe: time.Minute, MissingAfter: time.Minute,
+	}); err != rollout.ErrActiveExists {
+		t.Fatalf("2nd blocklist start err = %v, want ErrActiveExists", err)
+	}
+
+	if v := eng.BlocklistVersion(ctx); v != 1 {
+		t.Fatalf("BlocklistVersion = %d, want 1", v)
+	}
+
+	// Each lane independently drives its canary to its own target version.
+	if cmd, ok := eng.BlocklistCommandFor(ctx, "100.64.0.1", 0); !ok || cmd.Type != wire.CmdApplyBundle || cmd.BundleVersion != 1 {
+		t.Fatalf("blocklist canary cmd = %+v ok=%v, want apply_bundle v1", cmd, ok)
+	}
+	if cmd, ok := eng.CommandFor(ctx, "100.64.0.1", 1); !ok || cmd.BundleVersion != 2 {
+		t.Fatalf("policy canary cmd = %+v ok=%v, want apply_bundle v2", cmd, ok)
+	}
+
+	// Blocklist canary applied v1 but reports UNHEALTHY -> the blocklist lane freezes.
+	heartbeatBL(t, db, "100.64.0.1", 1, "unhealthy", clk.now())
+	if _, err := eng.Evaluate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	r, _, _ := eng.StatusLane(ctx, rollout.LaneBlocklist)
+	if r.State != rollout.StateRolledBack {
+		t.Fatalf("blocklist lane state = %s, want rolledback (frozen)", r.State)
+	}
+	// FREEZE: no content-revert command on the blocklist lane (the set stays latest;
+	// an operator lifts a bad entry). Contrast with the policy lane, which reverts.
+	if cmd, ok := eng.BlocklistCommandFor(ctx, "100.64.0.1", 1); ok {
+		t.Fatalf("blocklist freeze must issue NO revert command, got %+v", cmd)
+	}
+}
+
 func start(t *testing.T, eng *rollout.Engine, hosts []string) {
 	t.Helper()
 	_, err := eng.Start(context.Background(), rollout.StartConfig{
