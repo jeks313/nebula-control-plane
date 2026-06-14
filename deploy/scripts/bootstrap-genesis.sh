@@ -22,10 +22,12 @@
 #                  key (manual approval).
 #   8. harbor:     core-api (renew/heartbeat, -host-cert verified) + admin console
 #                  (mock-IdP), both bound to Harbor's OVERLAY IP (mesh-only)
+#   9. client:     `pilot install` (ADR 0008) — keyless aws-sigv4 over the internal gateway,
+#                  then a persistent pilot@default service supervising nebula (dogfoods the
+#                  install command; replaces the old manual enroll + systemd-run supervise)
 #
-# It then prints the gateway URL, the config-signing pin, the imac join secret, and
-# the exact enroll commands: the CLOUD client joins KEYLESS via aws-sigv4 attestation
-# (its IAM role); the off-cloud iMac joins via a join key with manual approval.
+# It then prints the config-signing pin + the imac join secret + the off-cloud iMac's
+# `pilot install` command (join key + manual approval). The cloud client is already up.
 #
 # Requires locally: terraform, jq, go, ssh, scp, openssl  (+ aws & a container engine
 # [podman or docker], and AWS creds in the env, when gateway_runtime=fargate).
@@ -372,6 +374,22 @@ rsh "$HB_IP" "set -e
 cp "$WORK/config-signing.pub" "$ROOT/deploy/terraform/config-signing.pub"  # gitignored; the pin for clients
 echo "    core-api + admin console up"
 
+# ── 9. cloud client: `pilot install` (dogfood, ADR 0008) ─────────────────────
+# One command replaces the old `pilot enroll` + transient `systemd-run pilot supervise`:
+# it enrolls (keyless aws-sigv4, via the in-VPC internal gateway) then writes+enables a
+# PERSISTENT pilot@default service that supervises nebula + renews/heartbeats to core-api.
+# Non-fatal: a client hiccup must not abort an otherwise-up control plane.
+echo "==> [client] pilot install (keyless aws-sigv4; persistent pilot@default service)"
+rcp "$WORK/config-signing.pub" "$SSH_USER@$CL_IP:/tmp/config-signing.pub"
+if rsh "$CL_IP" "set -e
+  sudo pilot install -gateway '$GW_URL_INTERNAL' -core 'http://$HARBOR_OVERLAY:$CORE_PORT' \
+    -config-pub /tmp/config-signing.pub -aws-sigv4 -region '$REGION' -name aws-client -skip-clock-check"; then
+  echo "    cloud client up via pilot install (pilot@default supervising nebula)"
+else
+  echo "    WARNING: client pilot install failed — control plane is up; retry on the client:"
+  echo "      ssh $SSH_USER@$CL_IP sudo pilot install -gateway $GW_URL_INTERNAL -core http://$HARBOR_OVERLAY:$CORE_PORT -config-pub /tmp/config-signing.pub -aws-sigv4 -region $REGION -name aws-client"
+fi
+
 cat <<EOF
 
 ────────────────────────────────────────────────────────────────────────────
@@ -386,21 +404,18 @@ cat <<EOF
  Config-signing pin: deploy/terraform/config-signing.pub  (give this to clients)
  Cloud-trust       : account $ACCOUNT / role $ROLE -> groups [workloads], auto-issue
 
- Enroll the CLOUD CLIENT — KEYLESS via aws-sigv4 attestation (its IAM role). It's IN the
- VPC, so it enrolls via the INTERNAL gateway URL:
-   scp -i $SSH_KEY deploy/terraform/config-signing.pub $SSH_USER@$CL_IP:/tmp/
-   ssh -i $SSH_KEY $SSH_USER@$CL_IP \\
-     'sudo pilot enroll -dir /etc/nebula -gateway $GW_URL_INTERNAL -aws-sigv4 -region $REGION \\
-        -config-pub /tmp/config-signing.pub -name aws-client && \\
-      sudo systemd-run --unit ncp-nebula --collect pilot supervise -dir /etc/nebula \\
-        -config /etc/nebula/config.yml -core http://$HARBOR_OVERLAY:$CORE_PORT -config-pub /tmp/config-signing.pub'
-   # auto-issued (account is trusted, auto_issue=true) — no join key involved.
+ CLOUD CLIENT — already up via \`pilot install\` (step 9): keyless aws-sigv4 over the
+ INTERNAL gateway -> persistent pilot@default service supervising nebula. Verify:
+   ssh -i $SSH_KEY $SSH_USER@$CL_IP 'sudo pilot status; ping -c2 $HARBOR_OVERLAY'
 
- Enroll the OFF-CLOUD iMac — join key, MANUAL approval (uses the PUBLIC enroll URL):
+ Enroll the OFF-CLOUD iMac — \`pilot install\` with a join key, MANUAL approval (PUBLIC
+ enroll URL). One command enrolls + writes+enables the pilot@default service:
    imac join secret: ${IMAC_KEY:-<existed already; re-create with: harbor joinkey create -name imac -groups laptops>}
-   pilot enroll -dir ~/.nebula -gateway $GW_URL -join-key ${IMAC_KEY:-<imac-key>} \\
-     -config-pub deploy/terraform/config-signing.pub -name imac
-   # approve it in the CONSOLE (below) or via CLI:
+   sudo pilot install -gateway $GW_URL -core http://$HARBOR_OVERLAY:$CORE_PORT \\
+     -config-pub config-signing.pub -join-key ${IMAC_KEY:-<imac-key>} -name imac \\
+     [-nebula /path/to/nebula]   # add -nebula if it isn't at /usr/local/bin/nebula
+   # install submits + waits; if it prints "awaiting approval", approve, then RE-RUN install
+   # (it resumes, fetches the bundle, + starts the service):
    ssh -i $SSH_KEY $SSH_USER@$HB_IP \\
      'EID=\$(harbor enroll pending -dsn ~/ncp/harbor.db | awk "/imac/{print \\\$1}"); \\
       harbor enroll approve \$EID -approver alice -dsn ~/ncp/harbor.db \\
@@ -408,7 +423,6 @@ cat <<EOF
         -config-key ~/ncp/genesis/config-signing.key \\
         -hmac-key ~/ncp/hmac.b64 -queue-dsn ~/ncp/queue.db -queue-key ~/ncp/queue.b64 \\
         -pool $POOL -lighthouse "$LH"'
-   # then re-run the iMac enroll to fetch the bundle; supervise with -core as above.
 
  Open the ADMIN CONSOLE (mesh-only — reach it from an enrolled mesh member, e.g.
  the iMac once it has joined, in a browser):
