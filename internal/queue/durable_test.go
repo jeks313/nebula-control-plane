@@ -29,6 +29,30 @@ func cand(id string) Candidate {
 	return Candidate{EnrollmentID: id, PubkeyHash: "pk-" + id, RequestJWS: []byte("jws-" + id), ReceivedAt: time.Now()}
 }
 
+// TestConcurrentOpen guards the co-located deploy where the gateway, worker, and
+// admin all open the SAME local queue at once: GORM's AutoMigrate isn't
+// cross-process/-goroutine atomic, so concurrent first-opens used to race the
+// CREATE and the loser got "table already exists". OpenDurable must tolerate that.
+func TestConcurrentOpen(t *testing.T) {
+	dsn := filepath.Join(t.TempDir(), "q.db") + "?_pragma=busy_timeout(5000)"
+	const n = 6
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			d, err := OpenDurable(DurableConfig{DSN: dsn, Key: make([]byte, 32)})
+			if d != nil {
+				_ = d.Close()
+			}
+			errs <- err
+		}()
+	}
+	for i := 0; i < n; i++ {
+		if err := <-errs; err != nil {
+			t.Fatalf("concurrent OpenDurable failed: %v", err)
+		}
+	}
+}
+
 func TestPublishClaimAck(t *testing.T) {
 	d := newDurable(t)
 	ctx := context.Background()

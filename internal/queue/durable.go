@@ -104,7 +104,14 @@ func OpenDurable(cfg DurableConfig) (*Durable, error) {
 	}
 	sqlDB.SetMaxOpenConns(1)
 	if err := db.AutoMigrate(&item{}, &result{}); err != nil {
-		return nil, fmt.Errorf("queue: migrate: %w", err)
+		// Several processes share one local queue file (gateway + worker + admin in
+		// the co-located deploy), and GORM's AutoMigrate isn't cross-process atomic:
+		// two openers can both pass the HasTable check and race the CREATE, so the
+		// loser sees "table already exists". That race is benign — tolerate it once
+		// the tables are actually present; only fail if they're genuinely missing.
+		if !db.Migrator().HasTable(&item{}) || !db.Migrator().HasTable(&result{}) {
+			return nil, fmt.Errorf("queue: migrate: %w", err)
+		}
 	}
 	d := &Durable{db: db, key: cfg.Key, maxDepth: cfg.MaxDepth, maxAttempts: cfg.MaxAttempts, now: time.Now}
 	if d.maxDepth <= 0 {
