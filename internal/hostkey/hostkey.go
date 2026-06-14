@@ -98,7 +98,7 @@ func (k *KeyPair) privateKeyPEM() []byte {
 // file (ErrKeyExists) so a re-run can never clobber a live host key.
 func (k *KeyPair) WritePrivateKey(path string) error {
 	// O_EXCL makes the create atomic and fail if the file exists.
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0600)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
 	if err != nil {
 		if errors.Is(err, os.ErrExist) {
 			return fmt.Errorf("%w: %s", ErrKeyExists, path)
@@ -117,7 +117,7 @@ func (k *KeyPair) WritePrivateKey(path string) error {
 // key is correct (unlike WritePrivateKey's no-clobber initial write).
 func (k *KeyPair) WritePrivateKeyAtomic(path string) error {
 	tmp := path + ".new"
-	if err := os.WriteFile(tmp, k.privateKeyPEM(), 0600); err != nil {
+	if err := os.WriteFile(tmp, k.privateKeyPEM(), 0o600); err != nil {
 		return fmt.Errorf("hostkey: write temp private key: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
@@ -128,7 +128,7 @@ func (k *KeyPair) WritePrivateKeyAtomic(path string) error {
 
 // WritePublicKey writes the public key PEM to path (0644 — it is not secret).
 func (k *KeyPair) WritePublicKey(path string) error {
-	if err := os.WriteFile(path, k.PublicKeyPEM(), 0644); err != nil {
+	if err := os.WriteFile(path, k.PublicKeyPEM(), 0o644); err != nil {
 		return fmt.Errorf("hostkey: write public key: %w", err)
 	}
 	return nil

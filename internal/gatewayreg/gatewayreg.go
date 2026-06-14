@@ -71,7 +71,7 @@ func validCertPEM(pemBytes string) error {
 		return ErrBadCert
 	}
 	if _, err := x509.ParseCertificate(block.Bytes); err != nil {
-		return fmt.Errorf("%w: %v", ErrBadCert, err)
+		return fmt.Errorf("%w: %w", ErrBadCert, err)
 	}
 	return nil
 }

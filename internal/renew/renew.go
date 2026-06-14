@@ -107,7 +107,7 @@ func New(cfg Config) *Manager {
 func (m *Manager) Run(ctx context.Context) error {
 	for {
 		if ctx.Err() != nil {
-			return nil
+			return nil //nolint:nilerr // ctx cancelled is a clean shutdown, not an error
 		}
 		nb, na, err := m.certWindow()
 		if err != nil {

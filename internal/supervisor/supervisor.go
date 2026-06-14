@@ -80,7 +80,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	backoff := s.MinBackoff
 	for {
 		if ctx.Err() != nil {
-			return nil
+			return nil //nolint:nilerr // ctx cancelled is a clean shutdown, not an error
 		}
 		if s.ExpectedSHA256 != "" {
 			if err := binverify.SHA256(s.NebulaPath, s.ExpectedSHA256); err != nil {
@@ -95,7 +95,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 
 		if ctx.Err() != nil {
 			s.Logger.Info("shutdown complete")
-			return nil
+			return nil //nolint:nilerr // ctx cancelled is a clean shutdown, not an error
 		}
 
 		// An operator-requested restart is not a crash: cycle immediately and

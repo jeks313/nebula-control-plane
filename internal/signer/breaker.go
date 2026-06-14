@@ -26,7 +26,7 @@ func newBreaker(maxPerWindow int, window time.Duration, now func() time.Time) *b
 // acquire attempts to consume one unit of the budget. allowed reports whether
 // the caller may proceed; justTripped is true only on the call that flips the
 // breaker open (so the alarm fires exactly once).
-func (b *breaker) acquire() (allowed bool, justTripped bool) {
+func (b *breaker) acquire() (allowed, justTripped bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 

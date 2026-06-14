@@ -119,7 +119,7 @@ func TestGenesisCoreRequiresValidIP(t *testing.T) {
 	_, err := Run(context.Background(), newStore(t), caB, cfgB, Params{
 		OperatorA: "a", OperatorB: "b", CAName: "ca", Pool: netip.MustParsePrefix("100.64.0.0/16"),
 		LighthouseName: "lh1", LighthouseIP: netip.MustParseAddr("100.64.0.1"), LighthousePub: hostPub(t),
-		CorePub: hostPub(t), // CoreIP intentionally unset
+		CorePub:    hostPub(t), // CoreIP intentionally unset
 		CALifetime: 24 * time.Hour, CertLifetime: 12 * time.Hour,
 	})
 	if err == nil {

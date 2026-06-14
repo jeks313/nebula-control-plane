@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -38,12 +39,12 @@ func TestTokenStore(t *testing.T) {
 		t.Fatalf("roles = %v", got.RoleList())
 	}
 	// A bogus / empty token never resolves.
-	if _, err := ts.Lookup(context.Background(), "harbor_nope"); err != adminauth.ErrNoToken {
+	if _, err := ts.Lookup(context.Background(), "harbor_nope"); !errors.Is(err, adminauth.ErrNoToken) {
 		t.Fatalf("bogus token err = %v, want ErrNoToken", err)
 	}
 	// Past expiry → ErrNoToken.
 	now = now.Add(2 * time.Hour)
-	if _, err := ts.Lookup(context.Background(), token); err != adminauth.ErrNoToken {
+	if _, err := ts.Lookup(context.Background(), token); !errors.Is(err, adminauth.ErrNoToken) {
 		t.Fatalf("expired token err = %v, want ErrNoToken", err)
 	}
 	// Revoke (a never-expiring token) → ErrNoToken.
@@ -52,7 +53,7 @@ func TestTokenStore(t *testing.T) {
 	if n, err := ts.Revoke(context.Background(), "perm"); err != nil || n != 1 {
 		t.Fatalf("revoke = %d, %v; want 1, nil", n, err)
 	}
-	if _, err := ts.Lookup(context.Background(), tok2); err != adminauth.ErrNoToken {
+	if _, err := ts.Lookup(context.Background(), tok2); !errors.Is(err, adminauth.ErrNoToken) {
 		t.Fatalf("revoked token err = %v, want ErrNoToken", err)
 	}
 }
@@ -102,7 +103,7 @@ func TestTokenCannotStepUp(t *testing.T) {
 	defer srv.Close()
 
 	bearer := func(method, path string, body any) (int, map[string]any) {
-		var rdr *bytes.Reader = bytes.NewReader(nil)
+		var rdr = bytes.NewReader(nil)
 		if body != nil {
 			b, _ := json.Marshal(body)
 			rdr = bytes.NewReader(b)

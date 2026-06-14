@@ -1162,7 +1162,7 @@ func cmdRollout(args []string) {
 func printRolloutStatus(ctx context.Context, eng *rollout.Engine) {
 	r, hosts, err := eng.Status(ctx)
 	if err != nil {
-		if err == rollout.ErrNone {
+		if errors.Is(err, rollout.ErrNone) {
 			fmt.Println("no rollouts")
 			return
 		}
@@ -1550,7 +1550,7 @@ func cmdCoreAPI(args []string) {
 		_ = srv.Shutdown(sc)
 	}()
 	log.Info("core-api listening", "addr", *addr, "scheme", httpserve.Scheme(*tlsCert, *tlsKey), "access", "mesh-only", "pool", pool.String(), "version", version)
-	if err := httpserve.Serve(srv, *tlsCert, *tlsKey); err != nil && err != http.ErrServerClosed {
+	if err := httpserve.Serve(srv, *tlsCert, *tlsKey); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		fatalf("core-api: %v", err)
 	}
 	log.Info("core-api stopped")
@@ -1684,7 +1684,7 @@ func cmdAdminAPI(args []string) {
 		_ = srv.Shutdown(sc)
 	}()
 	log.Info("admin-api listening", "addr", *addr, "scheme", httpserve.Scheme(*tlsCert, *tlsKey), "access", "mesh-only", "version", version)
-	if err := httpserve.Serve(srv, *tlsCert, *tlsKey); err != nil && err != http.ErrServerClosed {
+	if err := httpserve.Serve(srv, *tlsCert, *tlsKey); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		fatalf("admin-api: %v", err)
 	}
 	log.Info("admin-api stopped")

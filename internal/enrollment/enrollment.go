@@ -295,7 +295,7 @@ func (c *Consumer) processAttested(ctx context.Context, cand queue.Candidate, re
 	var pres awsattest.PresignedRequest
 	if err := json.Unmarshal(req.Credential, &pres); err != nil {
 		c.deny(ctx, cand, req, pubBytes, "enroll-denied", "malformed attestation credential")
-		return Result{EnrollmentID: cand.EnrollmentID, Status: StatusDenied}, fmt.Errorf("%w: %v", awsattest.ErrBadRequest, err)
+		return Result{EnrollmentID: cand.EnrollmentID, Status: StatusDenied}, fmt.Errorf("%w: %w", awsattest.ErrBadRequest, err)
 	}
 
 	// Verify binds to the nonce + pubkey hash already validated by c.verify() — do NOT

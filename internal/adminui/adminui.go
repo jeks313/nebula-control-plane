@@ -63,7 +63,7 @@ func safeEnv(env string) string {
 		return "development"
 	}
 	for _, r := range env {
-		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_') {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '-' && r != '_' {
 			return "development"
 		}
 	}

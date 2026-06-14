@@ -74,7 +74,7 @@ func sqlMigration(id string) *gormigrate.Migration {
 }
 
 func execSQL(tx *gorm.DB, id, dir string) error {
-	name := fmt.Sprintf("sql/%s/%s.%s.sql", tx.Dialector.Name(), id, dir)
+	name := fmt.Sprintf("sql/%s/%s.%s.sql", tx.Name(), id, dir)
 	b, err := files.ReadFile(name)
 	if err != nil {
 		return fmt.Errorf("no migration %s: %w", name, err)

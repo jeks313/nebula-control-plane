@@ -261,7 +261,7 @@ func FetchConfig(ctx context.Context, p RenewParams) (Result, error) {
 	if p.PinnedConfigPub == nil {
 		return Result{}, fmt.Errorf("enrollclient: a pinned config-signing key is required")
 	}
-	r, err := http.NewRequestWithContext(ctx, http.MethodGet, p.CoreURL+"/v1/config", nil)
+	r, err := http.NewRequestWithContext(ctx, http.MethodGet, p.CoreURL+"/v1/config", http.NoBody)
 	if err != nil {
 		return Result{}, err
 	}
@@ -446,7 +446,7 @@ func (p Params) getJSON(ctx context.Context, path string, out any) error {
 }
 
 func (p Params) get(ctx context.Context, path, bearer string) (int, []byte, error) {
-	r, err := http.NewRequestWithContext(ctx, http.MethodGet, p.GatewayURL+path, nil)
+	r, err := http.NewRequestWithContext(ctx, http.MethodGet, p.GatewayURL+path, http.NoBody)
 	if err != nil {
 		return 0, nil, err
 	}
