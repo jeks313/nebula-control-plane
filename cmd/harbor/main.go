@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"flag"
 	"fmt"
 	"net/netip"
@@ -38,6 +39,7 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/policy"
 	"github.com/jeks313/nebula-control-plane/internal/queue"
 	"github.com/jeks313/nebula-control-plane/internal/replay"
+	"github.com/jeks313/nebula-control-plane/internal/revocation"
 	"github.com/jeks313/nebula-control-plane/internal/rollout"
 	"github.com/jeks313/nebula-control-plane/internal/signer"
 	"github.com/jeks313/nebula-control-plane/internal/store"
@@ -78,6 +80,8 @@ func main() {
 		cmdFleet(os.Args[2:])
 	case "lighthouse":
 		cmdLighthouse(os.Args[2:])
+	case "blocklist":
+		cmdBlocklist(os.Args[2:])
 	case "rollout":
 		cmdRollout(os.Args[2:])
 	case "policy":
@@ -124,6 +128,9 @@ usage:
   harbor lighthouse replace -ip OVERLAY -addrs host:port[,...] -actor A [db flags]
   harbor lighthouse remove -ip OVERLAY -actor A [db flags]   (keeps >=1 active)
   harbor lighthouse list   [db flags]
+  harbor blocklist add     -fingerprint FP | -device OVERLAY [-reason R] -actor A [db flags]
+  harbor blocklist remove  -fingerprint FP | -device OVERLAY -actor A [db flags]   (lifts the block)
+  harbor blocklist list    [db flags]
   harbor rollout start     -target N -prev M -hosts ip1,ip2,... [-canary K]
                            [-wave-size W] [-min-healthy H] [-observe D] [-missing-after D] -actor A
   harbor rollout step      [db flags]      force one evaluation (cron/ops)
@@ -143,7 +150,8 @@ usage:
 
 core flags (enroll worker/approve): -ca-cert, -ca-key/-config-key (software) or
   -pkcs11-* labels, -hmac-key, -queue-dsn, -queue-key, -pool, -cert-lifetime,
-  -lighthouse "overlayIP=host:port[,...]".
+  -lighthouse "overlayIP=host:port[,...]", -blocklist-db (source pki.blocklist
+  from the revocations registry, 7.1).
 
 backend flags (ca-init, issue-cert):
   -backend software|pkcs11   software persists the CA key to -ca-key (local dev);
@@ -420,6 +428,7 @@ type coreFlags struct {
 	maxPerHour                           *int
 	lighthouse                           *string
 	lighthouseDB                         *bool
+	blocklistDB                          *bool
 	policyFile                           *string
 	policyDB                             *bool
 	cloudTrustDB                         *bool
@@ -445,6 +454,7 @@ func addCoreFlags(fs *flag.FlagSet) *coreFlags {
 	cf.maxPerHour = fs.Int("max-certs-per-hour", 0, "signing circuit-breaker ceiling (0=unlimited)")
 	cf.lighthouse = fs.String("lighthouse", "", "lighthouses for the bundle: overlayIP=host:port[,...]")
 	cf.lighthouseDB = fs.Bool("lighthouse-db", false, "source lighthouses from the DB registry (6.8) instead of -lighthouse")
+	cf.blocklistDB = fs.Bool("blocklist-db", false, "source the cert blocklist (pki.blocklist) from the DB revocations registry (7.1)")
 	cf.policyFile = fs.String("policy", "", "central firewall policy file (M6); omit for Pilot's local default")
 	cf.policyDB = fs.Bool("policy-db", false, "use the dual-control published policy from the DB (6.5) instead of -policy")
 	cf.cloudTrustDB = fs.Bool("cloudtrust-db", false, "enable AWS SigV4 attestation using the dual-control published cloud-trust config from the DB (M5)")
@@ -496,6 +506,17 @@ func (cf *coreFlags) lighthouseSource(s *store.Store) func(context.Context) ([]b
 	return reg.Active
 }
 
+// blocklistSource returns the live revocations source (pki.blocklist) when
+// -blocklist-db is set, else nil. Consulted at bundle-build time so a revocation
+// propagates to the healthy fleet via the next signed bundle (7.1).
+func (cf *coreFlags) blocklistSource(s *store.Store) func(context.Context) ([]string, error) {
+	if !*cf.blocklistDB {
+		return nil
+	}
+	reg := revocation.New(s.DB, nil)
+	return reg.ActiveFingerprints
+}
+
 func (cf *coreFlags) build() (*enrollment.Consumer, *queue.Durable, *store.Store) {
 	if *cf.caCert == "" || *cf.hmacKey == "" || *cf.queueDSN == "" || *cf.queueKey == "" {
 		fatalf("enroll: -ca-cert, -hmac-key, -queue-dsn and -queue-key are required")
@@ -540,7 +561,8 @@ func (cf *coreFlags) build() (*enrollment.Consumer, *queue.Durable, *store.Store
 		Signer: sg, Allocator: alloc, Pool: pool, CertLifetime: *cf.certLifetime,
 		ConfigBackend: cfgB, ConfigKeyID: wire.PubkeyHash(cfgPub),
 		CABundlePEM: caPEM, Lighthouses: parseLighthouses(*cf.lighthouse), LighthouseSource: cf.lighthouseSource(s), Policy: cf.policy(s),
-		Results: q, ResultTTL: time.Hour,
+		BlocklistSource: cf.blocklistSource(s),
+		Results:         q, ResultTTL: time.Hour,
 		CloudTrust: ct, AWSSigV4Enabled: ct != nil,
 	})
 	return cons, q, s
@@ -730,6 +752,89 @@ func cmdLighthouse(args []string) {
 		}
 	default:
 		fatalf("lighthouse: unknown subcommand %q", sub)
+	}
+}
+
+// cmdBlocklist manages the cert blocklist (7.1, design §4.7). A blocklisted
+// fingerprint is refused mesh-wide PEER-SIDE: every other host stops handshaking
+// with it once they pull the next signed bundle (run core-api / enroll with
+// -blocklist-db so the blocklist is sourced live). Target a cert by -fingerprint,
+// or by -device (overlay IP) to resolve the host's current fingerprint from its
+// enrollment. Bulk revoke + the can't-blocklist-control-plane invariant land in 7.2.
+func cmdBlocklist(args []string) {
+	if len(args) < 1 {
+		fatalf("blocklist: want add|remove|list")
+	}
+	sub := args[0]
+	fs := flag.NewFlagSet("blocklist "+sub, flag.ExitOnError)
+	driver, dsn := dbFlags(fs)
+	fp := fs.String("fingerprint", "", "cert fingerprint (hex sha256) to blocklist")
+	device := fs.String("device", "", "overlay IP of a host; resolves to its current cert fingerprint")
+	reason := fs.String("reason", "", "why (recorded in the audit trail)")
+	actor := fs.String("actor", "operator", "admin identity for the audit trail")
+	_ = fs.Parse(args[1:])
+
+	s := openStore(*driver, *dsn)
+	defer s.Close()
+	audit := func(c context.Context, a, ac, t, d string) error { _, e := s.AppendAudit(c, a, ac, t, d); return e }
+	reg := revocation.New(s.DB, audit)
+	ctx := context.Background()
+
+	// resolve turns -fingerprint / -device into a concrete fingerprint to target.
+	resolve := func() string {
+		switch {
+		case *fp != "":
+			return *fp
+		case *device != "":
+			var e enrollment.Enrollment
+			err := s.DB.WithContext(ctx).
+				Where("overlay_ip = ? AND status = ?", *device, enrollment.StatusIssued).
+				Order("id DESC").First(&e).Error
+			if err != nil {
+				fatalf("blocklist: no issued device at overlay IP %s: %v", *device, err)
+			}
+			if e.Fingerprint == "" {
+				fatalf("blocklist: device %s has no recorded fingerprint (issued before M7.1?) — pass -fingerprint", *device)
+			}
+			return e.Fingerprint
+		default:
+			fatalf("blocklist %s: -fingerprint or -device is required", sub)
+			return ""
+		}
+	}
+
+	switch sub {
+	case "add":
+		f := resolve()
+		switch _, err := reg.Add(ctx, f, *reason, *actor); {
+		case errors.Is(err, revocation.ErrAlreadyActive):
+			fmt.Printf("already blocklisted %s\n", f)
+		case err != nil:
+			fatalf("blocklist add: %v", err)
+		default:
+			fmt.Printf("blocklisted %s\n", f)
+		}
+	case "remove":
+		f := resolve()
+		if err := reg.Lift(ctx, f, *actor); err != nil {
+			fatalf("blocklist remove: %v", err)
+		}
+		fmt.Printf("lifted blocklist for %s\n", f)
+	case "list":
+		rows, err := reg.List(ctx)
+		if err != nil {
+			fatalf("blocklist list: %v", err)
+		}
+		if len(rows) == 0 {
+			fmt.Println("no revocations")
+			return
+		}
+		fmt.Printf("%-64s %-7s %-5s %s\n", "FINGERPRINT", "STATE", "BULK", "REASON")
+		for _, r := range rows {
+			fmt.Printf("%-64s %-7s %-5t %s\n", r.Fingerprint, r.State, r.Bulk, r.Reason)
+		}
+	default:
+		fatalf("blocklist: unknown subcommand %q", sub)
 	}
 }
 
@@ -1167,8 +1272,9 @@ func cmdCoreAPI(args []string) {
 	api := coreapi.New(coreapi.Config{
 		Store: s, Signer: sg, ConfigBackend: cfgB, ConfigKeyID: wire.PubkeyHash(cfgPub),
 		CABundlePEM: caPEM, Lighthouses: parseLighthouses(*cf.lighthouse), LighthouseSource: cf.lighthouseSource(s), Policy: cf.policy(s),
-		Rollout: rollout.New(s.DB, audit),
-		Pool:    pool, CertLifetime: *cf.certLifetime,
+		BlocklistSource: cf.blocklistSource(s),
+		Rollout:         rollout.New(s.DB, audit),
+		Pool:            pool, CertLifetime: *cf.certLifetime,
 	})
 	srv := &http.Server{
 		Addr: *addr, Handler: api.Handler(),

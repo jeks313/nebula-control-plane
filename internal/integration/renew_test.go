@@ -15,6 +15,7 @@ import (
 
 	"github.com/jeks313/nebula-control-plane/internal/bundle"
 	"github.com/jeks313/nebula-control-plane/internal/coreapi"
+	"github.com/jeks313/nebula-control-plane/internal/enrollment"
 	"github.com/jeks313/nebula-control-plane/internal/joinkey"
 	"github.com/jeks313/nebula-control-plane/internal/jws"
 	"github.com/jeks313/nebula-control-plane/internal/wire"
@@ -25,7 +26,8 @@ func (e enrollEnv) coreAPI() http.Handler {
 	return coreapi.New(coreapi.Config{
 		Store: e.store, Signer: e.sg, ConfigBackend: e.cfgB, ConfigKeyID: e.configKeyID,
 		CABundlePEM: e.caPEM, Pool: e.pool, CertLifetime: 24 * time.Hour,
-		Lighthouses: []bundle.Lighthouse{{OverlayIP: "100.64.0.1", PublicAddrs: []string{"1.2.3.4:4242"}}},
+		Lighthouses:     []bundle.Lighthouse{{OverlayIP: "100.64.0.1", PublicAddrs: []string{"1.2.3.4:4242"}}},
+		BlocklistSource: e.rev.ActiveFingerprints,
 	}).Handler()
 }
 
@@ -102,6 +104,99 @@ func TestRenewSameIdentity(t *testing.T) {
 	if string(c.PublicKey()) != string(newPub) {
 		t.Fatal("renewed cert not bound to the new key")
 	}
+}
+
+// TestRenewBundleCarriesBlocklist is the M7.1 acceptance (data path): a revoked
+// peer's fingerprint rides inside the signed config bundle a host pulls at renew,
+// so every OTHER host refuses it PEER-SIDE (§4.7) — the target need not cooperate.
+// It also proves the blocklist is sorted (deterministic; no false drift), is
+// tamper-evident (signed), and that the host's own fingerprint is persisted and
+// re-stamped on renewal so it can later be targeted by overlay IP (7.1/7.3).
+func TestRenewBundleCarriesBlocklist(t *testing.T) {
+	e := setupEnroll(t)
+	ctx := context.Background()
+	api := e.coreAPI()
+
+	// Enroll host-a so it has an issued identity to renew.
+	secret, _, _ := joinkey.Create(ctx, e.store, joinkey.Params{Name: "k", Groups: []string{"web"}, MaxUses: 0, AutoIssue: true}, time.Now())
+	res, err := e.cons.Process(ctx, e.candidate(t, secret, "host-a"))
+	if err != nil || res.Status != "issued" {
+		t.Fatalf("enroll: %v %s", err, res.Status)
+	}
+	ip := res.OverlayIP
+
+	// The host's issued fingerprint was persisted (so it can be blocklisted by
+	// overlay IP later — 7.1 -device / 7.3 decommission).
+	row := issuedRow(t, e, ip)
+	if row.Fingerprint == "" {
+		t.Fatal("issued enrollment did not persist a cert fingerprint")
+	}
+	preRenewFP := row.Fingerprint
+
+	// Blocklist three peer fingerprints, added OUT OF ORDER (to prove the bundle is sorted).
+	hi, mid, lo := strings.Repeat("f", 64), strings.Repeat("a", 64), strings.Repeat("0", 64)
+	for _, fp := range []string{hi, mid, lo} {
+		if _, err := e.rev.Add(ctx, fp, "compromised", "admin"); err != nil {
+			t.Fatalf("blocklist %s: %v", fp, err)
+		}
+	}
+
+	// Renew (host pulls a fresh signed bundle) — it must carry the blocklist.
+	body, _ := signRenew(t)
+	rec := renewReq(t, api, body, ip)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("renew status = %d; %s", rec.Code, rec.Body)
+	}
+	var rr wire.RenewResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &rr); err != nil {
+		t.Fatal(err)
+	}
+	b, err := bundle.Verify(rr.Bundle, e.pinned)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	// Rides INSIDE the signed payload, sorted ascending (deterministic; no false drift).
+	if got, want := strings.Join(b.Blocklist, ","), strings.Join([]string{lo, mid, hi}, ","); got != want {
+		t.Fatalf("bundle blocklist = %v, want sorted [lo mid hi]", b.Blocklist)
+	}
+	// And it renders into nebula's pki.blocklist.
+	cfg, err := bundle.RenderNebulaConfig(b, "/ca.crt", "/host.crt", "/host.key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(cfg)
+	if !strings.Contains(s, "blocklist:") {
+		t.Fatalf("rendered config has no pki.blocklist:\n%s", s)
+	}
+	for _, fp := range []string{lo, mid, hi} {
+		if !strings.Contains(s, fp) {
+			t.Fatalf("rendered config missing fingerprint %s:\n%s", fp, s)
+		}
+	}
+
+	// Tamper-evidence: the blocklist is signed, so flipping a byte is refused.
+	tampered := make([]byte, len(rr.Bundle))
+	copy(tampered, rr.Bundle)
+	tampered[len(tampered)/2] ^= 0x01
+	if _, err := bundle.Verify(tampered, e.pinned); err == nil {
+		t.Fatal("tampered renew bundle (incl. blocklist) must be refused")
+	}
+
+	// Renew rotates the key -> the persisted fingerprint must be re-stamped.
+	if post := issuedRow(t, e, ip).Fingerprint; post == "" || post == preRenewFP {
+		t.Fatalf("renew did not update the persisted fingerprint (pre=%s post=%s)", preRenewFP, post)
+	}
+}
+
+// issuedRow reloads the authoritative issued enrollment at an overlay IP.
+func issuedRow(t *testing.T, e enrollEnv, ip string) enrollment.Enrollment {
+	t.Helper()
+	var row enrollment.Enrollment
+	if err := e.store.DB.Where("overlay_ip = ? AND status = ?", ip, enrollment.StatusIssued).
+		Order("id DESC").First(&row).Error; err != nil {
+		t.Fatalf("reload issued enrollment at %s: %v", ip, err)
+	}
+	return row
 }
 
 func TestRenewFromWrongIPRejected(t *testing.T) {

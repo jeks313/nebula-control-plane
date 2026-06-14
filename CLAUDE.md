@@ -102,34 +102,72 @@ need the cloud, verified once in the minimal Tier-2 harness).
 
 ## Current status
 
-**M0 — Spike (feasibility), scaffolded, not yet run end-to-end.** See `spike/m0/README.md`.
-- Toolchain not installed yet; scripts pass `bash -n` but haven't been executed (no nebula/softhsm
-  at authoring time). Expect first-run iteration, especially the **PKCS#11 URI** in
-  `31-gen-certs-hsm.sh`.
-- **The make-or-break test is M0.3**: a SoftHSM-held P256 CA key signs certs and a tunnel forms.
-  Everything downstream assumes this works — prove it before building Harbor.
+> **Keep this section in sync — update it after each implementation-plan step** so a
+> cold session can pick up with clean context. Source of truth for *order/scope* is the
+> implementation plan (per-step `✅` + "Proven:" notes); for *what/why* the design plan.
+> This is a fast summary — re-read those for exact state.
 
-### Run M0
-```bash
-make m0-prereqs                 # checks tooling, prints install command
-make m0-up && make m0-test      # [sudo] simple path (local CA): tunnel + blocklist + groups
-make m0-build && make m0-hsm    # build pkcs11 nebula-cert + SoftHSM CA (the M0.3 proof)
-make m0-down                    # [sudo] teardown
-```
+**M0–M6 complete; M7 (Revocation & offboarding) in progress — at 7.1b.** Schema at
+migration **000013**. M0 feasibility PASSED (2026-06-11: SoftHSM P256 CA signs certs,
+tunnel forms — design §M0 results; spike under `spike/m0/`, `make m0-*`). The trust
+spine is built end-to-end **on Linux** (Windows/macOS parity deferred to M10):
+- **M1 Pilot** — supervises `nebula`, host keygen, enroll, renew, render, drift-revert.
+- **M2 Harbor Core** — GORM store (sqlite/postgres) + hash-chained audit, IPAM (quarantine
+  built), Signer (SoftHSM/PKCS#11 + circuit-breaker), secrets, reusable dual-control/RBAC.
+- **M3 enrollment** — public gateway, stateless nonce, durable queue + result store, token
+  enroll, async poll, approval queue, genesis ceremony.
+- **M4 lifecycle** — Core-as-mesh-node, renewal + jitter, heartbeat, drift, P3 chaos.
+- **M5 attestation** — AWS sigv4 `GetCallerIdentity` enroll + dual-control cloud-trust.
+- **M6 policy** — group DSL → compiler → JWS-signed firewall in the bundle, compile-time
+  invariants, dual-control publish, canary rollout + auto-rollback, drift-revert, lighthouse
+  registry.
+- **Admin UI** — React console UI-0..UI-4 (auth shell, devices, approvals + join keys, fleet
+  health, group/cloud-trust, policy designer + dual-control inbox) over a contract-tested
+  OpenAPI; the CLI is a strict subset (see `cmd/harbor/cli_surface_test.go`).
 
-## Roadmap pointer
+### M7 — Revocation & offboarding (current milestone)
 
-Follow implementation-plan milestones in order. **First slice:** M0.1 → M0.2 → **M0.3** → M0.7
-(underlay/MTU). Then write the **protocol spec (M3.0)** before M3 code, and stand up the
-**plumbing (M2.9–2.11: observability, secrets, reusable dual-control/RBAC)** before piling features
-on Harbor. **Must-fix before M3 code:** async enrollment delivery (3.0a/3.6a), reusable
-dual-control/RBAC (2.11), secrets + release-key custody (2.10/1.2a), renewal jitter (4.4).
+Steps: **7.1** blocklist distribution · **7.2** revoke-as-DoS guards (dual-control + rate
+limit + can't-blocklist-control-plane/lighthouses) · **7.3** decommission (revoke enrollment
++ 2.12 device-state machine + IP→quarantine + cloud-terminate auto-reap) · **7.4** IdP
+offboarding (depends on M9 OIDC — scaffolding until then). Decisions logged this milestone:
+- **7.1 split** into 7.1a (data path) → 7.1b (fast propagation).
+- **Persistence kept minimal:** `revocations` table + `enrollments.fingerprint` (NOT the full
+  `certificates` table — revisit for M8 drain + §7.1 issued-vs-inventory reconciliation).
+- **2.12 device-state machine is unbuilt** (the `devices` table is id/name/created_at only); it
+  is a hard prerequisite for 7.3.
+
+- ✅ **7.1a — blocklist in the signed bundle (data path).** `internal/revocation.Registry`
+  (Add/Lift/List/ActiveFingerprints — normalized lowercase-hex, **sorted** for byte-stable
+  bundles, audited; mirrors `internal/lighthouse`) + migration 000013. `bundle.Bundle.Blocklist`
+  threads into `RenderNebulaConfig` → nebula `pki.blocklist` (the render sink pre-existed).
+  Core sources it **live** at bundle-build time on both the enrollment consumer and the
+  `core-api` renew path via a fail-open `BlocklistSource` (`-blocklist-db`). The issued cert
+  **fingerprint is persisted** on the enrollment row at issue and **re-stamped on every renewal**
+  (it rotates with the key), so a host can be blocklisted by overlay IP. `harbor blocklist
+  add|remove|list` (`-fingerprint` or `-device`; break-glass CLI — the console blocklist view +
+  dual-control bulk-revoke land in 7.2/UI-5). **Propagation here is renewal/drift-cadence (slow);
+  fast push is 7.1b.** Peer-side handshake refusal itself is the M0.5 spike proof (nebula 1.10.3).
+  *Tests:* `internal/revocation` unit, `internal/bundle` blocklist tamper-refused + render,
+  integration `TestRenewBundleCarriesBlocklist`.
+- ⏭️ **7.1b — fast propagation + SLO (NEXT — start here).** Gaps to close (from the M7 read):
+  Pilot never wires `heartbeat.Handlers.ApplyBundle` (only Renew+Restart in `cmd/pilot/main.go`)
+  and never reports `applied_bundle_version` (always 0); there is **no config-fetch endpoint**
+  (only `/v1/certs/renew`, which re-signs the cert). Plan: add a config-only fetch path (design §9
+  `GET /v1/config` — returns the host's current signed bundle without re-issuing a cert), wire
+  Pilot ApplyBundle → fetch+apply, have Pilot report the applied bundle version, and have Core push
+  `apply_bundle` to the **healthy fleet** when the blocklist changes via a **dedicated fast lane
+  (NOT the single-active rollout slot** — a security-urgent blocklist must not queue behind a policy
+  rollout). Track convergence % and **define the numeric SLO** (~heartbeat-cadence, default 60s).
+  *Done when:* a blocklist change converges across the healthy fleet within the SLO over the
+  heartbeat channel rather than the ~⅔-life renewal cadence.
 
 ## Conventions
 
 - **Go module:** `github.com/jeks313/nebula-control-plane`. Binaries: `pilot`, `harbor`.
 - **Git identity:** Christopher Hyde / chris@hyde.ca. **Never add `Co-Authored-By` lines.**
-- **Commit/push only when the user explicitly asks.** No remote configured yet.
+- **Commit/push only when the user explicitly asks.** Milestone steps commit directly to `main`
+  (linear history, one commit per step); an `origin` remote exists — push only on request.
 - `spike/m0/run/` and `spike/m0/tools/` are gitignored (generated certs/keys/SoftHSM token/built binaries).
 - Stack (from design §12): Go for Harbor + Pilot (can import `github.com/slackhq/nebula/cert`),
   Postgres for state, JWS/COSE signed envelopes.

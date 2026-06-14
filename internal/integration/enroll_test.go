@@ -23,6 +23,7 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/policy"
 	"github.com/jeks313/nebula-control-plane/internal/queue"
 	"github.com/jeks313/nebula-control-plane/internal/replay"
+	"github.com/jeks313/nebula-control-plane/internal/revocation"
 	"github.com/jeks313/nebula-control-plane/internal/signer"
 	"github.com/jeks313/nebula-control-plane/internal/store"
 	"github.com/jeks313/nebula-control-plane/internal/store/migrate"
@@ -42,6 +43,7 @@ type enrollEnv struct {
 	sg          *signer.Signer
 	cfgB        signer.Backend
 	policy      *policy.Policy
+	rev         *revocation.Registry // cert blocklist (7.1); wired as BlocklistSource
 }
 
 func setupEnroll(t *testing.T) enrollEnv {
@@ -94,15 +96,17 @@ func setupEnroll(t *testing.T) enrollEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
+	rev := revocation.New(s.DB, audit)
 	cons := enrollment.New(enrollment.Config{
 		Store: s, Nonces: ring, Replay: replay.New(2 * time.Minute),
 		Signer: sg, Allocator: alloc, Pool: pool, CertLifetime: 24 * time.Hour,
 		ConfigBackend: cfgB, ConfigKeyID: configKeyID, CABundlePEM: caPEM,
-		Lighthouses: []bundle.Lighthouse{{OverlayIP: "100.64.0.1", PublicAddrs: []string{"198.51.100.1:4242"}}},
-		Policy:      &pol,
-		Results:     d, ResultTTL: time.Hour,
+		Lighthouses:     []bundle.Lighthouse{{OverlayIP: "100.64.0.1", PublicAddrs: []string{"198.51.100.1:4242"}}},
+		Policy:          &pol,
+		BlocklistSource: rev.ActiveFingerprints,
+		Results:         d, ResultTTL: time.Hour,
 	})
-	return enrollEnv{cons: cons, store: s, ring: ring, caPEM: caPEM, pool: pool, d: d, pinned: pinned, configKeyID: configKeyID, sg: sg, cfgB: cfgB, policy: &pol}
+	return enrollEnv{cons: cons, store: s, ring: ring, caPEM: caPEM, pool: pool, d: d, pinned: pinned, configKeyID: configKeyID, sg: sg, cfgB: cfgB, policy: &pol, rev: rev}
 }
 
 // fresh generates a host key and a nonce bound to it.
