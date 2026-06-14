@@ -25,6 +25,51 @@ func newStore(t *testing.T) *store.Store {
 	return s
 }
 
+func TestUpdate(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	secret, _, err := Create(ctx, s, Params{Name: "k", Groups: []string{"web"}, MaxUses: 5, AutoIssue: true}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ValidateAndConsume(ctx, s, secret, time.Now()); err != nil { // used_count -> 1
+		t.Fatal(err)
+	}
+
+	no, zero, ttl := false, 0, time.Hour
+	groups := []string{"a", "b"}
+	upd, err := Update(ctx, s, "k", UpdateParams{AutoIssue: &no, MaxUses: &zero, Groups: &groups, TTL: &ttl}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if upd.AutoIssue { // false must persist (map Updates, not struct)
+		t.Error("auto_issue=false must persist")
+	}
+	if upd.MaxUses != 0 { // 0 (unlimited) must persist
+		t.Error("max_uses=0 must persist")
+	}
+	if upd.UsedCount != 1 { // the concurrent counter must NEVER be clobbered
+		t.Errorf("used_count = %d, want 1 (must not be reset by an edit)", upd.UsedCount)
+	}
+	if len(upd.GroupList()) != 2 {
+		t.Errorf("groups = %v, want [a b]", upd.GroupList())
+	}
+	if upd.ExpiresAt == 0 {
+		t.Error("TTL should have set an expiry")
+	}
+
+	// A revoked/unknown key is not editable.
+	if err := Revoke(ctx, s, "k"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Update(ctx, s, "k", UpdateParams{MaxUses: &zero}, time.Now()); !errors.Is(err, ErrNotFound) {
+		t.Errorf("update on revoked key = %v, want ErrNotFound", err)
+	}
+	if _, err := Update(ctx, s, "ghost", UpdateParams{}, time.Now()); !errors.Is(err, ErrNotFound) {
+		t.Errorf("update on unknown key = %v, want ErrNotFound", err)
+	}
+}
+
 func TestCreateAndConsumeOnce(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()

@@ -10,6 +10,7 @@ import { usePermissions } from '../api/perms'
 import { isApiError, isForbidden, isCentrallyHandled } from '../api/errors'
 import { useToast } from '../components/Toast'
 import { Card, Page, StateBlock, ErrorState, Button, Chip, cx } from '../components/ui'
+import { JoinedVia } from '../components/provenance'
 import { Dialog } from '../components/Dialog'
 import { fmtDateTime } from '../lib/format'
 
@@ -64,7 +65,7 @@ export function Enrollments() {
             <table className="w-full text-left">
               <thead className="border-b border-edge text-[11px] uppercase tracking-wide text-ink-faint">
                 <tr>
-                  {['Device', 'Fingerprint', 'Method', 'Groups', 'Requested', 'Overlay IP', 'Decided by'].map((h) => (
+                  {['Device', 'Fingerprint', 'Joined via', 'Groups', 'Requested', 'Overlay IP', 'Decided by'].map((h) => (
                     <th key={h} className="px-4 py-2 font-medium">{h}</th>
                   ))}
                   {showActions && <th className="px-4 py-2 text-right font-medium">Actions</th>}
@@ -78,17 +79,7 @@ export function Enrollments() {
                       {e.pubkey_hash.slice(0, 12)}…
                     </td>
                     <td className="px-4 py-2">
-                      {e.attest_account ? (
-                        <span className="flex flex-col gap-0.5">
-                          <span><Chip tone="permit">{attestLabel(e.attest_provider)}</Chip></span>
-                          <span className="nums font-mono text-[11px] text-ink-faint" title={e.attest_principal}>
-                            {e.attest_account}
-                            {e.attest_region ? ` · ${e.attest_region}` : ''}
-                          </span>
-                        </span>
-                      ) : (
-                        <span className="text-ink-dim">{e.join_key_name ? `token · ${e.join_key_name}` : e.method}</span>
-                      )}
+                      <JoinedVia p={e} fallback={e.method} />
                     </td>
                     <td className="px-4 py-2">
                       <span className="flex flex-wrap gap-1">
@@ -194,14 +185,6 @@ function approveError(err: unknown): string {
     return err.detail || err.title
   }
   return 'Approve failed.'
-}
-
-// attestLabel maps a provider id to a short display label (provider-agnostic).
-function attestLabel(provider?: string): string {
-  if (provider === 'aws') return 'AWS'
-  if (provider === 'azure') return 'Azure'
-  if (provider === 'gcp') return 'GCP'
-  return provider || 'attested'
 }
 
 function decisionError(err: unknown): string {

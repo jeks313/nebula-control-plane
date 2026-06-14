@@ -3,7 +3,10 @@ import {
   useJoinKeys,
   useCreateJoinKey,
   useRevokeJoinKey,
+  useUpdateJoinKey,
+  type JoinKey,
   type JoinKeyCreated,
+  type JoinKeyUpdate,
 } from '../api/hooks'
 import { usePermissions } from '../api/perms'
 import { isApiError, isForbidden, isCentrallyHandled } from '../api/errors'
@@ -63,8 +66,15 @@ export function JoinKeys() {
                     <td className="nums px-4 py-2 text-ink-faint">{fmtDateTime(k.created_at)}</td>
                     {mayManage && (
                       <td className="px-4 py-2">
-                        <div className="flex justify-end">
-                          {k.state === 'active' ? <RevokeButton name={k.name} /> : <span className="text-ink-faint">—</span>}
+                        <div className="flex justify-end gap-2">
+                          {k.state === 'active' ? (
+                            <>
+                              <EditButton k={k} />
+                              <RevokeButton name={k.name} />
+                            </>
+                          ) : (
+                            <span className="text-ink-faint">—</span>
+                          )}
                         </div>
                       </td>
                     )}
@@ -140,39 +150,153 @@ function CreateDialog({ onClose }: { onClose: () => void }) {
         </>
       }
     >
-      <div className="flex flex-col gap-3">
-        <Labeled label="Name">
-          <input autoFocus value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} placeholder="e.g. laptops-2026" className={FIELD} />
+      <JoinKeyFields f={f} setF={setF} mode="create" />
+    </Dialog>
+  )
+}
+
+type KeyForm = {
+  name: string
+  groups: string
+  maxUses: string
+  ttlDays: string
+  quotaPerHour: string
+  autoIssue: boolean
+  ephemeral: boolean
+}
+
+// JoinKeyFields is the shared create/edit form body so the two stay in lockstep. In
+// edit mode the name is immutable (path key) and the TTL is "blank = keep".
+function JoinKeyFields({
+  f,
+  setF,
+  mode,
+  currentExpiry,
+}: {
+  f: KeyForm
+  setF: (f: KeyForm) => void
+  mode: 'create' | 'edit'
+  currentExpiry?: string
+}) {
+  const edit = mode === 'edit'
+  return (
+    <div className="flex flex-col gap-3">
+      <Labeled label="Name">
+        <input
+          autoFocus={!edit}
+          disabled={edit}
+          value={f.name}
+          onChange={(e) => setF({ ...f, name: e.target.value })}
+          placeholder="e.g. laptops-2026"
+          className={cx(FIELD, edit && 'opacity-60')}
+        />
+      </Labeled>
+      <Labeled label="Groups (comma-separated)">
+        <input value={f.groups} onChange={(e) => setF({ ...f, groups: e.target.value })} placeholder="laptops, contractors" className={FIELD} />
+      </Labeled>
+      <div className="grid grid-cols-3 gap-2">
+        <Labeled label="Max uses (0 = ∞)">
+          <input inputMode="numeric" value={f.maxUses} onChange={(e) => setF({ ...f, maxUses: e.target.value })} placeholder="0" className={FIELD} />
         </Labeled>
-        <Labeled label="Groups (comma-separated)">
-          <input value={f.groups} onChange={(e) => setF({ ...f, groups: e.target.value })} placeholder="laptops, contractors" className={FIELD} />
+        <Labeled label={edit ? 'TTL days (blank = keep)' : 'TTL days (0 = none)'}>
+          <input inputMode="numeric" value={f.ttlDays} onChange={(e) => setF({ ...f, ttlDays: e.target.value })} placeholder={edit ? '—' : '0'} className={FIELD} />
         </Labeled>
-        <div className="grid grid-cols-3 gap-2">
-          <Labeled label="Max uses (0 = ∞)">
-            <input inputMode="numeric" value={f.maxUses} onChange={(e) => setF({ ...f, maxUses: e.target.value })} placeholder="0" className={FIELD} />
-          </Labeled>
-          <Labeled label="TTL days (0 = none)">
-            <input inputMode="numeric" value={f.ttlDays} onChange={(e) => setF({ ...f, ttlDays: e.target.value })} placeholder="0" className={FIELD} />
-          </Labeled>
-          <Labeled label="Rate/hr (0 = none)">
-            <input inputMode="numeric" value={f.quotaPerHour} onChange={(e) => setF({ ...f, quotaPerHour: e.target.value })} placeholder="0" className={FIELD} />
-          </Labeled>
-        </div>
-        <label className="flex items-center gap-2 text-[13px] text-ink">
-          <input type="checkbox" checked={f.ephemeral} onChange={(e) => setF({ ...f, ephemeral: e.target.checked })} /> Ephemeral hosts
-        </label>
-        <label className="flex items-start gap-2 text-[13px] text-ink">
-          <input type="checkbox" checked={f.autoIssue} onChange={(e) => setF({ ...f, autoIssue: e.target.checked })} className="mt-0.5" />
-          <span>
-            Auto-issue certificates
-            {f.autoIssue && (
-              <span className="mt-1 block text-[12px] text-warn">
-                ⚠ Skips per-device approval — any host with this secret is admitted automatically.
-              </span>
-            )}
-          </span>
-        </label>
+        <Labeled label="Rate/hr (0 = none)">
+          <input inputMode="numeric" value={f.quotaPerHour} onChange={(e) => setF({ ...f, quotaPerHour: e.target.value })} placeholder="0" className={FIELD} />
+        </Labeled>
       </div>
+      {edit && (
+        <p className="text-[11px] text-ink-faint">
+          Current expiry: {currentExpiry}. Leave TTL blank to keep it; enter 0 for never.
+        </p>
+      )}
+      <label className="flex items-center gap-2 text-[13px] text-ink">
+        <input type="checkbox" checked={f.ephemeral} onChange={(e) => setF({ ...f, ephemeral: e.target.checked })} /> Ephemeral hosts
+      </label>
+      <label className="flex items-start gap-2 text-[13px] text-ink">
+        <input type="checkbox" checked={f.autoIssue} onChange={(e) => setF({ ...f, autoIssue: e.target.checked })} className="mt-0.5" />
+        <span>
+          Auto-issue certificates
+          {f.autoIssue && (
+            <span className="mt-1 block text-[12px] text-warn">
+              ⚠ Skips per-device approval — any host with this secret is admitted automatically.
+            </span>
+          )}
+        </span>
+      </label>
+    </div>
+  )
+}
+
+function EditButton({ k }: { k: JoinKey }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <>
+      <Button onClick={() => setOpen(true)}>Edit</Button>
+      {open && <EditDialog k={k} onClose={() => setOpen(false)} />}
+    </>
+  )
+}
+
+function EditDialog({ k, onClose }: { k: JoinKey; onClose: () => void }) {
+  const toast = useToast()
+  const update = useUpdateJoinKey()
+  const [f, setF] = useState<KeyForm>({
+    name: k.name,
+    groups: k.groups.join(', '),
+    maxUses: k.max_uses ? String(k.max_uses) : '',
+    ttlDays: '',
+    quotaPerHour: k.quota_per_hour ? String(k.quota_per_hour) : '',
+    autoIssue: k.auto_issue,
+    ephemeral: k.ephemeral,
+  })
+
+  function submit() {
+    const body: JoinKeyUpdate = {
+      groups: splitGroups(f.groups),
+      max_uses: numOrZero(f.maxUses),
+      quota_per_hour: numOrZero(f.quotaPerHour),
+      auto_issue: f.autoIssue,
+      ephemeral: f.ephemeral,
+    }
+    const ttl = Number(f.ttlDays)
+    if (f.ttlDays.trim() !== '' && Number.isFinite(ttl)) {
+      body.ttl_seconds = Math.max(0, Math.round(ttl * 86_400)) // 0 = never; blank = unchanged
+    }
+    update.mutate(
+      { name: k.name, body },
+      {
+        onSuccess: () => {
+          toast.notify(`Updated ${k.name}`, 'success')
+          onClose()
+        },
+        onError: (err) => {
+          if (isCentrallyHandled(err)) return
+          if (isForbidden(err)) {
+            toast.notify('You don’t have permission to edit join keys.', 'error')
+            return
+          }
+          toast.notify(isApiError(err) ? err.detail || err.title : 'Update failed.', 'error')
+        },
+      },
+    )
+  }
+
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      title={`Edit ${k.name}`}
+      footer={
+        <>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button variant="primary" onClick={submit} disabled={update.isPending}>
+            {update.isPending ? 'Saving…' : 'Save'}
+          </Button>
+        </>
+      }
+    >
+      <JoinKeyFields f={f} setF={setF} mode="edit" currentExpiry={k.expires_at ? fmtDateTime(k.expires_at) : 'never'} />
     </Dialog>
   )
 }

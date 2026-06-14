@@ -98,21 +98,33 @@ func cmdSeedDemo(args []string) {
 	// Show non-zero usage on one key (Create always starts at 0).
 	s.DB.WithContext(ctx).Table("join_keys").Where("name = ?", "laptops-2026").Update("used_count", 17)
 
-	// Pending enrollments (awaiting approval in the queue).
-	for i, e := range []struct{ name, group string }{
-		{"new-laptop-07", "laptops"},
-		{"contractor-vm-3", "contractors"},
-		{"edge-syd-01", "servers"},
+	// Queued + decided token enrollments — each carries its join_key_id so the
+	// "Joined via" column resolves the key name consistently across the Pending /
+	// Approved / Denied tabs (and the denied one populates the Denied tab + "Decided by").
+	for i, e := range []struct {
+		name, joinKey, status string
+		groups                []string
+	}{
+		{"new-laptop-07", "laptops-2026", enrollment.StatusPending, []string{"laptops"}},
+		{"ci-runner-07", "ci-runners", enrollment.StatusPending, []string{"ci", "ephemeral"}},
+		{"edge-syd-01", "datacenter-iad", enrollment.StatusPending, []string{"servers", "iad"}},
+		{"old-contractor-vm", "laptops-2026", enrollment.StatusDenied, []string{"laptops"}},
 	} {
-		groups, _ := json.Marshal([]string{e.group})
+		groups, _ := json.Marshal(e.groups)
+		ts := now.Add(-time.Duration(i+1) * 11 * time.Minute).UnixNano()
 		row := enrollment.Enrollment{
 			EnrollmentID: fmt.Sprintf("enr-demo-%03d", i+1),
 			DeviceName:   e.name,
 			PubkeyHash:   fmt.Sprintf("%064x", i+1),
 			Method:       "token",
+			JoinKeyID:    jkIDs[e.joinKey],
 			Groups:       string(groups),
-			Status:       enrollment.StatusPending,
-			CreatedAt:    now.Add(-time.Duration(i+1) * 11 * time.Minute).UnixNano(),
+			Status:       e.status,
+			CreatedAt:    ts,
+		}
+		if e.status != enrollment.StatusPending {
+			row.DecidedAt = ts
+			row.Approver = "ops@hyde.ca"
 		}
 		if err := s.DB.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&row).Error; err != nil {
 			fatalf("seed enrollment %s: %v", e.name, err)
@@ -294,7 +306,7 @@ func cmdSeedDemo(args []string) {
 		}
 	}
 
-	fmt.Printf("seeded demo fleet: %d devices (each with provenance), 3 lighthouses, 3 join keys, %d issued + 4 queued enrollments, 1 active rollout (v43 canary), a published cloud-trust config + policy, and 1 pending policy change awaiting approval\n", len(devices), len(provs)+1)
+	fmt.Printf("seeded demo fleet: %d devices (each with provenance), 3 lighthouses, 3 join keys, %d issued + 5 queued/decided enrollments (pending + denied), 1 active rollout (v43 canary), a published cloud-trust config + policy, and 1 pending policy change awaiting approval\n", len(devices), len(provs)+1)
 }
 
 // seedHeartbeats builds a believable ~14-host fleet whose facts drive the dashboard:

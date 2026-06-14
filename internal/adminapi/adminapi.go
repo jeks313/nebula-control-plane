@@ -231,6 +231,7 @@ func (s *Server) routeTable() []route {
 		{"POST", "/admin/v1/rollouts/current/abort", s.handleRolloutAbort},
 		{"GET", "/admin/v1/joinkeys", s.handleJoinKeys},
 		{"POST", "/admin/v1/joinkeys", s.handleJoinKeyCreate},
+		{"PATCH", "/admin/v1/joinkeys/{name}", s.handleJoinKeyUpdate},
 		{"POST", "/admin/v1/joinkeys/{name}/revoke", s.handleJoinKeyRevoke},
 		// A0.5 enrollment approval queue.
 		{"GET", "/admin/v1/enrollments", s.handleEnrollments},
