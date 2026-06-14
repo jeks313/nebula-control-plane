@@ -85,7 +85,15 @@ resource "aws_network_acl" "edge" {
     protocol   = "tcp"
     from_port  = var.gateway_port
     to_port    = var.gateway_port
-    cidr_block = var.gateway_cidr # public enrollment
+    cidr_block = var.gateway_cidr # public enrollment (off-cloud, via the internet-facing NLB)
+  }
+  ingress {
+    rule_no    = 105
+    action     = "allow"
+    protocol   = "tcp"
+    from_port  = var.gateway_port
+    to_port    = var.gateway_port
+    cidr_block = var.vpc_cidr # in-VPC enrollment (e.g. the cloud client, via the internal NLB) — robust even if gateway_cidr is tightened
   }
   ingress {
     rule_no    = 110

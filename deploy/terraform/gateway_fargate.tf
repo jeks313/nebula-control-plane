@@ -81,31 +81,68 @@ resource "aws_iam_role_policy" "gateway_secret" {
   })
 }
 
-# ── Security groups: the NLB enforces public-vs-Harbor; tasks only accept the NLB ─
+# ── Two NLBs (audit fix) ────────────────────────────────────────────────────────
+# An internet-facing NLB is NOT reachable from inside the same VPC via its public DNS
+# (the lookup returns public IPs; same-VPC traffic hairpins the IGW and is dropped —
+# AWS's documented behavior). So in-VPC consumers (Harbor pulling collect, the cloud
+# client enrolling) cannot use a public NLB. We therefore run two:
+#   • PUBLIC  (internet-facing): enroll :8443 only — for the OFF-cloud client (the iMac).
+#   • INTERNAL (internal=true):  enroll :8443 + collect :9443 — for IN-VPC consumers,
+#                                resolving to private edge-subnet IPs Harbor/the cloud
+#                                client can reach (and that the SG-source-match needs).
+# The ADR-0005 posture is unchanged: collect is reachable ONLY from Harbor's SG, on the
+# internal NLB; enroll is public on the internet-facing NLB (and private on the internal
+# one). Tasks accept only the NLBs.
+
 resource "aws_security_group" "gateway_nlb" {
   count       = local.gw_fargate
   name_prefix = "${var.name_prefix}-gw-nlb-"
-  description = "Fargate gateway NLB: public enroll + Harbor-only collect (ADR 0005)."
+  description = "Fargate gateway PUBLIC NLB: internet enroll only (ADR 0005)."
   vpc_id      = aws_vpc.main.id
 
   ingress {
-    description = "Public enrollment"
+    description = "Public enrollment (off-cloud clients)"
     from_port   = var.gateway_port
     to_port     = var.gateway_port
     protocol    = "tcp"
     cidr_blocks = [var.gateway_cidr]
   }
+  egress {
+    # Forward to the gateway tasks (edge subnet). Target the subnet CIDR, not the task
+    # SG, so the NLB and task SGs don't reference each other (cycle).
+    description = "Forward enroll to the gateway tasks (edge subnet)"
+    from_port   = var.gateway_port
+    to_port     = var.gateway_port
+    protocol    = "tcp"
+    cidr_blocks = [local.tier_cidr["edge"]]
+  }
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_security_group" "gateway_internal_nlb" {
+  count       = local.gw_fargate
+  name_prefix = "${var.name_prefix}-gw-int-nlb-"
+  description = "Fargate gateway INTERNAL NLB: in-VPC enroll + Harbor-only collect (ADR 0005)."
+  vpc_id      = aws_vpc.main.id
+
   ingress {
-    description     = "Collect (mTLS) — Harbor's security group ONLY"
+    description = "In-VPC enrollment (e.g. the cloud client)"
+    from_port   = var.gateway_port
+    to_port     = var.gateway_port
+    protocol    = "tcp"
+    cidr_blocks = [var.vpc_cidr]
+  }
+  ingress {
+    description     = "Collect (mTLS) — Harbor's security group ONLY (the protected side pulls)"
     from_port       = var.collect_port
     to_port         = var.collect_port
     protocol        = "tcp"
     security_groups = [aws_security_group.harbor.id]
   }
   egress {
-    # Forward to the gateway tasks (in the edge subnet). Target the subnet CIDR, not
-    # the task SG, so the NLB and task SGs don't reference each other (cycle).
-    description = "Forward to the gateway tasks (edge subnet)"
+    description = "Forward enroll+collect to the gateway tasks (edge subnet)"
     from_port   = var.gateway_port
     to_port     = var.collect_port
     protocol    = "tcp"
@@ -119,15 +156,22 @@ resource "aws_security_group" "gateway_nlb" {
 resource "aws_security_group" "gateway_task" {
   count       = local.gw_fargate
   name_prefix = "${var.name_prefix}-gw-task-"
-  description = "Fargate gateway task: accepts only the NLB; egress only for image/secret/DNS."
+  description = "Fargate gateway task: accepts only the NLBs; egress only for image/secret/DNS."
   vpc_id      = aws_vpc.main.id
 
   ingress {
-    description     = "Enroll + collect, from the NLB only"
+    description     = "Enroll from the public NLB"
+    from_port       = var.gateway_port
+    to_port         = var.gateway_port
+    protocol        = "tcp"
+    security_groups = [aws_security_group.gateway_nlb[0].id]
+  }
+  ingress {
+    description     = "Enroll + collect from the internal NLB"
     from_port       = var.gateway_port
     to_port         = var.collect_port
     protocol        = "tcp"
-    security_groups = [aws_security_group.gateway_nlb[0].id]
+    security_groups = [aws_security_group.gateway_internal_nlb[0].id]
   }
   egress {
     description = "ECR / Secrets Manager / package fetch (https/http)"
@@ -154,19 +198,40 @@ resource "aws_security_group" "gateway_task" {
   }
 }
 
-# ── Network Load Balancer (stable address; Fargate task IPs are ephemeral) ──────
+# ── Network Load Balancers (stable address; Fargate task IPs are ephemeral) ─────
 resource "aws_lb" "gateway" {
   count              = local.gw_fargate
   name_prefix        = "ncpgw-"
   load_balancer_type = "network"
-  internal           = false
+  internal           = false # internet-facing: enroll for off-cloud clients
   subnets            = [aws_subnet.tier["edge"].id]
   security_groups    = [aws_security_group.gateway_nlb[0].id]
 }
 
+resource "aws_lb" "gateway_internal" {
+  count              = local.gw_fargate
+  name_prefix        = "ncpgi-"
+  load_balancer_type = "network"
+  internal           = true # in-VPC: Harbor's collect pull + the cloud client's enroll
+  subnets            = [aws_subnet.tier["edge"].id]
+  security_groups    = [aws_security_group.gateway_internal_nlb[0].id]
+}
+
+# enroll on the public NLB (off-cloud) and on the internal NLB (in-VPC) are separate
+# target groups — an NLB target group binds to a single load balancer.
 resource "aws_lb_target_group" "enroll" {
   count              = local.gw_fargate
   name_prefix        = "ncpen-"
+  port               = var.gateway_port
+  protocol           = "TCP"
+  vpc_id             = aws_vpc.main.id
+  target_type        = "ip"
+  preserve_client_ip = false
+}
+
+resource "aws_lb_target_group" "enroll_internal" {
+  count              = local.gw_fargate
+  name_prefix        = "ncpei-"
   port               = var.gateway_port
   protocol           = "TCP"
   vpc_id             = aws_vpc.main.id
@@ -181,7 +246,7 @@ resource "aws_lb_target_group" "collect" {
   protocol           = "TCP"
   vpc_id             = aws_vpc.main.id
   target_type        = "ip"
-  preserve_client_ip = false
+  preserve_client_ip = false # harbor reaches it via the internal NLB; mTLS authenticates, SG restricts
 }
 
 resource "aws_lb_listener" "enroll" {
@@ -195,9 +260,20 @@ resource "aws_lb_listener" "enroll" {
   }
 }
 
+resource "aws_lb_listener" "enroll_internal" {
+  count             = local.gw_fargate
+  load_balancer_arn = aws_lb.gateway_internal[0].arn
+  port              = var.gateway_port
+  protocol          = "TCP"
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.enroll_internal[0].arn
+  }
+}
+
 resource "aws_lb_listener" "collect" {
   count             = local.gw_fargate
-  load_balancer_arn = aws_lb.gateway[0].arn
+  load_balancer_arn = aws_lb.gateway_internal[0].arn
   port              = var.collect_port
   protocol          = "TCP"
   default_action {
@@ -266,14 +342,19 @@ resource "aws_ecs_service" "gateway" {
     assign_public_ip = true # edge subnet routes to the IGW; lets the task pull ECR/Secrets without a NAT
   }
   load_balancer {
-    target_group_arn = aws_lb_target_group.enroll[0].arn
+    target_group_arn = aws_lb_target_group.enroll[0].arn # public enroll (off-cloud)
     container_name   = "gateway"
     container_port   = var.gateway_port
   }
   load_balancer {
-    target_group_arn = aws_lb_target_group.collect[0].arn
+    target_group_arn = aws_lb_target_group.enroll_internal[0].arn # in-VPC enroll (cloud client)
+    container_name   = "gateway"
+    container_port   = var.gateway_port
+  }
+  load_balancer {
+    target_group_arn = aws_lb_target_group.collect[0].arn # Harbor collect (internal)
     container_name   = "gateway"
     container_port   = var.collect_port
   }
-  depends_on = [aws_lb_listener.enroll, aws_lb_listener.collect]
+  depends_on = [aws_lb_listener.enroll, aws_lb_listener.enroll_internal, aws_lb_listener.collect]
 }
