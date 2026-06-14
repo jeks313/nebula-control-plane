@@ -139,6 +139,160 @@ func ruleFlows(p Policy, from, to string) []Flow {
 	return flows
 }
 
+// FlowDelta is one permitted flow that changed between two policies, for a literal
+// (as-written) ordered group pair. `from`/`to` are the literal rule groups (so an
+// any-source rule appears as from=="any", not fanned out across every group).
+type FlowDelta struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+	Flow Flow   `json:"flow"`
+}
+
+// DiffResult is the user-rule reachability change from an active policy to a draft.
+// Added = a flow the draft permits that the active policy did not; Removed = a flow the
+// active policy permitted that the draft drops. The always-on baseline (control-plane
+// reachability + ICMP) is identical under any policy and is excluded. Direction is
+// preserved (per ordered from->to pair); duplicate/re-ordered rules normalize away.
+type DiffResult struct {
+	Added   []FlowDelta `json:"added"`
+	Removed []FlowDelta `json:"removed"`
+}
+
+// FlowDiff computes the user-rule flow delta between two policies. It diffs the
+// flows of each LITERAL group pair named in either policy (matching rules by exact
+// FromGroup/ToGroup, so `any` is represented as itself rather than fanned out across
+// concrete groups — that fan-out is for reachability/blast-radius, not for "what the
+// proposer changed"). Flows are deduped per (proto,port); rule order/duplicates do
+// not register as a change.
+func FlowDiff(active, draft Policy) DiffResult {
+	res := DiffResult{Added: []FlowDelta{}, Removed: []FlowDelta{}}
+	for _, pr := range unionLiteralPairs(active, draft) {
+		a := literalFlows(active, pr[0], pr[1])
+		d := literalFlows(draft, pr[0], pr[1])
+		for _, f := range flowsMinus(d, a) {
+			res.Added = append(res.Added, FlowDelta{From: pr[0], To: pr[1], Flow: f})
+		}
+		for _, f := range flowsMinus(a, d) {
+			res.Removed = append(res.Removed, FlowDelta{From: pr[0], To: pr[1], Flow: f})
+		}
+	}
+	return res
+}
+
+// literalFlows returns the distinct flows of rules whose groups are EXACTLY from/to
+// (no `any` fan-out — unlike ruleFlows). Used by FlowDiff so a change to an
+// any-source rule shows once, as an `any` row, not duplicated across every group.
+// Ports are canonicalized so a single-value range (443-443) and its scalar (443) do
+// not register as a spurious change.
+func literalFlows(p Policy, from, to string) []Flow {
+	var flows []Flow
+	seen := map[string]bool{}
+	for _, r := range p.Rules {
+		if r.FromGroup != from || r.ToGroup != to {
+			continue
+		}
+		port := canonPort(r.Port)
+		k := r.Proto + "|" + port
+		if !seen[k] {
+			seen[k] = true
+			flows = append(flows, Flow{Proto: r.Proto, Port: port})
+		}
+	}
+	return flows
+}
+
+// canonPort canonicalizes a port spec so reachability-identical forms compare equal in
+// a diff: a single-value range N-N is the scalar N (Parse keeps the author's raw text).
+// Genuinely different ranges (e.g. 443-445) pass through unchanged.
+func canonPort(port string) string {
+	if lo, hi, ok := strings.Cut(port, "-"); ok && lo == hi {
+		return lo
+	}
+	return port
+}
+
+// flowsMinus returns the flows in a that are not in b (set difference by proto|port).
+func flowsMinus(a, b []Flow) []Flow {
+	inB := map[string]bool{}
+	for _, f := range b {
+		inB[f.Proto+"|"+f.Port] = true
+	}
+	var out []Flow
+	for _, f := range a {
+		if !inB[f.Proto+"|"+f.Port] {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// unionLiteralPairs returns the sorted distinct literal (from,to) group pairs that
+// appear in either policy's rules.
+func unionLiteralPairs(active, draft Policy) [][2]string {
+	set := map[[2]string]bool{}
+	for _, p := range []Policy{active, draft} {
+		for _, r := range p.Rules {
+			set[[2]string{r.FromGroup, r.ToGroup}] = true
+		}
+	}
+	out := make([][2]string, 0, len(set))
+	for pr := range set {
+		out = append(out, pr)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i][0] != out[j][0] {
+			return out[i][0] < out[j][0]
+		}
+		return out[i][1] < out[j][1]
+	})
+	return out
+}
+
+// BlastResult is the host-level impact of a policy change: the real hosts in the
+// groups named by changed flows. A rule A->B compiles to A's outbound AND B's inbound
+// (CompileHost), so a changed A->B flow's affected hosts are group A ∪ group B. This
+// is a CONSERVATIVE SUPERSET of the hosts whose compiled firewall literally changes —
+// a flow already subsumed by a broader `any` rule can leave a host's compiled output
+// byte-identical, yet that host is still counted (safe for a "this affects N hosts"
+// review). `Total` is the issued-host population (the denominator).
+type BlastResult struct {
+	Hosts []string `json:"hosts"` // overlay IPs in the changed flows' groups (sorted, superset)
+	Count int      `json:"count"` // = len(Hosts)
+	Total int      `json:"total"` // total issued hosts in the fleet
+}
+
+// BlastRadius resolves a flow diff to the set of real hosts potentially affected — the
+// members of the changed rules' groups (a conservative superset; see BlastResult).
+// groupHosts maps a group name to the overlay IPs issued that group; allHosts is the
+// full issued population (used for an `any` rule side, which touches every host). It
+// is pure over the injected membership (the DB read lives in the caller).
+func BlastRadius(diff DiffResult, groupHosts map[string][]string, allHosts []string) BlastResult {
+	affected := map[string]bool{}
+	touch := func(group string) {
+		if group == "any" {
+			for _, h := range allHosts {
+				affected[h] = true
+			}
+			return
+		}
+		for _, h := range groupHosts[group] {
+			affected[h] = true
+		}
+	}
+	for _, deltas := range [][]FlowDelta{diff.Added, diff.Removed} {
+		for _, d := range deltas {
+			touch(d.From)
+			touch(d.To)
+		}
+	}
+	hosts := make([]string, 0, len(affected))
+	for h := range affected {
+		hosts = append(hosts, h)
+	}
+	sort.Strings(hosts)
+	return BlastResult{Hosts: hosts, Count: len(hosts), Total: len(allHosts)}
+}
+
 // Assertion is one policy test: an expected allow/deny for a reachability query.
 type Assertion struct {
 	Expect bool   `json:"expect"` // true = allow, false = deny

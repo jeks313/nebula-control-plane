@@ -210,6 +210,7 @@ export function useCompilePolicy() {
 export type Decision = components['schemas']['ReachabilityDecision']
 export type ReachabilityMatrix = components['schemas']['ReachabilityMatrix']
 export type PolicyTestResults = components['schemas']['PolicyTestResults']
+export type PolicyDiff = components['schemas']['PolicyDiff']
 
 export function useReachability() {
   return useMutation({
@@ -227,6 +228,14 @@ export function usePolicyMatrix() {
 export function useRunPolicyTests() {
   return useMutation({
     mutationFn: (body: { policy: string; tests: string }) => unwrap(api.POST('/admin/v1/policy/tests', { body })),
+  })
+}
+
+// useFlowDiff (A1.2): the flows added/removed vs the active policy + the blast radius
+// (real hosts whose firewall would change) for a draft.
+export function useFlowDiff() {
+  return useMutation({
+    mutationFn: (body: { policy: string }) => unwrap(api.POST('/admin/v1/policy/diff', { body })),
   })
 }
 
