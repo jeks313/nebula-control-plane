@@ -1117,11 +1117,29 @@ func cmdCoreAPI(args []string) {
 	addr := fs.String("addr", ":8444", "listen address (bind to Core's overlay IP in production)")
 	tlsCert := fs.String("tls-cert", "", "TLS certificate PEM (serve HTTPS; recommended even mesh-only)")
 	tlsKey := fs.String("tls-key", "", "TLS private key PEM (with -tls-cert)")
+	hostCert := fs.String("host-cert", "", "Core's own Nebula host cert PEM; verified at boot to carry group:control-plane (recommended)")
 	lf := addLogFlags(fs)
 	_ = fs.Parse(args)
 	log := lf.setup()
 	if *cf.caCert == "" {
 		fatalf("core-api: -ca-cert is required")
+	}
+	// Bring-up invariant: the node serving the control plane must present
+	// group:control-plane, because the firewall baseline routes every member's
+	// renew/heartbeat to that group. Fail fast on a misconfigured identity rather than
+	// run silently unreachable. (Skipped, with a warning, when -host-cert is unset.)
+	if *hostCert != "" {
+		pem, rerr := os.ReadFile(*hostCert)
+		if rerr != nil {
+			fatalf("core-api: read -host-cert: %v", rerr)
+		}
+		fp, verr := genesis.VerifyControlPlaneCert(pem)
+		if verr != nil {
+			fatalf("core-api: %v", verr)
+		}
+		log.Info("core-api control-plane identity verified", "fingerprint", fp)
+	} else {
+		log.Warn("core-api: -host-cert not set; cannot verify this node carries group:control-plane (the firewall baseline depends on it)")
 	}
 	pool, err := netip.ParsePrefix(*cf.pool)
 	if err != nil {
@@ -1342,6 +1360,9 @@ func cmdGenesis(args []string) {
 	lhIPStr := fs.String("lighthouse-ip", "100.64.0.1", "lighthouse overlay IP")
 	lhAddr := fs.String("lighthouse-addr", "", "lighthouse public underlay addr (host:port)")
 	lhPub := fs.String("lighthouse-pub", "", "lighthouse host public key PEM (from `pilot init`) (required)")
+	coreName := fs.String("core-name", "harbor-core", "Core (control-plane) node name")
+	coreIPStr := fs.String("core-ip", "100.64.0.2", "Core overlay IP (used only with -core-pub)")
+	corePub := fs.String("core-pub", "", "Core host public key PEM (from `pilot init`); issues Core's control-plane cert (recommended)")
 	caLife := fs.Duration("ca-lifetime", 10*365*24*time.Hour, "CA validity")
 	certLife := fs.Duration("cert-lifetime", 365*24*time.Hour, "lighthouse cert validity")
 	// software key paths (default under -out)
@@ -1369,6 +1390,18 @@ func cmdGenesis(args []string) {
 	lhPubPEM, err := os.ReadFile(*lhPub)
 	if err != nil {
 		fatalf("genesis: read -lighthouse-pub: %v", err)
+	}
+	// Optional Core (control-plane) node — recommended, so the host the firewall
+	// baseline routes to (group:control-plane) exists from the start.
+	var corePubPEM []byte
+	var coreIP netip.Addr
+	if *corePub != "" {
+		if corePubPEM, err = os.ReadFile(*corePub); err != nil {
+			fatalf("genesis: read -core-pub: %v", err)
+		}
+		if coreIP, err = netip.ParseAddr(*coreIPStr); err != nil {
+			fatalf("genesis: bad -core-ip: %v", err)
+		}
 	}
 	if err := os.MkdirAll(*outDir, 0o700); err != nil {
 		fatalf("genesis: mkdir out: %v", err)
@@ -1412,7 +1445,9 @@ func cmdGenesis(args []string) {
 	res, err := genesis.Run(context.Background(), s, caB, cfgB, genesis.Params{
 		OperatorA: *opA, OperatorB: *opB, CAName: *caName, Pool: pool,
 		LighthouseName: *lhName, LighthouseIP: lhIP, LighthouseAddr: *lhAddr,
-		LighthousePub: lhPubPEM, CALifetime: *caLife, CertLifetime: *certLife,
+		LighthousePub: lhPubPEM,
+		CoreName:      *coreName, CoreIP: coreIP, CorePub: corePubPEM,
+		CALifetime: *caLife, CertLifetime: *certLife,
 	})
 	if err != nil {
 		fatalf("%v", err)
@@ -1426,13 +1461,23 @@ func cmdGenesis(args []string) {
 	writeOut(filepath.Join(*outDir, "ca.crt"), res.CACertPEM)
 	writeOut(filepath.Join(*outDir, "config-signing.pub"), res.ConfigSigningPubPEM)
 	writeOut(filepath.Join(*outDir, *lhName+".crt"), res.LighthouseCertPEM)
+	if res.CoreCertPEM != nil {
+		writeOut(filepath.Join(*outDir, *coreName+".crt"), res.CoreCertPEM)
+	}
 	writeOut(filepath.Join(*outDir, "genesis.json"), res.ManifestJSON)
 
 	fmt.Printf("genesis complete (%s backend), operators: %s + %s\n", *backend, *opA, *opB)
 	fmt.Printf("  CA fingerprint:        %s\n", res.CAFingerprint)
 	fmt.Printf("  config-signing key id: %s\n", res.ConfigSigningKeyID)
 	fmt.Printf("  lighthouse %s @ %s, cert %s\n", *lhName, res.LighthouseIP, res.LighthouseFingerprint)
-	fmt.Printf("  wrote: %s/{ca.crt,config-signing.pub,%s.crt,genesis.json}\n", *outDir, *lhName)
+	if res.CoreCertPEM != nil {
+		fmt.Printf("  core %s @ %s, cert %s (group: control-plane)\n", *coreName, res.CoreIP, res.CoreFingerprint)
+		fmt.Printf("  wrote: %s/{ca.crt,config-signing.pub,%s.crt,%s.crt,genesis.json}\n", *outDir, *lhName, *coreName)
+		fmt.Printf("  -> run core-api with -host-cert %s/%s.crt so it verifies its control-plane identity at boot.\n", *outDir, *coreName)
+	} else {
+		fmt.Printf("  wrote: %s/{ca.crt,config-signing.pub,%s.crt,genesis.json}\n", *outDir, *lhName)
+		fmt.Fprintln(os.Stderr, "  WARNING: no -core-pub given, so Core's control-plane cert was NOT issued. The firewall baseline routes the fleet to group:control-plane; issue Core's cert (re-run with -core-pub, or `harbor issue-cert -groups control-plane`) before bring-up or heartbeat/renew will be unreachable.")
+	}
 }
 
 func writeKeyExcl(path string, b []byte) {
