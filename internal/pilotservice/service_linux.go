@@ -3,6 +3,7 @@
 package pilotservice
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -25,11 +26,25 @@ func Install(s Spec) error {
 	return systemctl("enable", "--now", s.Instance())
 }
 
-// Uninstall disables + stops the per-mesh instance. The shared template unit is
-// left in place (other meshes may use it); identity/state removal is the caller's
+// Uninstall disables + stops the per-mesh instance and clears any failed state.
+// The shared template unit is left in place (other meshes may use it) — call
+// RemoveTemplate once no instances remain. Identity/state removal is the caller's
 // choice (pilot uninstall -purge).
 func Uninstall(mesh string) error {
-	return systemctl("disable", "--now", "pilot@"+mesh)
+	if err := systemctl("disable", "--now", "pilot@"+mesh); err != nil {
+		return err
+	}
+	_ = systemctl("reset-failed", "pilot@"+mesh) // best-effort: clear lingering failed state
+	return nil
+}
+
+// RemoveTemplate removes the shared systemd template unit + reloads systemd. Call
+// only when no mesh instances remain (full host cleanup); the binaries are left.
+func RemoveTemplate() error {
+	if err := os.Remove(UnitTemplatePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return systemctl("daemon-reload")
 }
 
 // Status returns a one-line "<active> (<enabled>)" summary for the mesh instance.

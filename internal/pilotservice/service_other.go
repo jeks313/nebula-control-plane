@@ -11,5 +11,8 @@ func Install(s Spec) error { return ErrUnsupported }
 // Uninstall is unsupported off systemd in this build.
 func Uninstall(mesh string) error { return ErrUnsupported }
 
+// RemoveTemplate is unsupported off systemd in this build.
+func RemoveTemplate() error { return ErrUnsupported }
+
 // Status is unsupported off systemd in this build.
 func Status(mesh string) (string, error) { return "", ErrUnsupported }
