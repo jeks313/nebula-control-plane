@@ -119,6 +119,12 @@ type Config struct {
 	ConfigKeyID   string         // its kid (pinned by Pilot)
 	CABundlePEM   []byte         // CA cert PEM for the bundle's ca_bundle
 	Lighthouses   []bundle.Lighthouse
+	// TunDev + ListenPort are this mesh's nebula TUN device name + UDP listen port,
+	// stamped into every issued bundle so a multi-mesh host gets distinct values per
+	// mesh. Empty/zero -> the renderer's nebula1/4242 defaults (single-mesh hosts and
+	// existing meshes are unaffected).
+	TunDev     string
+	ListenPort int
 	// LighthouseSource, if set, is consulted at bundle-build time so registry
 	// changes (6.8) propagate live; overrides Lighthouses, with a fallback to it
 	// on error (a transient registry read must not sever discovery).
@@ -572,6 +578,8 @@ func (c *Consumer) buildBundle(ctx context.Context, deviceName, ip string, group
 		Firewall:      bundle.CompileFirewall(c.cfg.Policy, groups),
 		Lighthouses:   c.lighthouses(ctx),
 		Blocklist:     c.blocklist(ctx),
+		TunDev:        c.cfg.TunDev,
+		ListenPort:    c.cfg.ListenPort,
 		NotAfter:      notAfter.UTC().Format(time.RFC3339),
 	}
 	return bundle.Sign(c.cfg.ConfigBackend, c.cfg.ConfigKeyID, b)

@@ -438,6 +438,8 @@ type coreFlags struct {
 	module, token, pin, caLbl, configLbl *string
 	hmacKey, queueDSN, queueKey          *string
 	pool                                 *string
+	tunDev                               *string
+	listenPort                           *int
 	certLifetime                         *time.Duration
 	maxPerHour                           *int
 	lighthouse                           *string
@@ -464,6 +466,8 @@ func addCoreFlags(fs *flag.FlagSet) *coreFlags {
 	cf.queueDSN = fs.String("queue-dsn", "", "durable queue DSN (required)")
 	cf.queueKey = fs.String("queue-key", "", "queue HMAC key (base64url, shared with gateway) (required)")
 	cf.pool = fs.String("pool", "100.64.0.0/16", "overlay pool CIDR")
+	cf.tunDev = fs.String("tun-dev", "nebula1", "nebula TUN device name stamped into this mesh's bundles (use a DISTINCT name per mesh on multi-mesh hosts)")
+	cf.listenPort = fs.Int("listen-port", 4242, "nebula UDP listen port stamped into this mesh's bundles (use a DISTINCT port per mesh on multi-mesh hosts)")
 	cf.certLifetime = fs.Duration("cert-lifetime", 30*24*time.Hour, "issued cert validity")
 	cf.maxPerHour = fs.Int("max-certs-per-hour", 0, "signing circuit-breaker ceiling (0=unlimited)")
 	cf.lighthouse = fs.String("lighthouse", "", "lighthouses for the bundle: overlayIP=host:port[,...]")
@@ -572,6 +576,7 @@ func (cf *coreFlags) buildConsumer(s *store.Store, results enrollment.ResultSink
 	return enrollment.New(enrollment.Config{
 		Store: s, Nonces: ring, Replay: replay.New(2 * time.Minute),
 		Signer: sg, Allocator: alloc, Pool: pool, CertLifetime: *cf.certLifetime,
+		TunDev: *cf.tunDev, ListenPort: *cf.listenPort,
 		ConfigBackend: cfgB, ConfigKeyID: wire.PubkeyHash(cfgPub),
 		CABundlePEM: caPEM, Lighthouses: parseLighthouses(*cf.lighthouse), LighthouseSource: cf.lighthouseSource(s), Policy: cf.policy(s),
 		BlocklistSource: cf.blocklistSource(s),
@@ -1528,7 +1533,7 @@ func cmdCoreAPI(args []string) {
 		CABundlePEM: caPEM, Lighthouses: parseLighthouses(*cf.lighthouse), LighthouseSource: cf.lighthouseSource(s), Policy: cf.policy(s),
 		BlocklistSource: cf.blocklistSource(s),
 		Rollout:         rollout.New(s.DB, audit),
-		Pool:            pool, CertLifetime: *cf.certLifetime,
+		Pool:            pool, TunDev: *cf.tunDev, ListenPort: *cf.listenPort, CertLifetime: *cf.certLifetime,
 	})
 	srv := &http.Server{
 		Addr: *addr, Handler: api.Handler(),
