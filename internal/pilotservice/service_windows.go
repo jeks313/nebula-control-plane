@@ -7,10 +7,12 @@
 // needs an elevated (Administrator) token — the Windows analogue of root on Linux
 // / sudo on macOS — so install/uninstall/status must run from an elevated prompt.
 //
-// NOTE: built to golang.org/x/sys/windows/svc conventions and cross-compile
-// verified (GOOS=windows GOARCH=amd64), but NOT yet run on a Windows host — no
-// Windows test box exists. Expect first-run iteration (the macOS backend matched
-// on first run, but treat this as unproven until exercised).
+// Validated on real Windows Server 2022 (EC2): install/status/uninstall/-purge
+// exercise the full mgr CreateService -> Start -> Control(Stop) -> Delete cycle,
+// `pilot supervise` runs as the LocalSystem service (sc qc shows the quoted argv),
+// and the recovery actions take effect with FAILURE_ACTIONS_ON_NONCRASH_FAILURES
+// set. See ADR 0008 Phase 4. The demo Terraform's opt-in Windows client
+// (deploy/terraform/windows.tf) reproduces the test host.
 package pilotservice
 
 import (

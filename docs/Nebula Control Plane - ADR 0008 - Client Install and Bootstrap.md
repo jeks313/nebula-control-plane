@@ -237,9 +237,13 @@ Lifecycle siblings: `pilot status` (installed? enrolled? healthy? per mesh), `pi
   into ctx cancellation, redirecting its (consoleless) output to `<StateDir>\pilot.log`.
   Recovery mirrors the siblings via `SetRecoveryActions` **plus**
   `SetRecoveryActionsOnNonCrashFailures(true)` (the SCM otherwise treats a nonzero-exit
-  STOP as clean and never restarts). Cross-compile-verified (`GOOS=windows`); a Windows
-  test client is wired into the demo Terraform (`deploy/terraform/windows.tf`, opt-in
-  `enable_windows_client`) for live validation. `install -dry-run` previews the resolved
+  STOP as clean and never restarts). **Validated on real Windows Server 2022 (EC2,
+  `deploy/terraform/windows.tf`, opt-in `enable_windows_client`):** the windows/amd64
+  binary runs, `install -dry-run` renders the service definition, and a full
+  `install → status (running) → uninstall → -purge` cycle creates/queries/removes the
+  SCM service with `pilot supervise` running as the LocalSystem service —
+  `sc qc` shows the quoted argv, and `sc qfailureflag` confirms
+  `FAILURE_ACTIONS_ON_NONCRASH_FAILURES: TRUE`. `install -dry-run` previews the resolved
   paths + service definition on every platform (no enroll/write/root). Remaining:
   sign/notarize the universal binary per platform (macOS notarization + Windows
   Authenticode) — for *distributed* installs, not local dev.
