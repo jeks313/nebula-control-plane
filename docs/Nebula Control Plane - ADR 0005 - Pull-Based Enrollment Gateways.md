@@ -123,9 +123,24 @@ which is exactly what the pull/off-mesh model grants it.
 
 ## Phased plan
 
-- **Phase 1 — the pull transport.** Local-per-gateway queue (drop the shared-queue
+- ✅ **Phase 1 — the pull transport.** Local-per-gateway queue (drop the shared-queue
   assumption); the gateway's mTLS internal API (list/put/ack); the Harbor collector
   loop wrapping the existing `Consumer`. Single registered gateway, end to end.
+  **Implemented (2026-06-14):** `internal/collect` — leaf-pinned mTLS (self-signed
+  certs, no CA: `ServerTLS`/`ClientTLS` pin the peer's leaf by SHA-256, per open
+  question #1's chosen answer), the gateway-side `Server` (`claim`/`results`/`ack`
+  over its local `*queue.Durable`), and the Harbor-side `Collector` (claim →
+  `Consumer.Process` via a `CaptureSink` → ship results back → ack; ship-before-ack
+  for at-least-once). `enrollment.Config.Results` is now a `ResultSink` interface
+  (`*queue.Durable` still satisfies it, so co-located mode is unchanged). Wired:
+  `gateway -collect-addr/-collect-cert/-collect-key/-harbor-client-cert` (+
+  `gateway collect-keygen` to mint the pinned identities) and `harbor collect`
+  (replaces `enroll worker` for the split topology). *Proven:* unit
+  `TestPullTransportEndToEnd` (pull → issue → ship-back → ack) + both wrong-pin
+  refusals, and a real-binary check (the gateway's collect listener refuses no/
+  unpinned client certs and serves the pinned Harbor client). Open questions #2–#5
+  took their minimal answers (fixed-interval poll; admin-paste pin bootstrap; reuse
+  the existing result-TTL; pinned-cert-is-sufficient since Core re-verifies).
 - **Phase 2 — the registry.** Gateway registry store + admin CRUD (mirror lighthouse)
   + console/CLI surfaces; Harbor polls all registered gateways.
 - **Phase 3 — the demo node.** A standalone public gateway EC2 (own SG: `:8443`

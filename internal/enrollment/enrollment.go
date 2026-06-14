@@ -91,6 +91,15 @@ type Result struct {
 	CertPEM      []byte
 }
 
+// ResultSink is where a processed enrollment's poll result is delivered. The
+// co-located gateway writes it to the shared durable queue (`*queue.Durable`
+// satisfies this); the pull-based collector (ADR 0005) ships it back to the
+// originating gateway over mTLS. Decoupling the Consumer from a concrete queue is
+// what lets the same verify+issue logic serve both transports.
+type ResultSink interface {
+	PutResult(ctx context.Context, enrollmentID, status string, secretHash, bundle []byte, reason string, expiresAt time.Time) error
+}
+
 // Config builds a Consumer.
 type Config struct {
 	Store        *store.Store
@@ -120,8 +129,8 @@ type Config struct {
 	// an empty blocklist rather than failing the enrollment (fail-open on
 	// availability — peers still hold the blocklist from their own bundles).
 	BlocklistSource func(context.Context) ([]string, error)
-	Results         *queue.Durable // result store (gateway↔Core shared store)
-	ResultTTL       time.Duration  // result/ticket validity (0 -> 1h)
+	Results         ResultSink    // result delivery (shared queue, or the ADR-0005 collector's ship-back sink)
+	ResultTTL       time.Duration // result/ticket validity (0 -> 1h)
 
 	// Cloud attestation (M5). AWSSigV4Enabled gates the aws-sigv4 method; CloudTrust
 	// is the active dual-control trust config (which accounts/roles may attest +
@@ -165,6 +174,11 @@ func (c *Consumer) Drain(ctx context.Context, q *queue.Durable, batch int, lease
 	}
 	return len(leased), nil
 }
+
+// Terminal reports whether an error is a final business outcome (don't retry) vs.
+// a transient/infra failure (retry). Exported for the ADR-0005 pull collector,
+// which uses it to decide ack (done) vs nack (redeliver) on a claimed candidate.
+func Terminal(err error) bool { return terminal(err) }
 
 // terminal reports whether an error is a final business outcome (don't retry)
 // vs. a transient/infra failure (retry).

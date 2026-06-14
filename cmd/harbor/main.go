@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"errors"
 	"flag"
@@ -25,6 +26,7 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/adminui"
 	"github.com/jeks313/nebula-control-plane/internal/bundle"
 	"github.com/jeks313/nebula-control-plane/internal/cloudtrust"
+	"github.com/jeks313/nebula-control-plane/internal/collect"
 	"github.com/jeks313/nebula-control-plane/internal/coreapi"
 	"github.com/jeks313/nebula-control-plane/internal/dualcontrol"
 	"github.com/jeks313/nebula-control-plane/internal/enrollment"
@@ -70,6 +72,8 @@ func main() {
 		cmdEnrollCore(os.Args[2:])
 	case "core-api":
 		cmdCoreAPI(os.Args[2:])
+	case "collect":
+		cmdCollect(os.Args[2:])
 	case "admin-api":
 		cmdAdminAPI(os.Args[2:])
 	case "admin-token":
@@ -121,6 +125,8 @@ usage:
   harbor enroll pending    [db flags]        list enrollments awaiting approval
   harbor enroll approve    <id> -approver A  [core flags]  approve a pending host
   harbor core-api          -addr ADDR [core flags]  mesh-only API (renew/heartbeat)
+  harbor collect           -gateway-url URL -gateway-cert C -client-cert C -client-key K [core flags]
+                           ADR-0005 pull collector: drain an off-mesh gateway over mTLS
   harbor admin-api         -addr ADDR [-dev-auth] [db flags]  mesh-only admin API (console)
   harbor seed-demo         [db flags]      DEV ONLY: populate a synthetic fleet for the console demo
   harbor fleet             [-expiry-within D] [-stale-after D] [-alert] [db flags]
@@ -519,22 +525,25 @@ func (cf *coreFlags) blocklistSource(s *store.Store) func(context.Context) ([]st
 	return reg.ActiveFingerprints
 }
 
-func (cf *coreFlags) build() (*enrollment.Consumer, *queue.Durable, *store.Store) {
-	if *cf.caCert == "" || *cf.hmacKey == "" || *cf.queueDSN == "" || *cf.queueKey == "" {
-		fatalf("enroll: -ca-cert, -hmac-key, -queue-dsn and -queue-key are required")
+// buildConsumer assembles the enrollment Consumer (signer, IPAM, nonce verify,
+// policy/blocklist/lighthouse sources, cloud-trust) over store s, delivering poll
+// results to `results`. Shared by the queue worker (results = the durable queue)
+// and the ADR-0005 collector (results = a ship-back CaptureSink). Needs -ca-cert
+// + -hmac-key; the queue is the caller's concern.
+func (cf *coreFlags) buildConsumer(s *store.Store, results enrollment.ResultSink) *enrollment.Consumer {
+	if *cf.caCert == "" || *cf.hmacKey == "" {
+		fatalf("-ca-cert and -hmac-key are required")
 	}
 	pool, err := netip.ParsePrefix(*cf.pool)
 	if err != nil {
-		fatalf("enroll: bad -pool: %v", err)
+		fatalf("bad -pool: %v", err)
 	}
 	caPEM, err := os.ReadFile(*cf.caCert)
 	if err != nil {
-		fatalf("enroll: read -ca-cert: %v", err)
+		fatalf("read -ca-cert: %v", err)
 	}
 	caB := cf.loadBackend(*cf.caKey, *cf.caLbl, "CA")
 	cfgB := cf.loadBackend(*cf.configKey, *cf.configLbl, "config-signing")
-
-	s := openStore(*cf.driver, *cf.dsn)
 	audit := func(c context.Context, a, ac, t, d string) error { _, e := s.AppendAudit(c, a, ac, t, d); return e }
 	sg, err := signer.New(signer.Config{
 		CACertPEM: caPEM, Backend: caB,
@@ -542,31 +551,39 @@ func (cf *coreFlags) build() (*enrollment.Consumer, *queue.Durable, *store.Store
 		MaxCertsPerHour: *cf.maxPerHour, Audit: audit,
 	})
 	if err != nil {
-		fatalf("enroll: signer: %v", err)
+		fatalf("signer: %v", err)
 	}
 	alloc, err := ipam.NewAllocator(s, ipam.Pool{Prefix: pool})
 	if err != nil {
-		fatalf("enroll: ipam: %v", err)
+		fatalf("ipam: %v", err)
 	}
 	ring, err := nonce.NewKeyring([][]byte{readB64Key(*cf.hmacKey)}, 0, 0)
 	if err != nil {
-		fatalf("enroll: nonce key: %v", err)
-	}
-	q, err := queue.OpenDurable(queue.DurableConfig{DSN: *cf.queueDSN, Key: readB64Key(*cf.queueKey)})
-	if err != nil {
-		fatalf("enroll: queue: %v", err)
+		fatalf("nonce key: %v", err)
 	}
 	cfgPub, _ := cfgB.PublicKey()
 	ct := cf.cloudTrust(s) // nil unless -cloudtrust-db && a config is published
-	cons := enrollment.New(enrollment.Config{
+	return enrollment.New(enrollment.Config{
 		Store: s, Nonces: ring, Replay: replay.New(2 * time.Minute),
 		Signer: sg, Allocator: alloc, Pool: pool, CertLifetime: *cf.certLifetime,
 		ConfigBackend: cfgB, ConfigKeyID: wire.PubkeyHash(cfgPub),
 		CABundlePEM: caPEM, Lighthouses: parseLighthouses(*cf.lighthouse), LighthouseSource: cf.lighthouseSource(s), Policy: cf.policy(s),
 		BlocklistSource: cf.blocklistSource(s),
-		Results:         q, ResultTTL: time.Hour,
+		Results:         results, ResultTTL: time.Hour,
 		CloudTrust: ct, AWSSigV4Enabled: ct != nil,
 	})
+}
+
+func (cf *coreFlags) build() (*enrollment.Consumer, *queue.Durable, *store.Store) {
+	if *cf.queueDSN == "" || *cf.queueKey == "" {
+		fatalf("enroll: -queue-dsn and -queue-key are required")
+	}
+	s := openStore(*cf.driver, *cf.dsn)
+	q, err := queue.OpenDurable(queue.DurableConfig{DSN: *cf.queueDSN, Key: readB64Key(*cf.queueKey)})
+	if err != nil {
+		fatalf("enroll: queue: %v", err)
+	}
+	cons := cf.buildConsumer(s, q)
 	return cons, q, s
 }
 
@@ -647,6 +664,64 @@ func enrollWorker(args []string) {
 		}
 	}
 	log.Info("enroll worker stopped", "total_processed", total)
+}
+
+// cmdCollect runs the ADR-0005 pull collector: it PULLS pending candidates from a
+// gateway over leaf-pinned mTLS, verifies + issues them (reusing the enrollment
+// Consumer), pushes results back, and acks — replacing the shared-queue `enroll
+// worker` for the off-mesh / split-gateway topology. Phase 1 polls one gateway
+// from flags; the gateway registry (`harbor gateway …`) is Phase 2.
+func cmdCollect(args []string) {
+	fs := flag.NewFlagSet("collect", flag.ExitOnError)
+	cf := addCoreFlags(fs)
+	gwURL := fs.String("gateway-url", "", "gateway collect URL (https://host:port) to pull from")
+	gwCertPath := fs.String("gateway-cert", "", "gateway's pinned server cert PEM (leaf-pinned)")
+	clientCertPath := fs.String("client-cert", "", "Harbor's collect client cert PEM")
+	clientKeyPath := fs.String("client-key", "", "Harbor's collect client key PEM")
+	interval := fs.Duration("interval", 5*time.Second, "gateway poll interval")
+	batch := fs.Int("batch", 64, "candidates claimed per poll")
+	once := fs.Bool("once", false, "collect a single batch and exit (cron/test)")
+	lf := addLogFlags(fs)
+	_ = fs.Parse(args)
+	log := lf.setup()
+
+	if *gwURL == "" || *gwCertPath == "" || *clientCertPath == "" || *clientKeyPath == "" {
+		fatalf("collect: -gateway-url, -gateway-cert, -client-cert and -client-key are required")
+	}
+	gwPEM, err := os.ReadFile(*gwCertPath)
+	if err != nil {
+		fatalf("collect: read -gateway-cert: %v", err)
+	}
+	gwPin, err := collect.PinFromCertPEM(gwPEM)
+	if err != nil {
+		fatalf("collect: -gateway-cert: %v", err)
+	}
+	clientCert, err := tls.LoadX509KeyPair(*clientCertPath, *clientKeyPath)
+	if err != nil {
+		fatalf("collect: client cert: %v", err)
+	}
+
+	s := openStore(*cf.driver, *cf.dsn)
+	defer s.Close()
+	sink := collect.NewCaptureSink()
+	cons := cf.buildConsumer(s, sink)
+	coll := collect.New(collect.Config{Processor: cons, Sink: sink, ClientCert: clientCert, Batch: *batch, Logger: log})
+	gw := collect.Gateway{Name: "gateway", URL: *gwURL, ServerCertPin: gwPin}
+
+	if *once {
+		n, err := coll.CollectOnce(context.Background(), gw)
+		if err != nil {
+			fatalf("collect: %v", err)
+		}
+		fmt.Printf("collected %d candidate(s)\n", n)
+		return
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	log.Info("harbor collect running", "gateway", *gwURL, "interval", interval.String())
+	_ = coll.Run(ctx, func() []collect.Gateway { return []collect.Gateway{gw} }, *interval)
+	log.Info("harbor collect stopped")
 }
 
 func enrollPending(args []string) {

@@ -107,8 +107,9 @@ need the cloud, verified once in the minimal Tier-2 harness).
 > implementation plan (per-step `✅` + "Proven:" notes); for *what/why* the design plan.
 > This is a fast summary — re-read those for exact state.
 
-**M0–M6 complete; M7 (Revocation & offboarding) in progress — 7.1 done, next is 7.2.** Schema at
-migration **000014**. M0 feasibility PASSED (2026-06-11: SoftHSM P256 CA signs certs,
+**M0–M6 complete; M7.1 done; mid-milestone DIVERGENCE to ADR 0005 (pull-based gateways) for a
+real-topology live demo — ADR 0005 Phase 1 done, next is its Phase 2/3, then back to 7.2.** Schema
+at migration **000014**. M0 feasibility PASSED (2026-06-11: SoftHSM P256 CA signs certs,
 tunnel forms — design §M0 results; spike under `spike/m0/`, `make m0-*`). The trust
 spine is built end-to-end **on Linux** (Windows/macOS parity deferred to M10):
 - **M1 Pilot** — supervises `nebula`, host keygen, enroll, renew, render, drift-revert.
@@ -168,10 +169,35 @@ offboarding (depends on M9 OIDC — scaffolding until then). Decisions logged th
   convergence. *Tests:* `internal/rollout` `TestConcurrentLanesAndBlocklistFreeze`; integration
   `TestConfigFetchNoReissueCarriesBlocklist`, `TestHeartbeatDrivesBlocklistConvergence`.
 
-**Next: 7.2 — revoke-as-DoS guards.** Reuse `internal/dualcontrol` (register a `revoke.bulk` Kind)
-for bulk-revoke (quorum ≥2) + a DB-backed rate limit (model on `signer` breaker, NOT the in-memory
-`internal/ratelimit`); refuse blocklisting a `control-plane`/lighthouse fingerprint — enforced
-server-side at BOTH propose and commit (resolve groups via `adminapi` `fleetGroupMap` +
+### ADR 0005 — pull-based enrollment gateways (current divergence)
+
+Goal: an off-mesh, initiates-nothing public gateway that Harbor PULLS from over leaf-pinned mTLS —
+so a real public-edge/Core split is safe to stand up for the live demo. Decision (2026-06-14):
+**leaf-pinning, no CA** for the mTLS identities (each side self-signed; the peer pins the leaf by
+SHA-256). Open questions #2–#5 took minimal answers (fixed-interval poll; admin-paste pin
+bootstrap; reuse result-TTL; pinned-cert-sufficient).
+
+- ✅ **Phase 1 — pull transport.** `internal/collect`: `ServerTLS`/`ClientTLS` (leaf-pin),
+  gateway-side `Server` (`claim`/`results`/`ack` over its local `*queue.Durable`), Harbor-side
+  `Collector` (claim → `Consumer.Process` via a `CaptureSink` → ship-back → ack; ship-before-ack).
+  `enrollment.Config.Results` is now a `ResultSink` interface (`*queue.Durable` still satisfies it →
+  co-located mode unchanged). `gateway -collect-addr…` + `gateway collect-keygen`; `harbor collect`
+  (replaces `enroll worker` for the split topology). Proven by unit tests + a real-binary mTLS check.
+- ⏭️ **Phase 2 — the gateway registry (NEXT).** `internal/gatewayreg` mirroring `internal/lighthouse`
+  (address + pinned cert + state, audited) + `harbor gateway add|remove|list`; the collector polls
+  all registered gateways (swap the single `-gateway-url` flag for the registry). Console surface
+  deferred with the other UI work.
+- ⏭️ **Phase 3 — the demo node (Terraform).** `deploy/terraform`: add a standalone OFF-mesh gateway
+  EC2 with its own SG (`:8443` public + the collect port from Harbor's source only; **no** Nebula
+  UDP); harbor STOPS exposing the gateway publicly and instead reaches out to the gateway's collect
+  port; `user_data` bootstraps `cmd/gateway`; register it with `harbor gateway add`. Today's
+  terraform co-locates the gateway on the harbor host (`deploy/terraform/main.tf`) — Phase 3 splits it.
+- Phase 4 (deferred): long-poll, per-gateway rate/depth caps, gateway health in the fleet view.
+
+**After ADR 0005: back to 7.2 — revoke-as-DoS guards.** Reuse `internal/dualcontrol` (register a
+`revoke.bulk` Kind) for bulk-revoke (quorum ≥2) + a DB-backed rate limit (model on `signer` breaker,
+NOT the in-memory `internal/ratelimit`); refuse blocklisting a `control-plane`/lighthouse fingerprint
+— enforced server-side at BOTH propose and commit (resolve groups via `adminapi` `fleetGroupMap` +
 `lighthouse.Registry` + `policy.GroupControlPlane`/`GroupLighthouse`). Add the admin API routes +
 RBAC perm + step-up MFA, and the UI-5 blocklist/propagation-status console view.
 

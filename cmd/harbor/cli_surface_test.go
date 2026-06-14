@@ -76,6 +76,7 @@ var cliSurface = map[string]surfaceEntry{
 	"ipam allocate":      {why: "low-level IP management; normal allocation flows through enrollment, not an operator surface"},
 	"ipam release":       {why: "low-level IP management; break-glass"},
 	"enroll worker":      {why: "the queue-draining daemon — a long-running service, not an operator action"},
+	"collect":            {why: "the ADR-0005 pull collector daemon — a long-running service that drains registered gateways over mTLS, not an operator action"},
 	"audit add":          {why: "manual audit annotation; deliberately NOT an API capability — the console must never inject audit rows (integrity)"},
 	"policy validate":    {why: "local policy-file lint, touches no server state; compilePolicy is the API superset"},
 	"genesis":            {why: "cluster bootstrap — runs offline before any server/CA exists"},

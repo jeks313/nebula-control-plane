@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/base64"
 	"flag"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/jeks313/nebula-control-plane/internal/clilog"
+	"github.com/jeks313/nebula-control-plane/internal/collect"
 	"github.com/jeks313/nebula-control-plane/internal/gateway"
 	"github.com/jeks313/nebula-control-plane/internal/httpserve"
 	"github.com/jeks313/nebula-control-plane/internal/nonce"
@@ -30,6 +32,10 @@ var version = "dev"
 func main() {
 	if len(os.Args) >= 2 && (os.Args[1] == "version" || os.Args[1] == "--version" || os.Args[1] == "-v") {
 		fmt.Printf("gateway %s\n", version)
+		return
+	}
+	if len(os.Args) >= 2 && os.Args[1] == "collect-keygen" {
+		collectKeygen(os.Args[2:])
 		return
 	}
 
@@ -46,6 +52,13 @@ func main() {
 	insecure := fs.Bool("insecure", false, "serve plain HTTP on this PUBLIC endpoint (only when TLS is terminated by a trusted proxy)")
 	logFormat := fs.String("log-format", "auto", "log format: auto (text on a TTY, JSON as a service) | text | json")
 	logLevel := fs.String("log-level", "info", "log level: debug | info | warn | error")
+	// ADR 0005 pull transport: when -collect-addr is set, expose a Harbor-facing
+	// mTLS API so Harbor PULLS from this gateway's local queue (the gateway is then
+	// off-mesh and initiates nothing). Empty = co-located mode (Core drains directly).
+	collectAddr := fs.String("collect-addr", "", "Harbor-facing collect API address (mTLS; e.g. :9443). Empty = co-located mode")
+	collectCert := fs.String("collect-cert", "", "gateway's collect server cert PEM (self-signed; its leaf is pinned in Harbor's gateway registry)")
+	collectKey := fs.String("collect-key", "", "gateway's collect server key PEM")
+	harborClientCert := fs.String("harbor-client-cert", "", "Harbor's pinned client cert PEM — the only client allowed to drain this gateway")
 	_ = fs.Parse(os.Args[1:])
 	log := clilog.Setup(clilog.Options{Format: *logFormat, Level: *logLevel})
 	// The enroll endpoint is public, so demand an explicit transport posture (P8: fail
@@ -106,11 +119,63 @@ func main() {
 		_ = srv.Shutdown(shutCtx)
 	}()
 
+	if *collectAddr != "" {
+		startCollect(ctx, log, q, *collectAddr, *collectCert, *collectKey, *harborClientCert)
+	}
+
 	log.Info("gateway listening", "addr", *addr, "scheme", httpserve.Scheme(*tlsCert, *tlsKey), "version", version, "access", "public/credential-less")
 	if err := httpserve.Serve(srv, *tlsCert, *tlsKey); err != nil && err != http.ErrServerClosed {
 		fatalf("%v", err)
 	}
 	log.Info("gateway stopped")
+}
+
+// startCollect launches the Harbor-facing mTLS collect API (ADR 0005): Harbor
+// pulls candidates from this gateway's LOCAL durable queue and pushes results
+// back. It requires the durable queue (claim/ack/put-result) and a leaf-pinned
+// mTLS pair (the gateway's own server cert + Harbor's pinned client cert).
+func startCollect(ctx context.Context, log *slog.Logger, q queue.Queue, addr, certPath, keyPath, harborCertPath string) {
+	dq, ok := q.(*queue.Durable)
+	if !ok {
+		fatalf("-collect-addr requires the durable queue (-queue-dsn); the in-memory dev queue cannot be collected")
+	}
+	if certPath == "" || keyPath == "" || harborCertPath == "" {
+		fatalf("-collect-addr requires -collect-cert, -collect-key and -harbor-client-cert")
+	}
+	gwCert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		fatalf("collect server cert: %v", err)
+	}
+	harborPEM, err := os.ReadFile(harborCertPath)
+	if err != nil {
+		fatalf("read -harbor-client-cert: %v", err)
+	}
+	harborPin, err := collect.PinFromCertPEM(harborPEM)
+	if err != nil {
+		fatalf("-harbor-client-cert: %v", err)
+	}
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           collect.NewServer(dq, log).Handler(),
+		TLSConfig:         collect.ServerTLS(gwCert, harborPin),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    8 << 10,
+	}
+	go func() {
+		<-ctx.Done()
+		sc, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(sc)
+	}()
+	go func() {
+		log.Info("gateway collect API listening", "addr", addr, "access", "Harbor-only (mTLS, leaf-pinned)")
+		if err := srv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+			log.Error("gateway collect API failed", "err", err)
+		}
+	}()
 }
 
 // loadKeys reads the primary (and optional previous) nonce key. For dev
@@ -177,6 +242,34 @@ func trimSpace(s string) string {
 		s = s[:len(s)-1]
 	}
 	return s
+}
+
+// collectKeygen mints a self-signed leaf for the ADR-0005 collect mTLS (usable as
+// either the gateway's server identity or Harbor's client identity — both EKUs
+// are set) and prints its SHA-256 leaf pin, which the peer pins (gateway registry
+// / -harbor-client-cert). No CA: trust is by pinning the leaf.
+func collectKeygen(args []string) {
+	fs := flag.NewFlagSet("collect-keygen", flag.ExitOnError)
+	cn := fs.String("cn", "", "common name (e.g. gateway-1 or harbor-collector)")
+	certOut := fs.String("cert-out", "", "write the cert PEM here")
+	keyOut := fs.String("key-out", "", "write the key PEM here (0600)")
+	days := fs.Int("days", 825, "validity in days")
+	_ = fs.Parse(args)
+	if *cn == "" || *certOut == "" || *keyOut == "" {
+		fatalf("collect-keygen: -cn, -cert-out and -key-out are required")
+	}
+	certPEM, keyPEM, err := collect.GenerateSelfSigned(*cn, time.Duration(*days)*24*time.Hour)
+	if err != nil {
+		fatalf("collect-keygen: %v", err)
+	}
+	if err := os.WriteFile(*keyOut, keyPEM, 0o600); err != nil {
+		fatalf("collect-keygen: write key: %v", err)
+	}
+	if err := os.WriteFile(*certOut, certPEM, 0o644); err != nil { //nolint:gosec // a public cert is world-readable by design
+		fatalf("collect-keygen: write cert: %v", err)
+	}
+	pin, _ := collect.PinFromCertPEM(certPEM)
+	fmt.Printf("wrote %s (cert) + %s (key)\nleaf pin (sha256): %x\n", *certOut, *keyOut, pin)
 }
 
 func fatalf(format string, a ...any) {
