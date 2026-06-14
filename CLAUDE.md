@@ -203,15 +203,26 @@ bootstrap; reuse result-TTL; pinned-cert-sufficient).
   mock-IdP), console UI built with `-tags ui` when `npm` is present. `local-up.sh` / `local-down.sh`.
   GitHub-gated joins = mint a join key + approve the device in the GitHub-authed console. Console
   bound to 127.0.0.1 (default-roles admin, safe local-only). Verified end-to-end (enroll + SPA console).
-- **`deploy/terraform/` + `deploy/scripts/bootstrap-genesis.sh`** — multi-host AWS: `terraform apply`
-  then `SSH_KEY=~/.ssh/absolute bash ../scripts/bootstrap-genesis.sh` — dedicated VPC, tiered subnets,
-  lighthouse + harbor (mesh) + the OFF-MESH gateway (Harbor pulls it) + a cloud client; prints the
-  enroll commands + config-signing pin. (Not applied to live AWS from here.)
-  - **Fargate gateway (spike):** `gateway_runtime = "fargate"` swaps the gateway EC2 for an ECS
-    Fargate service + NLB (`gateway_fargate.tf`, `deploy/fargate/` image+scripts) — feasible because
-    the gateway runs no `nebula`/TUN. Same ADR-0005 posture (enroll public, collect Harbor-only) at
-    the NLB SG; config from Secrets Manager. `terraform validate` clean both runtimes; not live-applied.
-    The lighthouse + harbor stay on EC2 (they run `nebula` → need TUN → no Fargate/Lambda).
+- **`deploy/terraform/` + `deploy/scripts/bootstrap-genesis.sh`** — multi-host AWS. Default topology
+  is now **3 EC2 (lighthouse + harbor + cloud client) + a serverless Fargate gateway**: `terraform apply`
+  then `aws-vault exec nebula -- env SSH_KEY=~/.ssh/absolute bash ../scripts/bootstrap-genesis.sh`
+  (the default needs AWS creds at bootstrap — it builds/pushes the gateway image + populates its secret).
+  Dedicated VPC, tiered subnets; prints the enroll commands + config-signing pin. (Not applied to live AWS.)
+  - **Runtime toggles** (what can avoid a VM = what needs no TUN):
+    - **`gateway_runtime = "fargate"` (DEFAULT) | `"ec2"`** — the off-mesh gateway runs no `nebula`, so
+      it's serverless: ECS service + NLB + Secrets Manager (`gateway_fargate.tf`, `deploy/fargate/`),
+      ADR-0005 posture (enroll public, collect Harbor-only) enforced at the NLB SG. The bootstrap fully
+      wires this (build-push.sh → secret → `aws ecs update-service`). `"ec2"` = the original VM path.
+    - **`lighthouse_runtime = "ec2"` (DEFAULT) | `"fargate"` (SPIKE)** — a lighthouse does only
+      control-plane work, so it can run `nebula` with **`tun.disabled`** (no TUN/privilege) as a Fargate
+      container behind a **UDP NLB + pinned EIP** (`lighthouse_fargate.tf`, `nebula.Dockerfile`). Still a
+      Nebula protocol member (cert + handshake) — VM-free, NOT off-mesh. ⚠ KEY UNKNOWN: the UDP NLB must
+      preserve the client address (`preserve_client_ip=true`) or hole-punching breaks — unverified live.
+      Health check via nebula's prometheus TCP port (UDP TGs can't UDP-health-check). Bootstrap aborts on
+      this (manual procedure in `deploy/fargate/README.md`); host key is generated off-box + injected.
+  - **harbor (Core) is always EC2** — it routes core-api over the overlay → needs a real TUN. Shared
+    Fargate scaffolding (locals + ECS assume-role) is in `fargate.tf`. `terraform validate` clean in all
+    runtime combinations; images build; `bash -n` clean; **not live-applied** (no AWS/docker in dev env).
 
 Note: the durable queue (`internal/queue`) is now safe for concurrent first-open by several processes
 (the co-located gateway+worker+admin) — AutoMigrate tolerates the benign create race.

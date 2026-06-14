@@ -7,16 +7,14 @@
 # Manager. Everything here is created ONLY when gateway_runtime = "fargate".
 #
 # NOT live-applied (no AWS creds / no docker here): `terraform validate` clean. To
-# run it: deploy/fargate/build-push.sh (image -> ECR), populate the config secret
-# (the bootstrap does this post-genesis), then force a new ECS deployment.
-
-locals {
-  fargate       = var.gateway_runtime == "fargate" ? 1 : 0
-  gateway_image = var.gateway_image != "" ? var.gateway_image : "${try(aws_ecr_repository.gateway[0].repository_url, "")}:latest"
-}
+# run it: deploy/fargate/build-push.sh gateway (image -> ECR), populate the config
+# secret (the bootstrap does this post-genesis), then force a new ECS deployment.
+#
+# Shared locals (local.gw_fargate, local.gateway_image) + the ECS assume-role policy
+# live in fargate.tf.
 
 resource "aws_ecr_repository" "gateway" {
-  count                = local.fargate
+  count                = local.gw_fargate
   name                 = "${var.name_prefix}-gateway"
   image_tag_mutability = "MUTABLE"
   force_delete         = true
@@ -26,7 +24,7 @@ resource "aws_ecr_repository" "gateway" {
 }
 
 resource "aws_cloudwatch_log_group" "gateway" {
-  count             = local.fargate
+  count             = local.gw_fargate
   name              = "/${var.name_prefix}/gateway"
   retention_in_days = 14
 }
@@ -35,13 +33,13 @@ resource "aws_cloudwatch_log_group" "gateway" {
 # empty here and populated out-of-band by the genesis bootstrap. ECS injects each
 # JSON field as an env var the container's entrypoint materializes to a file.
 resource "aws_secretsmanager_secret" "gateway" {
-  count                   = local.fargate
+  count                   = local.gw_fargate
   name                    = "${var.name_prefix}-gateway-config"
   recovery_window_in_days = 0 # lab: allow immediate delete/recreate
 }
 
 resource "aws_secretsmanager_secret_version" "gateway" {
-  count     = local.fargate
+  count     = local.gw_fargate
   secret_id = aws_secretsmanager_secret.gateway[0].id
   secret_string = jsonencode({
     hmac_key_b64      = "" # base64url nonce key (shared with Harbor)
@@ -56,31 +54,21 @@ resource "aws_secretsmanager_secret_version" "gateway" {
 }
 
 # ── IAM: task EXECUTION role (pull ECR image, write logs, read the config secret) ─
-data "aws_iam_policy_document" "ecs_assume" {
-  count = local.fargate
-  statement {
-    actions = ["sts:AssumeRole"]
-    principals {
-      type        = "Service"
-      identifiers = ["ecs-tasks.amazonaws.com"]
-    }
-  }
-}
-
+# (the assume-role policy is the shared data.aws_iam_policy_document.ecs_assume in fargate.tf)
 resource "aws_iam_role" "gateway_exec" {
-  count              = local.fargate
+  count              = local.gw_fargate
   name_prefix        = "${var.name_prefix}-gw-exec-"
   assume_role_policy = data.aws_iam_policy_document.ecs_assume[0].json
 }
 
 resource "aws_iam_role_policy_attachment" "gateway_exec" {
-  count      = local.fargate
+  count      = local.gw_fargate
   role       = aws_iam_role.gateway_exec[0].name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
 resource "aws_iam_role_policy" "gateway_secret" {
-  count = local.fargate
+  count = local.gw_fargate
   name  = "read-gateway-config"
   role  = aws_iam_role.gateway_exec[0].id
   policy = jsonencode({
@@ -95,7 +83,7 @@ resource "aws_iam_role_policy" "gateway_secret" {
 
 # ── Security groups: the NLB enforces public-vs-Harbor; tasks only accept the NLB ─
 resource "aws_security_group" "gateway_nlb" {
-  count       = local.fargate
+  count       = local.gw_fargate
   name_prefix = "${var.name_prefix}-gw-nlb-"
   description = "Fargate gateway NLB: public enroll + Harbor-only collect (ADR 0005)."
   vpc_id      = aws_vpc.main.id
@@ -129,7 +117,7 @@ resource "aws_security_group" "gateway_nlb" {
 }
 
 resource "aws_security_group" "gateway_task" {
-  count       = local.fargate
+  count       = local.gw_fargate
   name_prefix = "${var.name_prefix}-gw-task-"
   description = "Fargate gateway task: accepts only the NLB; egress only for image/secret/DNS."
   vpc_id      = aws_vpc.main.id
@@ -168,7 +156,7 @@ resource "aws_security_group" "gateway_task" {
 
 # ── Network Load Balancer (stable address; Fargate task IPs are ephemeral) ──────
 resource "aws_lb" "gateway" {
-  count              = local.fargate
+  count              = local.gw_fargate
   name_prefix        = "ncpgw-"
   load_balancer_type = "network"
   internal           = false
@@ -177,7 +165,7 @@ resource "aws_lb" "gateway" {
 }
 
 resource "aws_lb_target_group" "enroll" {
-  count              = local.fargate
+  count              = local.gw_fargate
   name_prefix        = "ncpen-"
   port               = var.gateway_port
   protocol           = "TCP"
@@ -187,7 +175,7 @@ resource "aws_lb_target_group" "enroll" {
 }
 
 resource "aws_lb_target_group" "collect" {
-  count              = local.fargate
+  count              = local.gw_fargate
   name_prefix        = "ncpco-"
   port               = var.collect_port
   protocol           = "TCP"
@@ -197,7 +185,7 @@ resource "aws_lb_target_group" "collect" {
 }
 
 resource "aws_lb_listener" "enroll" {
-  count             = local.fargate
+  count             = local.gw_fargate
   load_balancer_arn = aws_lb.gateway[0].arn
   port              = var.gateway_port
   protocol          = "TCP"
@@ -208,7 +196,7 @@ resource "aws_lb_listener" "enroll" {
 }
 
 resource "aws_lb_listener" "collect" {
-  count             = local.fargate
+  count             = local.gw_fargate
   load_balancer_arn = aws_lb.gateway[0].arn
   port              = var.collect_port
   protocol          = "TCP"
@@ -220,12 +208,12 @@ resource "aws_lb_listener" "collect" {
 
 # ── ECS Fargate cluster / task / service ────────────────────────────────────────
 resource "aws_ecs_cluster" "gateway" {
-  count = local.fargate
+  count = local.gw_fargate
   name  = "${var.name_prefix}-gateway"
 }
 
 resource "aws_ecs_task_definition" "gateway" {
-  count                    = local.fargate
+  count                    = local.gw_fargate
   family                   = "${var.name_prefix}-gateway"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
@@ -265,7 +253,7 @@ resource "aws_ecs_task_definition" "gateway" {
 }
 
 resource "aws_ecs_service" "gateway" {
-  count           = local.fargate
+  count           = local.gw_fargate
   name            = "${var.name_prefix}-gateway"
   cluster         = aws_ecs_cluster.gateway[0].id
   task_definition = aws_ecs_task_definition.gateway[0].arn

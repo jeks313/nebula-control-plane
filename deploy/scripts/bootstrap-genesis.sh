@@ -12,11 +12,14 @@
 #   4. lighthouse: install ca + lighthouse cert; start nebula
 #   5. harbor:     install ca + control-plane cert; start nebula (Harbor joins the mesh)
 #   6. harbor:     publish a cloud-trust config (this AWS account -> groups, auto-issue)
-#   7. gateway:    the OFF-MESH enrollment gateway (ADR 0005) on its OWN node — public
-#                  enroll + a Harbor-only mTLS collect port over a local queue; Harbor
-#                  registers it (`harbor gateway add`) + runs `harbor collect` to PULL
-#                  + issue + push results back (no shared queue, no mesh identity on the
-#                  gateway). Plus the imac join key (manual approval).
+#   7. gateway:    the OFF-MESH enrollment gateway (ADR 0005) — public enroll + a
+#                  Harbor-only mTLS collect port over a local queue; Harbor registers it
+#                  (`harbor gateway add`) + runs `harbor collect` to PULL + issue + push
+#                  results back (no shared queue, no mesh identity on the gateway). Runs
+#                  as a serverless FARGATE container by default (gateway_runtime=fargate:
+#                  build/push the image + populate the config secret + force the ECS
+#                  deploy), or on an EC2 node (gateway_runtime=ec2). Plus the imac join
+#                  key (manual approval).
 #   8. harbor:     core-api (renew/heartbeat, -host-cert verified) + admin console
 #                  (mock-IdP), both bound to Harbor's OVERLAY IP (mesh-only)
 #
@@ -24,7 +27,8 @@
 # the exact enroll commands: the CLOUD client joins KEYLESS via aws-sigv4 attestation
 # (its IAM role); the off-cloud iMac joins via a join key with manual approval.
 #
-# Requires locally: terraform, jq, go, ssh, scp, openssl.
+# Requires locally: terraform, jq, go, ssh, scp, openssl  (+ aws & docker, and AWS creds
+# in the env — e.g. `aws-vault exec ... -- bash ...` — when gateway_runtime=fargate).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -54,15 +58,37 @@ rcp() { scp "${SSH_OPTS[@]}" "$@"; }
 
 echo "==> reading terraform outputs"
 OUT="$(terraform -chdir="$TFDIR" output -json)"
-LH_IP="$(jq -r '.public_ips.value.lighthouse' <<<"$OUT")"
-HB_IP="$(jq -r '.public_ips.value.harbor' <<<"$OUT")"
-GW_IP="$(jq -r '.public_ips.value.gateway' <<<"$OUT")"      # off-mesh enrollment gateway (ADR 0005)
-CL_IP="$(jq -r '.public_ips.value.client' <<<"$OUT")"
-LH_ADDR="$(jq -r '.lighthouse_addr.value' <<<"$OUT")"
-GW_URL="$(jq -r '.gateway_url.value' <<<"$OUT")"            # public enroll URL (the gateway node)
-GW_COLLECT="$(jq -r '.gateway_collect_addr.value' <<<"$OUT")" # gateway's Harbor-facing collect URL (intra-VPC)
-echo "    lighthouse=$LH_IP  harbor=$HB_IP  gateway=$GW_IP  client=$CL_IP"
+val() { jq -r "$1 // \"\"" <<<"$OUT"; }
+LH_IP="$(val '.public_ips.value.lighthouse')"
+HB_IP="$(val '.public_ips.value.harbor')"
+GW_IP="$(val '.public_ips.value.gateway')"          # off-mesh gateway EC2 node (empty when gateway_runtime=fargate)
+CL_IP="$(val '.public_ips.value.client')"
+LH_ADDR="$(val '.lighthouse_addr.value')"
+GW_URL="$(val '.gateway_url.value')"                # public enroll URL (node IP or NLB DNS)
+GW_COLLECT="$(val '.gateway_collect_addr.value')"   # gateway's Harbor-facing collect URL
+GATEWAY_RUNTIME="$(val '.gateway_runtime.value')"; GATEWAY_RUNTIME="${GATEWAY_RUNTIME:-ec2}"
+LIGHTHOUSE_RUNTIME="$(val '.lighthouse_runtime.value')"; LIGHTHOUSE_RUNTIME="${LIGHTHOUSE_RUNTIME:-ec2}"
+NAME_PREFIX="$(val '.name_prefix.value')"; NAME_PREFIX="${NAME_PREFIX:-ncp}"
+TF_REGION="$(val '.region.value')"
+echo "    lighthouse=$LH_IP  harbor=$HB_IP  gateway=${GW_IP:-<fargate>}  client=$CL_IP"
 echo "    lighthouse underlay=$LH_ADDR  enroll=$GW_URL  collect=$GW_COLLECT  harbor-overlay=$HARBOR_OVERLAY"
+echo "    runtimes: gateway=$GATEWAY_RUNTIME  lighthouse=$LIGHTHOUSE_RUNTIME"
+
+# The EC2 lighthouse path (default) is what this orchestrator wires. The Fargate
+# lighthouse is a spike whose genesis steps differ (host key generated off-box +
+# injected via Secrets Manager) and aren't automated here — see deploy/fargate/README.md.
+if [[ "$LIGHTHOUSE_RUNTIME" == "fargate" ]]; then
+  echo "ERROR: lighthouse_runtime=fargate is not wired into this bootstrap yet (spike)." >&2
+  echo "       Use lighthouse_runtime=ec2 here, or follow the lighthouse section of deploy/fargate/README.md." >&2
+  exit 2
+fi
+
+# The Fargate gateway path needs the AWS CLI + docker locally (build/push the image,
+# populate the config secret, force the ECS deploy). Run the bootstrap under the same
+# AWS creds you used for terraform (e.g. `aws-vault exec nebula -- bash ...`).
+if [[ "$GATEWAY_RUNTIME" == "fargate" ]]; then
+  for t in aws docker; do command -v "$t" >/dev/null || { echo "missing tool (gateway_runtime=fargate): $t" >&2; exit 1; }; done
+fi
 
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 LH="$LH_OVERLAY=$LH_ADDR"
@@ -73,7 +99,11 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
   ( cd "$ROOT" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "$WORK/harbor" ./cmd/harbor \
     && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "$WORK/pilot" ./cmd/pilot \
     && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "$WORK/gateway" ./cmd/gateway )
-  for ip in "$LH_IP" "$HB_IP" "$GW_IP" "$CL_IP"; do
+  # lighthouse/harbor/client are always EC2 here; the gateway is an EC2 node only when
+  # gateway_runtime=ec2 (under fargate it's a container — no VM to scp to).
+  NODE_IPS=("$LH_IP" "$HB_IP" "$CL_IP")
+  [[ "$GATEWAY_RUNTIME" == "ec2" && -n "$GW_IP" ]] && NODE_IPS+=("$GW_IP")
+  for ip in "${NODE_IPS[@]}"; do
     echo "    -> $ip"
     rcp "$WORK/harbor" "$WORK/pilot" "$WORK/gateway" "$SSH_USER@$ip:/tmp/"
     rsh "$ip" 'sudo install -m0755 /tmp/harbor /tmp/pilot /tmp/gateway /usr/local/bin/ && rm -f /tmp/harbor /tmp/pilot /tmp/gateway'
@@ -186,24 +216,57 @@ rsh "$HB_IP" "set -e
 rcp "$SSH_USER@$HB_IP:ncp/harbor-collect.crt" "$WORK/harbor-collect.crt"  # Harbor's pinned client cert
 rcp "$SSH_USER@$HB_IP:ncp/hmac.b64"           "$WORK/hmac.b64"            # shared nonce key (gateway mints, Core verifies)
 
-echo "==> [gateway] mint server identity + start the off-mesh gateway (enroll :$GW_PORT, collect :$COLLECT_PORT)"
-rcp "$WORK/harbor-collect.crt" "$SSH_USER@$GW_IP:/tmp/harbor-collect.crt"
-rcp "$WORK/hmac.b64"           "$SSH_USER@$GW_IP:/tmp/hmac.b64"
-rsh "$GW_IP" "set -e
-  sudo install -d -o $SSH_USER -g $SSH_USER -m0750 /opt/ncp-gw
-  cd /opt/ncp-gw; umask 077
-  [ -f gw-collect.key ] || gateway collect-keygen -cn gateway-1 -cert-out gw-collect.crt -key-out gw-collect.key >/dev/null
-  [ -f qkey.b64 ] || openssl rand 32 | basenc --base64url | tr -d '=' > qkey.b64
-  install -m0644 /tmp/harbor-collect.crt harbor-collect.crt
-  install -m0644 /tmp/hmac.b64 hmac.b64; rm -f /tmp/harbor-collect.crt /tmp/hmac.b64
-  sudo systemctl reset-failed ncp-gateway 2>/dev/null || true
-  sudo systemd-run --uid=$SSH_USER --gid=$SSH_USER --unit ncp-gateway --collect --working-directory=/opt/ncp-gw /usr/local/bin/gateway \
-    -insecure -addr 0.0.0.0:$GW_PORT -hmac-key /opt/ncp-gw/hmac.b64 \
-    -queue-dsn /opt/ncp-gw/queue.db -queue-key /opt/ncp-gw/qkey.b64 \
-    -collect-addr 0.0.0.0:$COLLECT_PORT -collect-cert /opt/ncp-gw/gw-collect.crt \
-    -collect-key /opt/ncp-gw/gw-collect.key -harbor-client-cert /opt/ncp-gw/harbor-collect.crt >/dev/null
-  cat gw-collect.crt" > "$WORK/gw-collect.crt"
-echo "    gateway up (off-mesh; public enroll + Harbor-only collect)"
+if [[ "$GATEWAY_RUNTIME" == "ec2" ]]; then
+  echo "==> [gateway/ec2] mint server identity + start the off-mesh gateway (enroll :$GW_PORT, collect :$COLLECT_PORT)"
+  rcp "$WORK/harbor-collect.crt" "$SSH_USER@$GW_IP:/tmp/harbor-collect.crt"
+  rcp "$WORK/hmac.b64"           "$SSH_USER@$GW_IP:/tmp/hmac.b64"
+  rsh "$GW_IP" "set -e
+    sudo install -d -o $SSH_USER -g $SSH_USER -m0750 /opt/ncp-gw
+    cd /opt/ncp-gw; umask 077
+    [ -f gw-collect.key ] || gateway collect-keygen -cn gateway-1 -cert-out gw-collect.crt -key-out gw-collect.key >/dev/null
+    [ -f qkey.b64 ] || openssl rand 32 | basenc --base64url | tr -d '=' > qkey.b64
+    install -m0644 /tmp/harbor-collect.crt harbor-collect.crt
+    install -m0644 /tmp/hmac.b64 hmac.b64; rm -f /tmp/harbor-collect.crt /tmp/hmac.b64
+    sudo systemctl reset-failed ncp-gateway 2>/dev/null || true
+    sudo systemd-run --uid=$SSH_USER --gid=$SSH_USER --unit ncp-gateway --collect --working-directory=/opt/ncp-gw /usr/local/bin/gateway \
+      -insecure -addr 0.0.0.0:$GW_PORT -hmac-key /opt/ncp-gw/hmac.b64 \
+      -queue-dsn /opt/ncp-gw/queue.db -queue-key /opt/ncp-gw/qkey.b64 \
+      -collect-addr 0.0.0.0:$COLLECT_PORT -collect-cert /opt/ncp-gw/gw-collect.crt \
+      -collect-key /opt/ncp-gw/gw-collect.key -harbor-client-cert /opt/ncp-gw/harbor-collect.crt >/dev/null
+    cat gw-collect.crt" > "$WORK/gw-collect.crt"
+  echo "    gateway up (off-mesh EC2 node; public enroll + Harbor-only collect)"
+else
+  # Fargate: no node to start. Mint the gateway's server identity + queue key (on
+  # harbor — it has the gateway binary), build/push the image, populate the config
+  # secret with the genesis material, and roll the ECS service onto it.
+  echo "==> [gateway/fargate] mint server identity + queue key (on harbor)"
+  rsh "$HB_IP" "set -e
+    cd ~/ncp; umask 077
+    [ -f gw-collect.key ] || gateway collect-keygen -cn gateway-1 -cert-out gw-collect.crt -key-out gw-collect.key >/dev/null
+    [ -f gw-qkey.b64 ] || openssl rand 32 | basenc --base64url | tr -d '=' > gw-qkey.b64
+    echo ok"
+  rcp "$SSH_USER@$HB_IP:ncp/gw-collect.crt" "$WORK/gw-collect.crt"
+  rcp "$SSH_USER@$HB_IP:ncp/gw-collect.key" "$WORK/gw-collect.key"
+  rcp "$SSH_USER@$HB_IP:ncp/gw-qkey.b64"    "$WORK/gw-qkey.b64"
+
+  echo "==> [gateway/fargate] build + push the gateway image to ECR"
+  bash "$ROOT/deploy/fargate/build-push.sh" gateway
+
+  echo "==> [gateway/fargate] populate the config secret ${NAME_PREFIX}-gateway-config + force the ECS deploy"
+  SECRET_JSON="$(jq -n \
+    --rawfile hmac "$WORK/hmac.b64" \
+    --rawfile qkey "$WORK/gw-qkey.b64" \
+    --rawfile cert "$WORK/gw-collect.crt" \
+    --rawfile key  "$WORK/gw-collect.key" \
+    --rawfile hcli "$WORK/harbor-collect.crt" \
+    '{hmac_key_b64:($hmac|rtrimstr("\n")), queue_key_b64:($qkey|rtrimstr("\n")),
+      collect_cert_pem:$cert, collect_key_pem:$key, harbor_client_pem:$hcli}')"
+  aws secretsmanager put-secret-value --region "$TF_REGION" \
+    --secret-id "${NAME_PREFIX}-gateway-config" --secret-string "$SECRET_JSON" >/dev/null
+  aws ecs update-service --region "$TF_REGION" \
+    --cluster "${NAME_PREFIX}-gateway" --service "${NAME_PREFIX}-gateway" --force-new-deployment >/dev/null
+  echo "    gateway image pushed, secret populated, ECS deployment forced (off-mesh Fargate; NLB enroll + Harbor-only collect)"
+fi
 
 echo "==> [harbor] register the gateway + start the pull collector + imac join key"
 rcp "$WORK/gw-collect.crt" "$SSH_USER@$HB_IP:/tmp/gw-collect.crt"

@@ -84,9 +84,9 @@ variable "collect_port" {
 }
 
 variable "gateway_runtime" {
-  description = "How to host the off-mesh gateway: 'ec2' (a VM, the default) or 'fargate' (a serverless container — no VM, since the gateway runs no nebula/TUN). Fargate needs gateway_image pushed (deploy/fargate/build-push.sh) and the config secret populated."
+  description = "How to host the off-mesh gateway: 'fargate' (a serverless container — no VM, the DEFAULT, since the gateway runs no nebula/TUN) or 'ec2' (a VM). Fargate needs gateway_image pushed (deploy/fargate/build-push.sh gateway) and the config secret populated — the genesis bootstrap does both."
   type        = string
-  default     = "ec2"
+  default     = "fargate"
 
   validation {
     condition     = contains(["ec2", "fargate"], var.gateway_runtime)
@@ -95,7 +95,7 @@ variable "gateway_runtime" {
 }
 
 variable "gateway_image" {
-  description = "Container image URI for the Fargate gateway (gateway_runtime=fargate). Empty defaults to the ECR repo created here, tag 'latest' — push it with deploy/fargate/build-push.sh."
+  description = "Container image URI for the Fargate gateway (gateway_runtime=fargate). Empty defaults to the ECR repo created here, tag 'latest' — push it with deploy/fargate/build-push.sh gateway."
   type        = string
   default     = ""
 }
@@ -110,6 +110,49 @@ variable "gateway_fargate_memory" {
   description = "Fargate task memory (MiB) for the gateway."
   type        = number
   default     = 512
+}
+
+# ── Lighthouse runtime (SPIKE) ────────────────────────────────────────────────
+# A dedicated lighthouse does only control-plane work (discovery + hole-punch
+# coordination over UDP) and passes no data-plane traffic to/from itself, so it can
+# run nebula with `tun.disabled` — no TUN, no CAP_NET_ADMIN, no privilege — which
+# makes it Fargate-eligible (unlike Core, which routes core-api over the overlay and
+# needs a real TUN). Default 'ec2' because the Fargate path is an unproven spike: it
+# needs a UDP NLB that PRESERVES the client address (the lighthouse learns each
+# host's post-NAT underlay address from the packet source) — see deploy/fargate/README.
+variable "lighthouse_runtime" {
+  description = "How to host the lighthouse: 'ec2' (a VM, the default) or 'fargate' (a serverless tun.disabled nebula container behind a UDP NLB — SPIKE, see deploy/fargate/README.md)."
+  type        = string
+  default     = "ec2"
+
+  validation {
+    condition     = contains(["ec2", "fargate"], var.lighthouse_runtime)
+    error_message = "lighthouse_runtime must be \"ec2\" or \"fargate\"."
+  }
+}
+
+variable "lighthouse_image" {
+  description = "Container image URI for the Fargate lighthouse (lighthouse_runtime=fargate). Empty defaults to the ECR repo created here, tag 'latest' — push it with deploy/fargate/build-push.sh lighthouse."
+  type        = string
+  default     = ""
+}
+
+variable "lighthouse_fargate_cpu" {
+  description = "Fargate task CPU units for the lighthouse (256 = 0.25 vCPU)."
+  type        = number
+  default     = 256
+}
+
+variable "lighthouse_fargate_memory" {
+  description = "Fargate task memory (MiB) for the lighthouse."
+  type        = number
+  default     = 512
+}
+
+variable "lighthouse_stats_port" {
+  description = "TCP port the Fargate lighthouse exposes nebula's prometheus stats on, used ONLY as the UDP target group's health check (NLB UDP target groups require a TCP/HTTP health check). Internal — reachable from the NLB only, never public."
+  type        = number
+  default     = 8080
 }
 
 variable "gateway_cidr" {
