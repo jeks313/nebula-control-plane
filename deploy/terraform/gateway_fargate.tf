@@ -135,7 +135,7 @@ resource "aws_security_group" "gateway_internal_nlb" {
     cidr_blocks = [var.vpc_cidr]
   }
   ingress {
-    description     = "Collect (mTLS) — Harbor's security group ONLY (the protected side pulls)"
+    description     = "Collect (mTLS) - Harbor security group ONLY (the protected side pulls)"
     from_port       = var.collect_port
     to_port         = var.collect_port
     protocol        = "tcp"
