@@ -226,9 +226,15 @@ Lifecycle siblings: `pilot status` (installed? enrolled? healthy? per mesh), `pi
   exercise additive `pilot install` for a 2nd mesh end-to-end, the best-effort disjoint-CIDR
   warning, and (with Phase 2) one org root federating N meshes.
 - **Phase 4 — cross-platform.** ✅ **launchd (macOS)** done — `service_darwin.go` renders a
-  per-mesh LaunchDaemon plist + drives `launchctl bootstrap/bootout/kickstart`
-  (cross-compile-verified `GOOS=darwin`; not yet run on a Mac). Remaining: **Windows SCM**
-  (still the `service_other.go` stub) and sign/notarize the universal binary per platform.
+  per-mesh LaunchDaemon plist + drives `launchctl bootstrap/bootout/kickstart`.
+  **Validated on real macOS 26 (arm64):** the darwin/arm64 binary runs, `clock-check`
+  queries NTP, the rendered plist passes `plutil -lint`, and a full
+  `install → status (running) → uninstall → -purge` cycle exercises the launchctl
+  lifecycle with `pilot supervise` running as the launchd daemon. `install -dry-run`
+  previews the resolved paths + service definition (no enroll/write/root). Remaining:
+  **Windows SCM** (still the `service_other.go` stub) and sign/notarize the universal
+  binary per platform (the macOS daemon ran unsigned from `/usr/local/bin` under sudo;
+  notarization is for distributed installs, not local dev).
 
 ## Consequences
 

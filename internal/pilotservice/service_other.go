@@ -13,6 +13,9 @@ const StateRoot = "/var/lib/pilot"
 func ServiceLabel(mesh string) string { return "pilot-" + mesh }
 func LogHint(mesh string) string      { return "(no service manager on this platform)" }
 
+// Render previews the (unsupported) service definition on this platform.
+func Render(s Spec) string { return "(no service manager on this platform in this build)" }
+
 // Install is unsupported on this platform in this build.
 func Install(s Spec) error { return ErrUnsupported }
 

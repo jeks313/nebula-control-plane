@@ -7,8 +7,10 @@
 // (the utun device + routes need it); the daemon is keep-alive on non-clean exit
 // only, since pilot supervises nebula internally + self-updates in place (ADR 0003).
 //
-// NOTE: written to launchd conventions but NOT exercised on a Mac from the Linux
-// dev env — cross-compiled-checked only (GOOS=darwin). Expect first-run iteration.
+// Validated on real macOS 26 (arm64): install/status/uninstall/-purge exercise the
+// full launchctl bootstrap→enable→kickstart→bootout cycle, the rendered plist passes
+// `plutil -lint`, and `pilot supervise` runs as the launchd daemon (KeepAlive restarts
+// it on non-clean exit). See ADR 0008 Phase 4.
 package pilotservice
 
 import (
@@ -78,6 +80,9 @@ func xmlEscape(s string) string {
 	r := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
 	return r.Replace(s)
 }
+
+// Render returns the LaunchDaemon plist this Spec would install (for `install -dry-run`).
+func Render(s Spec) string { return renderPlist(s) }
 
 // Install writes the per-mesh LaunchDaemon plist and bootstraps it into the system
 // domain (RunAtLoad starts it). Idempotent: any prior instance is booted out first.
