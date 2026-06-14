@@ -53,8 +53,14 @@ type Bundle struct {
 	Firewall        *Firewall       `json:"firewall,omitempty"`
 	Config          json.RawMessage `json:"config,omitempty"`
 	Lighthouses     []Lighthouse    `json:"lighthouses"`
-	NotAfter        string          `json:"not_after"`
-	NextRenewAfter  string          `json:"next_renew_after,omitempty"`
+	// Blocklist is the fleet's revoked cert fingerprints (hex sha256), rendered
+	// into nebula's pki.blocklist (M7.1). Enforced PEER-SIDE: every host refuses to
+	// handshake with a blocklisted fingerprint (§4.7). It rides inside the signed
+	// payload, so tampering breaks bundle verification. Sourced from the active
+	// revocations at bundle-build time; ordered for deterministic output.
+	Blocklist      []string `json:"blocklist,omitempty"`
+	NotAfter       string   `json:"not_after"`
+	NextRenewAfter string   `json:"next_renew_after,omitempty"`
 }
 
 // RenderNebulaConfig renders a bundle into a nebula config.yml: lighthouses +
@@ -72,6 +78,7 @@ func RenderNebulaConfig(b Bundle, caPath, certPath, keyPath string) ([]byte, err
 		v.Inbound = b.Firewall.Inbound
 		v.Outbound = b.Firewall.Outbound
 	}
+	v.Blocklist = b.Blocklist
 	return nebulaconfig.Render(v)
 }
 

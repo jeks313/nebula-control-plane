@@ -1,6 +1,7 @@
 package bundle
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/jeks313/nebula-control-plane/internal/jws"
@@ -72,6 +73,67 @@ func TestSignedFirewallTamperRefused(t *testing.T) {
 	tampered[len(tampered)/2] ^= 0x01
 	if _, err := Verify(tampered, pinned); err == nil {
 		t.Fatal("tampered bundle (incl. firewall) must be refused")
+	}
+}
+
+// TestSignedBlocklistTamperRefused is the M7.1 acceptance: the cert blocklist
+// rides inside the signed bundle (so a host trusts it only after Verify), and
+// tampering with it is refused.
+func TestSignedBlocklistTamperRefused(t *testing.T) {
+	b, _ := signer.NewSoftwareBackend()
+	pubBytes, _ := b.PublicKey()
+	pinned, _ := jws.ParseP256PublicPoint(pubBytes)
+
+	in := Bundle{
+		Device:      Device{Name: "web-1", OverlayIP: "100.64.0.5", Groups: []string{"web"}},
+		Certificate: "CERT", CABundle: []string{"CA"},
+		Blocklist: []string{"aa11", "bb22"},
+	}
+	jwsBytes, err := Sign(b, "k", in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := Verify(jwsBytes, pinned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Blocklist) != 2 || out.Blocklist[0] != "aa11" || out.Blocklist[1] != "bb22" {
+		t.Fatalf("blocklist not carried: %+v", out.Blocklist)
+	}
+
+	tampered := make([]byte, len(jwsBytes))
+	copy(tampered, jwsBytes)
+	tampered[len(tampered)/2] ^= 0x01
+	if _, err := Verify(tampered, pinned); err == nil {
+		t.Fatal("tampered bundle (incl. blocklist) must be refused")
+	}
+}
+
+// TestRenderNebulaConfigBlocklist proves the bundle's blocklist threads into
+// nebula's pki.blocklist, and that an empty blocklist renders no key at all.
+func TestRenderNebulaConfigBlocklist(t *testing.T) {
+	fp := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	b := Bundle{
+		Device:      Device{Name: "web-1", OverlayIP: "100.64.0.5"},
+		Lighthouses: []Lighthouse{{OverlayIP: "100.64.0.1", PublicAddrs: []string{"198.51.100.1:4242"}}},
+		Blocklist:   []string{fp},
+	}
+	out, err := RenderNebulaConfig(b, "/ca.crt", "/host.crt", "/host.key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := string(out); !strings.Contains(s, "blocklist:") || !strings.Contains(s, fp) {
+		t.Fatalf("rendered config missing pki.blocklist %s:\n%s", fp, s)
+	}
+
+	// An empty blocklist must not emit a blocklist key (keeps configs byte-stable).
+	b.Blocklist = nil
+	out2, err := RenderNebulaConfig(b, "/ca.crt", "/host.crt", "/host.key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out2), "blocklist:") {
+		t.Fatalf("empty blocklist must render no blocklist key:\n%s", out2)
 	}
 }
 

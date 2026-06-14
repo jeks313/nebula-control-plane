@@ -66,9 +66,13 @@ type Enrollment struct {
 	Status       string `gorm:"column:status"`
 	CertPEM      []byte `gorm:"column:cert_pem"`
 	OverlayIP    string `gorm:"column:overlay_ip"`
-	CreatedAt    int64  `gorm:"column:created_at"`
-	DecidedAt    int64  `gorm:"column:decided_at"`
-	Approver     string `gorm:"column:approver"`
+	// Fingerprint is the host's CURRENT issued cert fingerprint (hex sha256),
+	// updated on issue and on every renewal. It lets a host be blocklisted by name
+	// / overlay IP — resolved to its live fingerprint (M7.1). Empty until issued.
+	Fingerprint string `gorm:"column:fingerprint"`
+	CreatedAt   int64  `gorm:"column:created_at"`
+	DecidedAt   int64  `gorm:"column:decided_at"`
+	Approver    string `gorm:"column:approver"`
 	// Cloud-attestation evidence (M5; provider-agnostic). Empty for token enrollments.
 	AttestProvider  string `gorm:"column:attest_provider"`  // e.g. "aws"
 	AttestAccount   string `gorm:"column:attest_account"`   // AWS account / Azure sub / GCP project
@@ -111,8 +115,13 @@ type Config struct {
 	// on error (a transient registry read must not sever discovery).
 	LighthouseSource func(context.Context) ([]bundle.Lighthouse, error)
 	Policy           *policy.Policy // central firewall (M6); nil -> Pilot's local default
-	Results          *queue.Durable // result store (gateway↔Core shared store)
-	ResultTTL        time.Duration  // result/ticket validity (0 -> 1h)
+	// BlocklistSource, if set, is consulted at bundle-build time so revocations
+	// (7.1) propagate live into pki.blocklist; a transient read error falls back to
+	// an empty blocklist rather than failing the enrollment (fail-open on
+	// availability — peers still hold the blocklist from their own bundles).
+	BlocklistSource func(context.Context) ([]string, error)
+	Results         *queue.Durable // result store (gateway↔Core shared store)
+	ResultTTL       time.Duration  // result/ticket validity (0 -> 1h)
 
 	// Cloud attestation (M5). AWSSigV4Enabled gates the aws-sigv4 method; CloudTrust
 	// is the active dual-control trust config (which accounts/roles may attest +
@@ -231,7 +240,7 @@ func (c *Consumer) Process(ctx context.Context, cand queue.Candidate) (Result, e
 
 	// Approval decision: bearer secrets are PENDING by default.
 	if !jk.AutoIssue {
-		c.record(ctx, cand.EnrollmentID, req, pubBytes, jk.ID, groups, StatusPending, nil, "", evidence{})
+		c.record(ctx, cand.EnrollmentID, req, pubBytes, jk.ID, groups, StatusPending, nil, "", "", evidence{})
 		c.writeResult(ctx, cand.EnrollmentID, cand.RetrievalSecretHash, nil, StatusPending, "")
 		_ = c.audit(ctx, "system", "enroll-pending", deviceName,
 			fmt.Sprintf(`{"join_key":%q,"reason":"manual approval required"}`, jk.Name))
@@ -239,7 +248,7 @@ func (c *Consumer) Process(ctx context.Context, cand queue.Candidate) (Result, e
 	}
 
 	// auto_issue: mint immediately.
-	ip, certPEM, notAfter, err := c.issue(ctx, "enroll-auto", deviceName, pubBytes, jk.GroupList())
+	ip, certPEM, fp, notAfter, err := c.issue(ctx, "enroll-auto", deviceName, pubBytes, jk.GroupList())
 	if err != nil {
 		return Result{}, err
 	}
@@ -247,7 +256,7 @@ func (c *Consumer) Process(ctx context.Context, cand queue.Candidate) (Result, e
 	if err != nil {
 		return Result{}, err
 	}
-	c.record(ctx, cand.EnrollmentID, req, pubBytes, jk.ID, groups, StatusIssued, certPEM, ip.String(), evidence{})
+	c.record(ctx, cand.EnrollmentID, req, pubBytes, jk.ID, groups, StatusIssued, certPEM, ip.String(), fp, evidence{})
 	c.writeResult(ctx, cand.EnrollmentID, cand.RetrievalSecretHash, bundleJWS, StatusIssued, "")
 	return Result{EnrollmentID: cand.EnrollmentID, Status: StatusIssued, OverlayIP: ip.String(), CertPEM: certPEM}, nil
 }
@@ -308,14 +317,14 @@ func (c *Consumer) processAttested(ctx context.Context, cand queue.Candidate, re
 	// Attested-but-not-auto-issue still queues for manual approval (an operator-set
 	// posture per account). JoinKeyID stays 0 — there is no join key.
 	if !autoIssue {
-		c.record(ctx, cand.EnrollmentID, req, pubBytes, 0, string(groupsJSON), StatusPending, nil, "", ev)
+		c.record(ctx, cand.EnrollmentID, req, pubBytes, 0, string(groupsJSON), StatusPending, nil, "", "", ev)
 		c.writeResult(ctx, cand.EnrollmentID, cand.RetrievalSecretHash, nil, StatusPending, "")
 		_ = c.audit(ctx, "system", "enroll-pending", deviceName,
 			fmt.Sprintf(`{"method":"aws-sigv4","account":%q,"reason":"manual approval required"}`, id.Account))
 		return Result{EnrollmentID: cand.EnrollmentID, Status: StatusPending}, nil
 	}
 
-	ip, certPEM, notAfter, err := c.issue(ctx, "enroll-attested", deviceName, pubBytes, groupsSlice)
+	ip, certPEM, fp, notAfter, err := c.issue(ctx, "enroll-attested", deviceName, pubBytes, groupsSlice)
 	if err != nil {
 		return Result{}, err
 	}
@@ -323,7 +332,7 @@ func (c *Consumer) processAttested(ctx context.Context, cand queue.Candidate, re
 	if err != nil {
 		return Result{}, err
 	}
-	c.record(ctx, cand.EnrollmentID, req, pubBytes, 0, string(groupsJSON), StatusIssued, certPEM, ip.String(), ev)
+	c.record(ctx, cand.EnrollmentID, req, pubBytes, 0, string(groupsJSON), StatusIssued, certPEM, ip.String(), fp, ev)
 	c.writeResult(ctx, cand.EnrollmentID, cand.RetrievalSecretHash, bundleJWS, StatusIssued, "")
 	_ = c.audit(ctx, "system", "enroll-attested", deviceName,
 		fmt.Sprintf(`{"method":"aws-sigv4","account":%q,"arn":%q}`, id.Account, id.Arn))
@@ -363,7 +372,7 @@ func (c *Consumer) Approve(ctx context.Context, enrollmentID, approver string) (
 
 	var groups []string
 	_ = json.Unmarshal([]byte(e.Groups), &groups)
-	ip, certPEM, notAfter, err := c.issue(ctx, approver, e.DeviceName, e.Pubkey, groups)
+	ip, certPEM, fp, notAfter, err := c.issue(ctx, approver, e.DeviceName, e.Pubkey, groups)
 	if err != nil {
 		return Result{}, err
 	}
@@ -378,7 +387,7 @@ func (c *Consumer) Approve(ctx context.Context, enrollmentID, approver string) (
 		Where("enrollment_id = ? AND status = ?", enrollmentID, StatusPending).
 		Updates(map[string]any{
 			"status": StatusIssued, "cert_pem": certPEM, "overlay_ip": ip.String(),
-			"decided_at": now, "approver": approver,
+			"fingerprint": fp, "decided_at": now, "approver": approver,
 		})
 	if claim.Error != nil {
 		_ = c.cfg.Allocator.Release(ctx, ip)
@@ -435,7 +444,7 @@ func (c *Consumer) Deny(ctx context.Context, enrollmentID, approver, reason stri
 
 // deny records a denied enrollment + result + audit (the shared rejection path).
 func (c *Consumer) deny(ctx context.Context, cand queue.Candidate, req wire.EnrollRequest, pubBytes []byte, action, reason string) {
-	c.record(ctx, cand.EnrollmentID, req, pubBytes, 0, "[]", StatusDenied, nil, "", evidence{})
+	c.record(ctx, cand.EnrollmentID, req, pubBytes, 0, "[]", StatusDenied, nil, "", "", evidence{})
 	c.writeResult(ctx, cand.EnrollmentID, cand.RetrievalSecretHash, nil, StatusDenied, reason)
 	_ = c.audit(ctx, "system", action, req.CSR.RequestedName, reason)
 }
@@ -510,14 +519,14 @@ func (c *Consumer) verify(ctx context.Context, cand queue.Candidate) (wire.Enrol
 	return req, pubBytes, nil
 }
 
-func (c *Consumer) issue(ctx context.Context, actor, deviceName string, pubBytes []byte, groups []string) (ip netip.Addr, certPEM []byte, notAfter time.Time, err error) {
+func (c *Consumer) issue(ctx context.Context, actor, deviceName string, pubBytes []byte, groups []string) (ip netip.Addr, certPEM []byte, fingerprint string, notAfter time.Time, err error) {
 	ip, err = c.cfg.Allocator.Allocate(ctx, deviceName, "")
 	if err != nil {
-		return netip.Addr{}, nil, time.Time{}, fmt.Errorf("enrollment: allocate IP: %w", err)
+		return netip.Addr{}, nil, "", time.Time{}, fmt.Errorf("enrollment: allocate IP: %w", err)
 	}
 	nb := c.now().Add(-5 * time.Minute)
 	notAfter = nb.Add(c.cfg.CertLifetime)
-	_, certPEM, err = c.cfg.Signer.Issue(ctx, actor, signer.Template{
+	crt, pem, ierr := c.cfg.Signer.Issue(ctx, actor, signer.Template{
 		Name:      deviceName,
 		Networks:  []netip.Prefix{netip.PrefixFrom(ip, c.cfg.Pool.Bits())},
 		Groups:    groups,
@@ -525,11 +534,13 @@ func (c *Consumer) issue(ctx context.Context, actor, deviceName string, pubBytes
 		NotAfter:  notAfter,
 		PublicKey: pubBytes,
 	})
-	if err != nil {
+	if ierr != nil {
 		_ = c.cfg.Allocator.Release(ctx, ip) // don't leak the IP on a failed sign
-		return netip.Addr{}, nil, time.Time{}, fmt.Errorf("enrollment: sign: %w", err)
+		return netip.Addr{}, nil, "", time.Time{}, fmt.Errorf("enrollment: sign: %w", ierr)
 	}
-	return ip, certPEM, notAfter, nil
+	certPEM = pem
+	fingerprint, _ = crt.Fingerprint() // the blocklist key (M7.1)
+	return ip, certPEM, fingerprint, notAfter, nil
 }
 
 // buildBundle assembles + signs the config bundle (3.6). Returns nil if no
@@ -546,9 +557,25 @@ func (c *Consumer) buildBundle(ctx context.Context, deviceName, ip string, group
 		CABundle:      []string{string(c.cfg.CABundlePEM)},
 		Firewall:      bundle.CompileFirewall(c.cfg.Policy, groups),
 		Lighthouses:   c.lighthouses(ctx),
+		Blocklist:     c.blocklist(ctx),
 		NotAfter:      notAfter.UTC().Format(time.RFC3339),
 	}
 	return bundle.Sign(c.cfg.ConfigBackend, c.cfg.ConfigKeyID, b)
+}
+
+// blocklist returns the fleet's active revoked-cert fingerprints for a bundle
+// (7.1) when a source is configured, else nil. A failed read falls back to an
+// empty blocklist: an enrollment must not fail because the revocation store is
+// briefly unreadable, and peers still enforce their own blocklists (§4.7).
+func (c *Consumer) blocklist(ctx context.Context) []string {
+	if c.cfg.BlocklistSource == nil {
+		return nil
+	}
+	fps, err := c.cfg.BlocklistSource(ctx)
+	if err != nil {
+		return nil
+	}
+	return fps
 }
 
 // lighthouses returns the fleet's lighthouses for a bundle: the live registry
@@ -584,7 +611,7 @@ type evidence struct {
 	verifiedAt                           int64
 }
 
-func (c *Consumer) record(ctx context.Context, enrollmentID string, req wire.EnrollRequest, pubBytes []byte, joinKeyID int64, groups, status string, certPEM []byte, ip string, ev evidence) {
+func (c *Consumer) record(ctx context.Context, enrollmentID string, req wire.EnrollRequest, pubBytes []byte, joinKeyID int64, groups, status string, certPEM []byte, ip, fingerprint string, ev evidence) {
 	e := Enrollment{
 		EnrollmentID:    enrollmentID,
 		DeviceName:      deviceName(req, wire.PubkeyHash(pubBytes)),
@@ -596,6 +623,7 @@ func (c *Consumer) record(ctx context.Context, enrollmentID string, req wire.Enr
 		Status:          status,
 		CertPEM:         certPEM,
 		OverlayIP:       ip,
+		Fingerprint:     fingerprint,
 		CreatedAt:       c.now().UnixNano(),
 		AttestProvider:  ev.provider,
 		AttestAccount:   ev.account,

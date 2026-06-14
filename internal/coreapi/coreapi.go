@@ -61,7 +61,13 @@ type Config struct {
 	// Core falls back to Lighthouses (a transient registry read must never sever
 	// discovery in an issued bundle).
 	LighthouseSource func(context.Context) ([]bundle.Lighthouse, error)
-	Policy           *policy.Policy // central firewall (M6); nil -> Pilot's local default
+	// BlocklistSource, if set, is consulted at bundle-build time so revocations
+	// (7.1) propagate live into the renew bundle's pki.blocklist. A failed read
+	// falls back to an empty blocklist rather than failing the renewal — peers
+	// still enforce the blocklist from their own bundles (§4.7, fail-open on
+	// availability / P3).
+	BlocklistSource func(context.Context) ([]string, error)
+	Policy          *policy.Policy // central firewall (M6); nil -> Pilot's local default
 	// Rollout, if set, drives staged canary rollouts (6.6): heartbeats are fed to
 	// the engine, in-wave hosts are commanded toward the target version, and the
 	// renew bundle is stamped with the host's rollout version.
@@ -121,6 +127,21 @@ func (s *Server) lighthouses(ctx context.Context) []bundle.Lighthouse {
 		return s.cfg.Lighthouses
 	}
 	return lhs
+}
+
+// blocklist returns the fleet's active revoked-cert fingerprints for a bundle
+// (7.1) when a source is configured, else nil. A failed read falls back to an
+// empty blocklist: a renewal must not fail because the revocation store is
+// briefly unreadable, and peers still enforce their own blocklists (§4.7).
+func (s *Server) blocklist(ctx context.Context) []string {
+	if s.cfg.BlocklistSource == nil {
+		return nil
+	}
+	fps, err := s.cfg.BlocklistSource(ctx)
+	if err != nil {
+		return nil
+	}
+	return fps
 }
 
 // device resolves the calling tunnel's identity from its source overlay IP
@@ -302,6 +323,7 @@ func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
 		CABundle:      []string{string(s.cfg.CABundlePEM)},
 		Firewall:      bundle.CompileFirewall(s.cfg.Policy, groups),
 		Lighthouses:   s.lighthouses(ctx),
+		Blocklist:     s.blocklist(ctx),
 		NotAfter:      notAfter.UTC().Format(time.RFC3339),
 	}
 	bundleJWS, err := bundle.Sign(s.cfg.ConfigBackend, s.cfg.ConfigKeyID, b)
@@ -310,6 +332,10 @@ func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fp, _ := cert.Fingerprint()
+	// Track the host's CURRENT fingerprint: it rotates with the key on every
+	// renewal, so a blocklist must target the live fingerprint (M7.1/7.3).
+	_ = s.cfg.Store.DB.WithContext(ctx).Model(&enrollment.Enrollment{}).
+		Where("id = ?", dev.ID).Update("fingerprint", fp).Error
 	_, _ = s.cfg.Store.AppendAudit(ctx, "renew:"+dev.DeviceName, "cert-renewed", dev.DeviceName,
 		fmt.Sprintf(`{"overlay_ip":%q,"fingerprint":%q}`, dev.OverlayIP, fp))
 
