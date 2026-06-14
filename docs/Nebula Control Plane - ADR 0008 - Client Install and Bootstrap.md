@@ -148,9 +148,15 @@ CA/cert/config, and overlay IP. Install is therefore **per-mesh, additive, names
 - **Namespacing:** per-mesh state dir (e.g. `/var/lib/pilot/<mesh-id>/`) + a templated
   **`pilot@<mesh>.service`**. `pilot install <dev-url>` then `pilot install <prod-url>` — each
   lands in its own namespace; re-running one is an idempotent update.
-- **Collision guards** install enforces: distinct UDP ports, distinct tun names, and
-  **disjoint overlay CIDRs** across the meshes a host joins (dev `10.44/16`, prod `10.45/16`).
-  Overlapping CIDRs would require policy routing — **out of scope**; install refuses it.
+- **Collision guards** install enforces: distinct **listen ports** and distinct **tun device
+  names**, plus **disjoint overlay CIDRs** across the meshes a host joins (dev `10.44/16`,
+  prod `10.45/16`). Overlapping CIDRs would require policy routing — **out of scope**; install
+  refuses it. *(Concretely: pilot's config renderer defaults `tun.dev` to `nebula1`
+  (`internal/nebulaconfig/render.go` — `TunDev`/`tun_dev`, template `tun.dev: {{ .TunDev }}`);
+  two meshes on one host would collide on it. For multi-mesh, pilot must set a **per-mesh**
+  `TunDev` — e.g. `nebula-<mesh-short>` — and likewise a per-mesh listen port when it generates
+  the nebula config. The template already parameterizes both, so it's a config-generation
+  change, not a template change.)*
 - **Per-mesh identity, one shared anchor:** each mesh has its own CA + config-signing pin
   (delivered via its org-signed meshinfo); the **one pinned org root** trusts them all.
 - **Service model: N templated services** (independent lifecycle / self-update / failure
