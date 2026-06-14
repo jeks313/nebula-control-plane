@@ -331,6 +331,51 @@ func (s *Server) handleJoinKeyCreate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{"secret": secret, "joinkey": joinKeyView(jk)})
 }
 
+// PATCH /admin/v1/joinkeys/{name} — edit an active key's config (groups, caps,
+// auto-issue, etc.). Config-columns only: the secret, name, used_count, and state are
+// never touched. Active-only (a revoked key 404s). All body fields are optional —
+// absent means "leave unchanged"; pointers let auto_issue=false / max_uses=0 persist.
+func (s *Server) handleJoinKeyUpdate(w http.ResponseWriter, r *http.Request) {
+	id := identityFrom(r.Context())
+	if !s.requirePerm(w, id, PermJoinKeyManage) {
+		return
+	}
+	name := r.PathValue("name")
+	var b struct {
+		Groups       *[]string `json:"groups"`
+		SubRange     *string   `json:"sub_range"`
+		MaxUses      *int      `json:"max_uses"`
+		QuotaPerHour *int      `json:"quota_per_hour"`
+		AutoIssue    *bool     `json:"auto_issue"`
+		Ephemeral    *bool     `json:"ephemeral"`
+		TTLSeconds   *int      `json:"ttl_seconds"`
+	}
+	if !readJSON(w, r, &b) {
+		return
+	}
+	p := joinkey.UpdateParams{
+		Groups: b.Groups, SubRange: b.SubRange, MaxUses: b.MaxUses,
+		QuotaPerHour: b.QuotaPerHour, AutoIssue: b.AutoIssue, Ephemeral: b.Ephemeral,
+	}
+	if b.TTLSeconds != nil {
+		ttl := time.Duration(*b.TTLSeconds) * time.Second
+		p.TTL = &ttl
+	}
+	jk, err := joinkey.Update(r.Context(), s.cfg.Store, name, p, s.now())
+	if err != nil {
+		if errors.Is(err, joinkey.ErrNotFound) {
+			writeProblem(w, http.StatusNotFound, "not found", "no such active join key")
+			return
+		}
+		s.fail(w, r, "update join key failed", err)
+		return
+	}
+	_, _ = s.cfg.Store.AppendAudit(r.Context(), id.Principal, "joinkey-update", name,
+		fmt.Sprintf("groups=%v auto_issue=%v max_uses=%d quota_per_hour=%d ephemeral=%v",
+			jk.GroupList(), jk.AutoIssue, jk.MaxUses, jk.QuotaPerHour, jk.Ephemeral))
+	writeJSON(w, http.StatusOK, joinKeyView(jk))
+}
+
 // POST /admin/v1/joinkeys/{name}/revoke — revoke a key by name.
 func (s *Server) handleJoinKeyRevoke(w http.ResponseWriter, r *http.Request) {
 	id := identityFrom(r.Context())

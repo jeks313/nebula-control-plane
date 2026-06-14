@@ -469,6 +469,27 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
+  /admin/v1/joinkeys/{name}:
+    patch:
+      summary: Edit an active join key's config (groups, caps, auto-issue). Secret/name/used-count are immutable.
+      operationId: updateJoinKey
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/JoinKeyUpdate" }
+      responses:
+        "200":
+          description: The updated key.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JoinKey" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
   /admin/v1/joinkeys/{name}/revoke:
     post:
       summary: Revoke a join key by name.
@@ -993,6 +1014,17 @@ components:
         auto_issue: { type: boolean }
         ephemeral: { type: boolean }
         quota_per_hour: { type: integer }
+    JoinKeyUpdate:
+      type: object
+      description: "All fields optional; an omitted field is left unchanged (active keys only). name/secret/used_count/state are immutable."
+      properties:
+        groups: { type: array, items: { type: string } }
+        sub_range: { type: string }
+        max_uses: { type: integer, description: "0 = unlimited" }
+        quota_per_hour: { type: integer, description: "0 = no rate limit" }
+        auto_issue: { type: boolean }
+        ephemeral: { type: boolean }
+        ttl_seconds: { type: integer, description: "relative, re-based from now; 0 = never expire" }
     JoinKeyCreated:
       type: object
       required: [secret, joinkey]

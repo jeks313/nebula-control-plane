@@ -183,11 +183,13 @@ function ReviewDialog({ id, onClose }: { id: number; onClose: () => void }) {
             </div>
           )}
 
-          {/* The proposed payload (policy DSL / cloud-trust JSON) — what is being approved. */}
+          {/* The proposed payload (policy DSL / cloud-trust JSON) — what is being approved.
+              Pretty-print JSON (cloud-trust) for readability; policy DSL is non-JSON so it
+              falls through to the raw text. */}
           <div>
             <div className="mb-1 text-[11px] uppercase tracking-wide text-ink-faint">Payload</div>
             <pre className="max-h-60 overflow-auto rounded-[6px] border border-edge bg-mesh-2 px-3 py-2 font-mono text-[12px] text-ink">
-              {change.payload || '(empty)'}
+              {prettyPayload(change.payload)}
             </pre>
           </div>
 
@@ -244,6 +246,17 @@ function kindLabel(kind: string): string {
   if (kind === 'policy.publish') return 'Policy publish'
   if (kind === 'cloudtrust.publish') return 'Cloud-trust publish'
   return kind
+}
+
+// prettyPayload renders a JSON payload (cloud-trust) multi-line; non-JSON (policy DSL)
+// falls through to the raw text.
+function prettyPayload(payload?: string): string {
+  if (!payload) return '(empty)'
+  try {
+    return JSON.stringify(JSON.parse(payload), null, 2)
+  } catch {
+    return payload
+  }
 }
 
 function decideError(err: unknown): string {

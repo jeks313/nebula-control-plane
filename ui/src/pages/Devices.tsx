@@ -1,6 +1,7 @@
 import { useSearchParams } from 'react-router-dom'
-import { useDevices, type Device, type DeviceFilters, type DeviceCondition } from '../api/hooks'
+import { useDevices, type DeviceFilters, type DeviceCondition } from '../api/hooks'
 import { Card, Page, StateBlock, ErrorState, Button, Chip, cx } from '../components/ui'
+import { JoinedVia } from '../components/provenance'
 
 const CONDITION_LABEL: Record<DeviceCondition, string> = {
   expired: 'cert expired',
@@ -83,7 +84,7 @@ export function Devices() {
                   <tr key={d.overlay_ip} className="hover:bg-mesh-2">
                     <td className="nums px-4 py-2 text-ink">{d.overlay_ip}</td>
                     <td className="px-4 py-2 text-ink">{d.name}</td>
-                    <td className="px-4 py-2"><Provenance d={d} onFilter={setFilter} /></td>
+                    <td className="px-4 py-2"><JoinedVia p={d} onFilter={setFilter} /></td>
                     <td className="px-4 py-2"><Groups groups={d.groups} /></td>
                     <td className="nums px-4 py-2 text-ink-dim">{d.pilot_version ?? '—'}</td>
                     <td className="nums px-4 py-2 text-ink-dim">{fmtDate(d.cert_not_after)}</td>
@@ -107,44 +108,6 @@ export function Devices() {
   )
 }
 
-// Provenance — how the host joined. Cloud-attested hosts show provider + account
-// (+ region); token hosts show their join-key name. Each is clickable to filter the
-// list down to that scope (server-side).
-function Provenance({ d, onFilter }: { d: Device; onFilter: (k: string, v: string) => void }) {
-  if (d.attest_provider) {
-    return (
-      <span className="flex flex-col gap-0.5">
-        <span className="flex items-center gap-1.5">
-          <button onClick={() => onFilter('provider', d.attest_provider!)} title="Filter by provider">
-            <Chip tone="permit">{attestLabel(d.attest_provider)}</Chip>
-          </button>
-          {d.attest_account && (
-            <button
-              onClick={() => onFilter('attest_account', d.attest_account!)}
-              className="nums font-mono text-[11px] text-ink-dim hover:text-ink"
-              title={d.attest_principal ? `${d.attest_principal} — filter by account` : 'Filter by account'}
-            >
-              {d.attest_account}
-            </button>
-          )}
-        </span>
-        {d.attest_region && <span className="text-[11px] text-ink-faint">{d.attest_region}</span>}
-      </span>
-    )
-  }
-  if (d.join_key_name) {
-    return (
-      <span className="flex items-center gap-1.5">
-        <span className="text-[11px] text-ink-faint">token</span>
-        <button onClick={() => onFilter('join_key', d.join_key_name!)} title="Filter by join key">
-          <Chip>{d.join_key_name}</Chip>
-        </button>
-      </span>
-    )
-  }
-  return <span className="text-ink-faint">—</span>
-}
-
 function Groups({ groups }: { groups?: string[] }) {
   if (!groups || groups.length === 0) return <span className="text-ink-faint">—</span>
   return (
@@ -154,13 +117,6 @@ function Groups({ groups }: { groups?: string[] }) {
       ))}
     </span>
   )
-}
-
-function attestLabel(provider?: string): string {
-  if (provider === 'aws') return 'AWS'
-  if (provider === 'azure') return 'Azure'
-  if (provider === 'gcp') return 'GCP'
-  return provider || 'attested'
 }
 
 function healthTone(h?: string): string {

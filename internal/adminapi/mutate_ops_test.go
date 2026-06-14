@@ -133,11 +133,32 @@ func TestJoinKeysOverHTTP(t *testing.T) {
 	}
 	conform(t, doc, "GET", "/admin/v1/joinkeys", 200, list)
 
+	// Edit: toggle auto_issue on, set unlimited uses, change groups (false/0 must persist).
+	code, upd := req(t, ts, "PATCH", "/admin/v1/joinkeys/imac", "alice",
+		map[string]any{"auto_issue": true, "max_uses": 0, "groups": []string{"a", "b"}})
+	if code != http.StatusOK {
+		t.Fatalf("update status = %d (%v)", code, upd)
+	}
+	conform(t, doc, "PATCH", "/admin/v1/joinkeys/{name}", 200, upd)
+	if upd["auto_issue"] != true || int(upd["max_uses"].(float64)) != 0 {
+		t.Fatalf("update did not persist auto_issue/max_uses: %v", upd)
+	}
+	if g, _ := upd["groups"].([]any); len(g) != 2 {
+		t.Fatalf("update groups = %v, want 2", upd["groups"])
+	}
+	if code, _ := req(t, ts, "PATCH", "/admin/v1/joinkeys/nope", "alice", map[string]any{"max_uses": 5}); code != http.StatusNotFound {
+		t.Fatalf("update-missing status = %d, want 404", code)
+	}
+
 	if code, _ := req(t, ts, "POST", "/admin/v1/joinkeys/imac/revoke", "alice", nil); code != http.StatusOK {
 		t.Fatalf("revoke status = %d", code)
 	}
 	if code, _ := req(t, ts, "POST", "/admin/v1/joinkeys/nope/revoke", "alice", nil); code != http.StatusNotFound {
 		t.Fatalf("revoke-missing status = %d, want 404", code)
+	}
+	// A revoked key is not editable (active-only).
+	if code, _ := req(t, ts, "PATCH", "/admin/v1/joinkeys/imac", "alice", map[string]any{"max_uses": 9}); code != http.StatusNotFound {
+		t.Fatalf("update-revoked status = %d, want 404", code)
 	}
 	// Duplicate name → 409.
 	if code, _ := req(t, ts, "POST", "/admin/v1/joinkeys", "alice",
@@ -157,6 +178,7 @@ func TestFleetMutationsRequireAdmin(t *testing.T) {
 		{"POST", "/admin/v1/lighthouses", map[string]any{"overlay_ip": "10.44.0.1", "public_addrs": []string{"x:4242"}}},
 		{"POST", "/admin/v1/rollouts", map[string]any{"target_version": 2, "hosts": []string{"10.44.0.1"}}},
 		{"POST", "/admin/v1/joinkeys", map[string]any{"name": "k"}},
+		{"PATCH", "/admin/v1/joinkeys/k", map[string]any{"max_uses": 1}},
 		{"DELETE", "/admin/v1/lighthouses/10.44.0.1", nil},
 		{"POST", "/admin/v1/rollouts/current/abort", nil},
 	}

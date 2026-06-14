@@ -10,6 +10,8 @@ export type Enrollment = components['schemas']['EnrollmentView']
 export type JoinKey = components['schemas']['JoinKey']
 export type JoinKeyCreate = components['schemas']['JoinKeyCreate']
 export type JoinKeyCreated = components['schemas']['JoinKeyCreated']
+export type JoinKeyUpdate = components['schemas']['JoinKeyUpdate']
+export type CloudTrustProposeRequest = components['schemas']['CloudTrustProposeRequest']
 export type Lighthouse = components['schemas']['Lighthouse']
 export type RolloutStatus = components['schemas']['RolloutStatus']
 export type RolloutHost = components['schemas']['RolloutHost']
@@ -196,6 +198,17 @@ export function useProposePolicy() {
   })
 }
 
+// Cloud-trust is republished as a whole new version (no per-account patch): the form
+// proposes a full {default_groups, aws} config through dual-control, reviewed in
+// /approvals. The active config changes only on COMMIT (useApproveChange invalidates it).
+export function useProposeCloudTrust() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: CloudTrustProposeRequest) => unwrap(api.POST('/admin/v1/cloudtrust/propose', { body })),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['approvals'] }),
+  })
+}
+
 // compile is a read-only dry-run (no perm/step-up); a mutation since it POSTs a draft.
 // It returns 200 even on a parse error (valid:false) — branch on result.valid.
 export function useCompilePolicy() {
@@ -274,6 +287,15 @@ export function useRevokeJoinKey() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (name: string) => unwrap(api.POST('/admin/v1/joinkeys/{name}/revoke', { params: { path: { name } } })),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['joinkeys'] }),
+  })
+}
+
+export function useUpdateJoinKey() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ name, body }: { name: string; body: JoinKeyUpdate }) =>
+      unwrap(api.PATCH('/admin/v1/joinkeys/{name}', { params: { path: { name } }, body })),
     onSettled: () => qc.invalidateQueries({ queryKey: ['joinkeys'] }),
   })
 }

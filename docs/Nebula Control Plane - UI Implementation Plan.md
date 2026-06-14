@@ -303,7 +303,18 @@ Verdict-first, single scannable column:
 > which enrollment is authoritative (latest issued for that overlay IP). Until this lands
 > the column/filter have no data — A0/A1-style backend predecessor first, then the UI.
 
-> ⬜ **Planned change — editable join keys (requested 2026-06-13):**
+> ✅ **Delivered (2026-06-13) — editable join keys.** New `PATCH /admin/v1/joinkeys/{name}`
+> (`joinkey:manage`, audited `joinkey-update`, **active-only**, **config-columns-only**).
+> `joinkey.Update` writes a `map[string]any` of only the set fields (pointer request struct
+> → `auto_issue=false`/`max_uses=0` persist, omitted = unchanged) via a column-scoped
+> `Updates` that **never touches `used_count`/`secret`/`name`/`state`** (the concurrent
+> enroll counter is safe); a revoked/unknown key 404s. No step-up (matches create/revoke —
+> not an authority-granting dual-control action). UI: an **Edit** dialog per active key,
+> pre-filled, reusing a shared `JoinKeyFields` form (name read-only; TTL blank = keep,
+> 0 = never); the auto-issue ⚠ warning mirrors the create form. Tests: `joinkey.Update`
+> (false/0 persist, `used_count` preserved, revoked → ErrNotFound) + HTTP PATCH 200 /
+> 404 / revoked-404 / viewer-403. (Original request below.)
+>
 > The **Join Keys screen** needs an **Edit** action (today it is create + revoke only).
 > An "Edit" on each *active* key opens a dialog **pre-filled** with the current values and
 > lets an admin change: **groups** (add/remove), **max uses**, **TTL / expiry**,
@@ -324,7 +335,18 @@ Verdict-first, single scannable column:
 > This needs a new `PUT`/`PATCH /admin/v1/joinkeys/{name}` (perm `joinkey:manage`,
 > audited, active-only, config-columns-only) before the UI Edit dialog can ship.
 
-> ⬜ **Planned change — editable Cloud Trust (requested 2026-06-13):**
+> ✅ **Delivered (2026-06-13) — editable Cloud Trust (UI-only).** The Cloud Trust screen
+> gains an **Add accounts / Propose change** editor (gated on `cloudtrust:propose`): a
+> dynamic form (AWS account rows — account / ARN globs / groups / auto-issue — + default
+> groups) seeded from the active config, that **republishes the whole config** via the
+> existing `POST /admin/v1/cloudtrust/propose` (dual-control + step-up, reviewed in
+> Approvals). No backend change. Client pre-validates ≥1 account + unique ids (mirrors the
+> server's `ErrEmpty`/`ErrDupAccount`); a prominent high-stakes warning ("controls who may
+> attest"; whole-config republish — keep every account) + a per-row auto-issue+any-role
+> warning. Approvals now **pretty-prints** JSON payloads so the cloud-trust change reads
+> well (policy DSL falls through to raw). The full-config round-trip + central step-up
+> handling mirror the policy-propose twin. (Original request below.)
+>
 > The **Cloud Trust screen** is read-only today — no way to **add** a trusted account or
 > **edit** an existing one (e.g. change the groups granted). It needs add + edit.
 > - **Model — whole-config republish (not per-entry PATCH):** the active config is one
@@ -345,12 +367,20 @@ Verdict-first, single scannable column:
 >   safety is enforced regardless; the question is purely how much the form exposes vs.
 >   how loudly it warns. Changing scope/admission widens who can join the mesh — treat it
 >   as the highest-stakes edit (extra confirmation + a prominent diff in the approval).
+> - **Resolved:** the form exposes **full editing** (scope + admission) — "add account"
+>   inherently needs scope, and dual-control + step-up enforce safety regardless — with a
+>   high-stakes warning and a per-row auto-issue+any-role warning rather than hiding fields.
 
-> ✅ **Delivered (2026-06-13) — join-key name on Enrollments.** `EnrollmentView` now
-> carries `join_key_name`, resolved server-side from `join_key_id` via the shared
+> ✅ **Delivered (2026-06-13) — join-key name on Enrollments + shared "Joined via" cell.**
+> `EnrollmentView` now carries `join_key_name`, resolved server-side from `join_key_id` via the shared
 > id→name map (revoked keys still resolve; falls back to `token` if the key is gone).
-> The Enrollments Method column shows `token · <name>`. Built on the same
-> `enrollment → join_key` linkage as the device-provenance slice. (Original request below.)
+> The Enrollments "Method" column is now a **"Joined via"** column rendered by a **shared
+> `JoinedVia` component** (`ui/src/components/provenance.tsx`) used by both Devices
+> (click-to-filter) and Enrollments (static, `fallback=method`) — so the provider/key
+> chip is identical on both screens. `seed-demo` was fixed so **pending** token
+> enrollments carry a `join_key_id` (they previously rendered a bare `token`) and a
+> **denied** example was added, so the Pending/Approved/Denied tabs are now consistent and
+> all populated. (Original request below.)
 >
 > On the **Enrollments screen**, a token-method enrollment shows just `token` in the
 > Method column — show the **name of the join key** it used instead (e.g. `token ·

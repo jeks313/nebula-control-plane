@@ -441,6 +441,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/v1/joinkeys/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Edit an active join key's config (groups, caps, auto-issue). Secret/name/used-count are immutable. */
+        patch: operations["updateJoinKey"];
+        trace?: never;
+    };
     "/admin/v1/joinkeys/{name}/revoke": {
         parameters: {
             query?: never;
@@ -889,6 +906,19 @@ export interface components {
             auto_issue?: boolean;
             ephemeral?: boolean;
             quota_per_hour?: number;
+        };
+        /** @description All fields optional; an omitted field is left unchanged (active keys only). name/secret/used_count/state are immutable. */
+        JoinKeyUpdate: {
+            groups?: string[];
+            sub_range?: string;
+            /** @description 0 = unlimited */
+            max_uses?: number;
+            /** @description 0 = no rate limit */
+            quota_per_hour?: number;
+            auto_issue?: boolean;
+            ephemeral?: boolean;
+            /** @description relative, re-based from now; 0 = never expire */
+            ttl_seconds?: number;
         };
         JoinKeyCreated: {
             /** @description the join-key secret — shown ONCE */
@@ -1672,6 +1702,36 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Problem"];
             409: components["responses"]["Problem"];
+        };
+    };
+    updateJoinKey: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["JoinKeyUpdate"];
+            };
+        };
+        responses: {
+            /** @description The updated key. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JoinKey"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Problem"];
+            404: components["responses"]["Problem"];
         };
     };
     revokeJoinKey: {

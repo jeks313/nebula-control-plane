@@ -114,6 +114,72 @@ func Revoke(ctx context.Context, s *store.Store, name string) error {
 	return nil
 }
 
+// UpdateParams carries the editable config columns. A nil pointer means "leave
+// unchanged" — pointers (not zero values) let an admin set auto_issue=false or
+// max_uses=0 (unlimited) and have it persist. The secret, name, used_count, state,
+// and created_at are NEVER editable here.
+type UpdateParams struct {
+	Groups       *[]string
+	SubRange     *string
+	MaxUses      *int
+	QuotaPerHour *int
+	AutoIssue    *bool
+	Ephemeral    *bool
+	TTL          *time.Duration // relative, like Create; nil = unchanged, 0 = clear expiry (never)
+}
+
+// Update edits an ACTIVE key's config columns in place. It is a targeted column
+// update (never touching used_count/secret/name/state), so the concurrent enroll
+// path's used_count is safe. A revoked or unknown key matches nothing → ErrNotFound.
+func Update(ctx context.Context, s *store.Store, name string, p UpdateParams, now time.Time) (JoinKey, error) {
+	fields := map[string]any{}
+	if p.Groups != nil {
+		g, _ := json.Marshal(*p.Groups)
+		fields["groups"] = string(g)
+	}
+	if p.SubRange != nil {
+		fields["sub_range"] = *p.SubRange
+	}
+	if p.MaxUses != nil {
+		fields["max_uses"] = *p.MaxUses
+	}
+	if p.QuotaPerHour != nil {
+		fields["quota_per_hour"] = *p.QuotaPerHour
+	}
+	if p.AutoIssue != nil {
+		fields["auto_issue"] = *p.AutoIssue
+	}
+	if p.Ephemeral != nil {
+		fields["ephemeral"] = *p.Ephemeral
+	}
+	if p.TTL != nil {
+		var exp int64
+		if *p.TTL > 0 {
+			exp = now.Add(*p.TTL).UnixNano()
+		}
+		fields["expires_at"] = exp
+	}
+	db := s.DB.WithContext(ctx)
+	if len(fields) > 0 {
+		res := db.Model(&JoinKey{}).Where("name = ? AND state = ?", name, "active").Updates(fields)
+		if res.Error != nil {
+			return JoinKey{}, fmt.Errorf("joinkey: update: %w", res.Error)
+		}
+		if res.RowsAffected == 0 {
+			return JoinKey{}, ErrNotFound
+		}
+	}
+	// Re-read the active key (also the existence/active check for a no-op edit → 404).
+	var jk JoinKey
+	if err := db.First(&jk, "name = ? AND state = ?", name, "active").Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return JoinKey{}, ErrNotFound
+		}
+		return JoinKey{}, fmt.Errorf("joinkey: update reread: %w", err)
+	}
+	return jk, nil
+}
+
 // Lookup validates a presented secret (active, not expired, uses remaining)
 // WITHOUT consuming a use — so callers can apply a rate quota (3.10) before
 // committing a use.
