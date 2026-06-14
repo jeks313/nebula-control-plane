@@ -1,8 +1,11 @@
+//go:build linux
+
 package pilotservice
 
-import "strings"
-
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestRenderEnv(t *testing.T) {
 	got := RenderEnv(Spec{Mesh: "prod", CoreURL: "http://10.45.0.2:8444", NebulaPath: "/usr/local/bin/nebula"})
@@ -17,22 +20,26 @@ func TestRenderEnv(t *testing.T) {
 	}
 }
 
-func TestSpecNames(t *testing.T) {
-	s := Spec{Mesh: "dev", StateDir: "/var/lib/pilot/dev"}
-	if s.Instance() != "pilot@dev" {
-		t.Errorf("Instance() = %q, want pilot@dev", s.Instance())
+func TestServiceIdentity(t *testing.T) {
+	if ServiceLabel("dev") != "pilot@dev" {
+		t.Errorf("ServiceLabel(dev) = %q, want pilot@dev", ServiceLabel("dev"))
 	}
-	if s.EnvFile() != "/var/lib/pilot/dev/service.env" {
-		t.Errorf("EnvFile() = %q", s.EnvFile())
+	if !strings.Contains(LogHint("dev"), "journalctl -u pilot@dev") {
+		t.Errorf("LogHint(dev) = %q", LogHint("dev"))
+	}
+	if got := (Spec{StateDir: "/var/lib/pilot/dev"}).envFile(); got != "/var/lib/pilot/dev/service.env" {
+		t.Errorf("envFile() = %q", got)
 	}
 }
 
 func TestTemplateUnitShape(t *testing.T) {
 	// Template-instance (%i), keep-alive hardening, hot-reload, and the supervise
 	// handoff must all be present in the unit.
+	if UnitTemplatePath != "/etc/systemd/system/pilot@.service" {
+		t.Errorf("UnitTemplatePath = %q", UnitTemplatePath)
+	}
 	for _, want := range []string{
-		"pilot@.service", // (doc/intent) — checked via path const below
-		"%i",             // systemd instance templating
+		"%i", // systemd instance templating
 		"ExecStart=/usr/local/bin/pilot supervise",
 		"-core ${NCP_CORE_URL}",
 		"ExecReload=/bin/kill -HUP $MAINPID",
@@ -41,12 +48,6 @@ func TestTemplateUnitShape(t *testing.T) {
 		"DeviceAllow=/dev/net/tun rw",
 		"WantedBy=multi-user.target",
 	} {
-		if want == "pilot@.service" {
-			if UnitTemplatePath != "/etc/systemd/system/pilot@.service" {
-				t.Errorf("UnitTemplatePath = %q", UnitTemplatePath)
-			}
-			continue
-		}
 		if !strings.Contains(templateUnit, want) {
 			t.Errorf("templateUnit missing %q", want)
 		}

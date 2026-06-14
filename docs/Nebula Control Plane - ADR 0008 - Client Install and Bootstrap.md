@@ -53,8 +53,9 @@ hands off to `supervise` — per-mesh, additive, from a universal signed binary.
   (state dir, nebula instance, `pilot@<mesh>` service). One pinned org root federates all of
   the org's meshes. Single-mesh is the common path; multi-mesh (a bridge host spanning, e.g.,
   dev + prod for Artifactory/GitLab GitOps) is designed in now.
-- **systemd only for v1.** pilot writes + enables the unit itself (no external script). The
-  launchd/Windows abstraction is designed-for but not implemented in v1.
+- **systemd (Linux) + launchd (macOS).** pilot writes + enables the service itself (no external
+  script): a systemd template unit on Linux, a per-mesh LaunchDaemon plist on macOS. Windows SCM
+  is the remaining stub behind the same interface.
 - **Hand off to ADR 0003.** After the first heartbeat, `supervise` + self-update take over.
 
 ## The trust model (the crux)
@@ -207,7 +208,7 @@ Lifecycle siblings: `pilot status` (installed? enrolled? healthy? per mesh), `pi
 | **Pin establishment** | pure TOFU · **fingerprint-confirm** · pre-shared (MDM) | **Fingerprint-confirm** default; pre-shared for hands-free/hardened; pure-TOFU only behind HTTPS for low-security. |
 | **Multi-mesh service** | **N templated `pilot@<mesh>`** · one pilot, many meshes | **N services** — independent lifecycle/self-update/isolation; supervise unchanged. |
 | **Service install** | **pilot writes the unit** · external script/Ansible | **pilot writes it** — the whole point is no script/package/Ansible. |
-| **v1 platforms** | **systemd only** · systemd+launchd+SCM now | **systemd only**; design the installer behind an interface so launchd/SCM slot in later. |
+| **Platforms** | systemd · **systemd + launchd** · +Windows SCM | **systemd (Linux) + launchd (macOS)** done behind one interface (`service_linux.go`/`service_darwin.go`); Windows SCM is the remaining `service_other.go` stub. |
 
 ## Phased plan
 
@@ -224,8 +225,10 @@ Lifecycle siblings: `pilot status` (installed? enrolled? healthy? per mesh), `pi
   `-tun-dev`/`-listen-port` on Harbor → every bundle, default `nebula1`/`4242`). Remaining:
   exercise additive `pilot install` for a 2nd mesh end-to-end, the best-effort disjoint-CIDR
   warning, and (with Phase 2) one org root federating N meshes.
-- **Phase 4 — cross-platform.** Implement the service-installer abstraction for **launchd**
-  (the iMac) and Windows SCM; sign/notarize the one universal binary per platform.
+- **Phase 4 — cross-platform.** ✅ **launchd (macOS)** done — `service_darwin.go` renders a
+  per-mesh LaunchDaemon plist + drives `launchctl bootstrap/bootout/kickstart`
+  (cross-compile-verified `GOOS=darwin`; not yet run on a Mac). Remaining: **Windows SCM**
+  (still the `service_other.go` stub) and sign/notarize the universal binary per platform.
 
 ## Consequences
 
@@ -279,5 +282,5 @@ Lifecycle siblings: `pilot status` (installed? enrolled? healthy? per mesh), `pi
 - **ADR 0004 (SSO-driven user enrollment)** — `install`'s auth-method indirection (meshinfo's
   "accepted auth") is where an SSO enrollment method plugs in.
 - **`pilot` subcommands** — `install` orchestrates the existing `init`/`enroll`/`clock-check`/
-  `supervise`; the new primitive is the systemd service installer (behind a cross-platform
-  interface for later launchd/SCM).
+  `supervise`; the new primitive is the service installer (`pilotservice`) — systemd + launchd
+  behind one interface, Windows SCM still a stub.
