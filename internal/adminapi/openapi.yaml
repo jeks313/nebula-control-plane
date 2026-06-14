@@ -45,16 +45,27 @@ paths:
   /admin/v1/devices:
     get:
       summary: Device inventory (from heartbeats), keyset-paginated on overlay_ip.
+      description: >-
+        Each row carries provenance (how the host joined) and the groups it was
+        issued, from its authoritative (latest issued) enrollment. Optional scope
+        filters (provider, attest_account, join_key) and the health-condition filter
+        narrow the list; the condition filter is the dashboard "why" drill-down,
+        computed with the same thresholds as /fleet/health.
       operationId: listDevices
       parameters:
         - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 2000, default: 200 } }
         - { name: after, in: query, required: false, description: "cursor: overlay_ip of the last row from the previous page", schema: { type: string } }
+        - { name: provider, in: query, required: false, description: "scope: attestation provider, e.g. aws", schema: { type: string } }
+        - { name: attest_account, in: query, required: false, description: "scope: attested account/subscription/project", schema: { type: string } }
+        - { name: join_key, in: query, required: false, description: "scope: join-key name the host token-enrolled with", schema: { type: string } }
+        - { name: condition, in: query, required: false, description: "health drill-down (matches the dashboard verdict)", schema: { type: string, enum: [expired, expiring, stale, clock_skewed, unhealthy] } }
       responses:
         "200":
           description: A page of devices.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/DeviceList" }
+        "400": { $ref: "#/components/responses/Problem" }
         "401": { $ref: "#/components/responses/Unauthorized" }
   /admin/v1/audit:
     get:
@@ -591,6 +602,12 @@ components:
         clock_offset_ms: { type: integer }
         health: { type: string }
         last_seen: { type: string, format: date-time }
+        attest_provider: { type: string, description: "provenance: cloud-attestation provider, e.g. aws (attested hosts only)" }
+        attest_account: { type: string, description: "provenance: attested account/subscription/project" }
+        attest_principal: { type: string, description: "provenance: attested ARN/principal/service-account" }
+        attest_region: { type: string }
+        join_key_name: { type: string, description: "provenance: join-key name for token-enrolled hosts" }
+        groups: { type: array, items: { type: string }, description: "groups the host was issued (from its authoritative enrollment)" }
     DeviceList:
       type: object
       required: [devices, count]
@@ -934,6 +951,7 @@ components:
         pubkey_hash: { type: string, description: "fingerprint of the host pubkey; the key bytes are never returned" }
         method: { type: string }
         join_key_id: { type: integer }
+        join_key_name: { type: string, description: "name of the join key (resolved from join_key_id); token enrollments only" }
         groups: { type: array, items: { type: string } }
         status: { type: string, description: "pending | issued | denied" }
         overlay_ip: { type: string }

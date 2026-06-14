@@ -40,10 +40,32 @@ export function useFleetHealth() {
   })
 }
 
-export function useDevices() {
-  return useQuery({
-    queryKey: ['devices'],
-    queryFn: () => unwrap(api.GET('/admin/v1/devices', { params: { query: { limit: 200 } } })),
+export type DeviceCondition = 'expired' | 'expiring' | 'stale' | 'clock_skewed' | 'unhealthy'
+
+export type DeviceFilters = {
+  provider?: string
+  attest_account?: string
+  join_key?: string
+  condition?: DeviceCondition
+}
+
+// useDevices supports the server-side scope filters (provider/attest_account/join_key)
+// and the health-condition drill-down. Keyset-paginated on the `next_after` overlay_ip
+// cursor (useInfiniteQuery, like useEnrollments) so a drill-down never silently caps —
+// the dashboard "why" count and this list stay consistent at any fleet size.
+export function useDevices(filters: DeviceFilters = {}) {
+  const scope = {
+    ...(filters.provider ? { provider: filters.provider } : {}),
+    ...(filters.attest_account ? { attest_account: filters.attest_account } : {}),
+    ...(filters.join_key ? { join_key: filters.join_key } : {}),
+    ...(filters.condition ? { condition: filters.condition } : {}),
+  }
+  return useInfiniteQuery({
+    queryKey: ['devices', filters],
+    queryFn: ({ pageParam }) =>
+      unwrap(api.GET('/admin/v1/devices', { params: { query: { limit: 200, ...scope, ...(pageParam ? { after: pageParam } : {}) } } })),
+    initialPageParam: '',
+    getNextPageParam: (last) => last.next_after ?? undefined,
   })
 }
 

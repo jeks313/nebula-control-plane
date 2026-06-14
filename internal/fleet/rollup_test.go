@@ -79,6 +79,48 @@ func TestRollupOrdersCriticalFirst(t *testing.T) {
 	}
 }
 
+// TestRollupDeviceConditionLinks: device-condition reasons carry a Devices
+// drill-down link; non-device reasons (audit, rollout) do not.
+func TestRollupDeviceConditionLinks(t *testing.T) {
+	rep := Report{Total: 5, Expired: 1, ExpiringSoon: 1, Stale: 1, ClockSkewed: 1, Unhealthy: 1}
+	h := Rollup(rep, AuditTampered, "canary", th)
+	links := map[string]string{}
+	for _, r := range h.Reasons {
+		links[r.Code] = r.Link
+	}
+	want := map[string]string{
+		"CERTS_EXPIRED":   "/devices?condition=expired",
+		"CERTS_EXPIRING":  "/devices?condition=expiring",
+		"HOSTS_STALE":     "/devices?condition=stale",
+		"CLOCK_SKEWED":    "/devices?condition=clock_skewed",
+		"HOSTS_UNHEALTHY": "/devices?condition=unhealthy",
+	}
+	for code, link := range want {
+		if links[code] != link {
+			t.Errorf("%s link = %q, want %q", code, links[code], link)
+		}
+	}
+	if links["AUDIT_CHAIN_BROKEN"] != "" {
+		t.Errorf("audit reason must not carry a /devices link, got %q", links["AUDIT_CHAIN_BROKEN"])
+	}
+	if links["ROLLOUT_IN_PROGRESS"] != "" {
+		t.Errorf("rollout reason must not carry a /devices link, got %q", links["ROLLOUT_IN_PROGRESS"])
+	}
+}
+
+// TestConditionSQLTokens: every condition token resolves; garbage does not.
+func TestConditionSQLTokens(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	for _, c := range []string{CondExpired, CondExpiring, CondStale, CondClockSkewed, CondUnhealthy} {
+		if sql, _, ok := ConditionSQL(c, now, th); !ok || sql == "" {
+			t.Errorf("ConditionSQL(%q) ok=%v sql=%q", c, ok, sql)
+		}
+	}
+	if _, _, ok := ConditionSQL("bogus", now, th); ok {
+		t.Error("ConditionSQL(bogus) should be !ok")
+	}
+}
+
 func codeSet(h Health) map[string]bool {
 	out := map[string]bool{}
 	for _, r := range h.Reasons {

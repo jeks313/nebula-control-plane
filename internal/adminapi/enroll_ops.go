@@ -20,6 +20,7 @@ type EnrollmentView struct {
 	PubkeyHash   string   `json:"pubkey_hash"`
 	Method       string   `json:"method"`
 	JoinKeyID    int64    `json:"join_key_id,omitempty"`
+	JoinKeyName  string   `json:"join_key_name,omitempty"` // resolved from join_key_id; user-friendly provenance
 	Groups       []string `json:"groups"`
 	Status       string   `json:"status"`
 	OverlayIP    string   `json:"overlay_ip,omitempty"`
@@ -84,9 +85,26 @@ func (s *Server) handleEnrollments(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, "list enrollments failed", err)
 		return
 	}
+	// Resolve join-key names for token enrollments on this page (one lookup), so the
+	// UI can show "token · laptops-2026" instead of a bare numeric id.
+	var names map[int64]string
+	for _, e := range es {
+		if e.JoinKeyID != 0 {
+			var nerr error
+			if names, nerr = s.joinKeyNameMap(r.Context()); nerr != nil {
+				s.fail(w, r, "join key lookup failed", nerr)
+				return
+			}
+			break
+		}
+	}
 	out := make([]EnrollmentView, len(es))
 	for i, e := range es {
-		out[i] = enrollmentView(e)
+		v := enrollmentView(e)
+		if e.JoinKeyID != 0 {
+			v.JoinKeyName = names[e.JoinKeyID]
+		}
+		out[i] = v
 	}
 	resp := map[string]any{"enrollments": out, "count": len(out)}
 	if len(es) == limit {

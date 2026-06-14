@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom'
 import { useFleetHealth, type FleetHealth } from '../api/hooks'
 import { Card, Page, StateBlock, ErrorState, cx } from '../components/ui'
 import {
@@ -73,13 +74,27 @@ function HealthVerdict({ h }: { h: FleetHealth }) {
         <Card>
           <div className="border-b border-edge px-4 py-2 text-[12px] text-ink-faint">Why</div>
           <ul className="divide-y divide-edge">
-            {h.reasons.map((r) => (
-              <li key={r.code} className="flex items-center gap-3 px-4 py-2.5">
-                <span className={cx('nums w-8 text-right', SEV_TEXT[r.severity] ?? 'text-ink-dim')}>{r.count}</span>
-                <span className="text-ink">{r.detail}</span>
-                <span className="ml-auto font-mono text-[11px] text-ink-faint">{r.code}</span>
-              </li>
-            ))}
+            {h.reasons.map((r) => {
+              const inner = (
+                <>
+                  <span className={cx('nums w-8 text-right', SEV_TEXT[r.severity] ?? 'text-ink-dim')}>{r.count}</span>
+                  <span className="text-ink">{r.detail}</span>
+                  <span className="ml-auto font-mono text-[11px] text-ink-faint">{r.code}</span>
+                  {r.link && <span aria-hidden className="text-ink-faint">›</span>}
+                </>
+              )
+              return (
+                <li key={r.code}>
+                  {r.link ? (
+                    <Link to={r.link} className="flex items-center gap-3 px-4 py-2.5 transition-colors hover:bg-mesh-2" title="View affected hosts">
+                      {inner}
+                    </Link>
+                  ) : (
+                    <div className="flex items-center gap-3 px-4 py-2.5">{inner}</div>
+                  )}
+                </li>
+              )
+            })}
           </ul>
         </Card>
       )}

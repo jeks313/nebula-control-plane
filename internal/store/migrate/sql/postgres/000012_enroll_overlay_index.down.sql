@@ -1,0 +1,1 @@
+DROP INDEX idx_enrollments_overlay_status;

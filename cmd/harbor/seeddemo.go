@@ -81,15 +81,19 @@ func cmdSeedDemo(args []string) {
 		}
 	}
 
-	// Join keys (one auto-issue, varied caps/expiry).
+	// Join keys (one auto-issue, varied caps/expiry). Capture the assigned ids so the
+	// issued fleet enrollments below can carry join_key_id (the device-provenance link).
+	jkIDs := map[string]int64{}
 	for _, p := range []joinkey.Params{
 		{Name: "laptops-2026", Groups: []string{"laptops"}, MaxUses: 50, TTL: 30 * 24 * time.Hour, QuotaPerHour: 10},
 		{Name: "ci-runners", Groups: []string{"ci", "ephemeral"}, MaxUses: 0, AutoIssue: true, Ephemeral: true},
 		{Name: "datacenter-iad", Groups: []string{"servers", "iad"}, MaxUses: 200, TTL: 90 * 24 * time.Hour},
 	} {
-		if _, _, err := joinkey.Create(ctx, s, p, now); err != nil {
+		_, jk, err := joinkey.Create(ctx, s, p, now)
+		if err != nil {
 			fatalf("seed joinkey %s: %v", p.Name, err)
 		}
+		jkIDs[p.Name] = jk.ID
 	}
 	// Show non-zero usage on one key (Create always starts at 0).
 	s.DB.WithContext(ctx).Table("join_keys").Where("name = ?", "laptops-2026").Update("used_count", 17)
@@ -234,7 +238,63 @@ func cmdSeedDemo(args []string) {
 		}
 	}
 
-	fmt.Printf("seeded demo fleet: %d devices, 3 lighthouses, 3 join keys, 5 enrollments (3 token + 2 aws-sigv4), 1 active rollout (v43 canary), a published cloud-trust config + policy, and 1 pending policy change awaiting approval\n", len(devices))
+	// Issued enrollments matching the heartbeat IPs, so the Devices list shows real
+	// provenance (and the scope/condition filters have data): a spread across two AWS
+	// accounts and the three join keys. enrollments.overlay_ip joins to heartbeats.
+	nameByIP := make(map[string]string, len(devices))
+	for _, d := range devices {
+		nameByIP[d.OverlayIP] = d.DeviceName
+	}
+	type prov struct {
+		ip, method, joinKey, account, arn, region string
+		groups                                    []string
+	}
+	provs := []prov{
+		{ip: "100.64.0.11", method: "aws-sigv4", account: "111122223333", arn: "arn:aws:sts::111122223333:assumed-role/web-prod/i-011", region: "eu-central-1", groups: []string{"fleet", "web"}},
+		{ip: "100.64.0.12", method: "aws-sigv4", account: "111122223333", arn: "arn:aws:sts::111122223333:assumed-role/web-prod/i-012", region: "eu-central-1", groups: []string{"fleet", "web"}},
+		{ip: "100.64.0.13", method: "token", joinKey: "datacenter-iad", groups: []string{"servers", "iad"}},
+		{ip: "100.64.0.14", method: "token", joinKey: "datacenter-iad", groups: []string{"servers", "iad"}},
+		{ip: "100.64.0.15", method: "token", joinKey: "datacenter-iad", groups: []string{"servers", "iad"}},
+		{ip: "100.64.0.16", method: "token", joinKey: "datacenter-iad", groups: []string{"servers", "iad"}},
+		{ip: "100.64.0.17", method: "aws-sigv4", account: "444455556666", arn: "arn:aws:sts::444455556666:assumed-role/db/i-017", region: "ap-southeast-1", groups: []string{"fleet", "db"}},
+		{ip: "100.64.0.18", method: "aws-sigv4", account: "444455556666", arn: "arn:aws:sts::444455556666:assumed-role/db/i-018", region: "ap-southeast-1", groups: []string{"fleet", "db"}},
+		{ip: "100.64.0.19", method: "token", joinKey: "laptops-2026", groups: []string{"laptops"}},
+		{ip: "100.64.0.20", method: "token", joinKey: "laptops-2026", groups: []string{"laptops"}},
+		{ip: "100.64.0.21", method: "aws-sigv4", account: "111122223333", arn: "arn:aws:sts::111122223333:assumed-role/web-prod/i-021", region: "eu-central-1", groups: []string{"fleet", "web"}},
+		{ip: "100.64.0.22", method: "aws-sigv4", account: "111122223333", arn: "arn:aws:sts::111122223333:assumed-role/web-prod/i-022", region: "eu-central-1", groups: []string{"fleet", "web"}},
+		{ip: "100.64.0.23", method: "token", joinKey: "datacenter-iad", groups: []string{"servers", "iad"}},
+		{ip: "100.64.0.24", method: "token", joinKey: "ci-runners", groups: []string{"ci", "ephemeral"}},
+	}
+	for i, p := range provs {
+		groups, _ := json.Marshal(p.groups)
+		ts := now.Add(-time.Duration(i+1) * 13 * time.Minute).UnixNano()
+		row := enrollment.Enrollment{
+			EnrollmentID: fmt.Sprintf("enr-fleet-%03d", i+1),
+			DeviceName:   nameByIP[p.ip],
+			PubkeyHash:   fmt.Sprintf("%064x", 200+i),
+			Method:       p.method,
+			Groups:       string(groups),
+			Status:       enrollment.StatusIssued,
+			OverlayIP:    p.ip,
+			CreatedAt:    ts,
+			DecidedAt:    ts,
+			Approver:     "ops@hyde.ca",
+		}
+		if p.method == "token" {
+			row.JoinKeyID = jkIDs[p.joinKey]
+		} else {
+			row.AttestProvider = cloudtrust.ProviderAWS
+			row.AttestAccount = p.account
+			row.AttestPrincipal = p.arn
+			row.AttestRegion = p.region
+			row.VerifiedAt = ts
+		}
+		if err := s.DB.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&row).Error; err != nil {
+			fatalf("seed fleet enrollment %s: %v", p.ip, err)
+		}
+	}
+
+	fmt.Printf("seeded demo fleet: %d devices (each with provenance), 3 lighthouses, 3 join keys, %d issued + 4 queued enrollments, 1 active rollout (v43 canary), a published cloud-trust config + policy, and 1 pending policy change awaiting approval\n", len(devices), len(provs)+1)
 }
 
 // seedHeartbeats builds a believable ~14-host fleet whose facts drive the dashboard:
