@@ -131,6 +131,31 @@ YAML
   sudo cat /etc/nebula/host.pub" > "$WORK/hb-host.pub"
 echo "    got harbor host pubkey"
 
+# pilot init's default nebula firewall allows inbound ICMP only — fine for a data-plane
+# member, but harbor SERVES core-api (8444) + the console (8445) over the overlay, so the
+# mesh must be allowed to reach those TCP ports inbound (otherwise heartbeat/renew time
+# out: ping works, the HTTP call is dropped). Patch the firewall BEFORE nebula starts.
+echo "==> [harbor] open nebula firewall for control-plane ports (core-api 8444 + console 8445)"
+rsh "$HB_IP" 'sudo python3 - /etc/nebula/config.yml <<PY
+import sys
+p = sys.argv[1]
+lines = open(p).read().splitlines()
+out, i, done = [], 0, False
+while i < len(lines):
+    out.append(lines[i])
+    if (not done and lines[i].strip() == "proto: icmp"
+            and i + 1 < len(lines) and lines[i + 1].strip().startswith("host:")):
+        out.append(lines[i + 1])
+        for port in (8444, 8445):
+            out += ["    - port: %d" % port, "      proto: tcp", "      host: any"]
+        done = True
+        i += 2
+        continue
+    i += 1
+open(p, "w").write("\n".join(out) + "\n")
+print("firewall: added inbound tcp 8444+8445" if done else "firewall: PATTERN NOT FOUND (left unchanged)")
+PY'
+
 # ── 3. harbor: migrate + genesis (lighthouse + HARBOR control-plane certs) ───
 echo "==> [harbor] migrate + genesis (incl. -core-pub for Harbor's control-plane cert)"
 rcp "$WORK/lh-host.pub" "$SSH_USER@$HB_IP:/tmp/lh-host.pub"
@@ -303,6 +328,10 @@ echo "==> [harbor] start core-api + admin console on the overlay ($HARBOR_OVERLA
 rsh "$HB_IP" "set -e
   cd ~/ncp
   DSN=~/ncp/harbor.db; QDSN=~/ncp/queue.db; G=~/ncp/genesis
+  # core-api runs as $SSH_USER but -host-cert lives in /etc/nebula (root, mode 0700 from
+  # pilot init); make the dir traversable so it can read the 0644 host.crt (host.key
+  # stays 0600 root). Without this core-api crashes at boot with 'permission denied'.
+  sudo chmod o+rx /etc/nebula
   # core-api: renew + heartbeat over the mesh, verifying its own control-plane cert at boot.
   sudo systemd-run --uid=$SSH_USER --gid=$SSH_USER --unit ncp-core --collect /usr/local/bin/harbor core-api \
     -dsn \$DSN -ca-cert \$G/ca.crt -ca-key \$G/ca.key -config-key \$G/config-signing.key \
