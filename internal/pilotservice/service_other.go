@@ -1,8 +1,10 @@
-//go:build !linux && !darwin
+//go:build !linux && !darwin && !windows
 
 // Stubs for platforms without a supported service manager in this build (e.g.
-// Windows SCM — a later phase). The service operations fail-closed with
-// ErrUnsupported; the pure helpers (Spec) live in service.go and work everywhere.
+// the *BSDs, illumos, plan9). Linux/macOS/Windows have real backends
+// (service_linux.go / service_darwin.go / service_windows.go); on anything else
+// the service operations fail-closed with ErrUnsupported, while the pure helpers
+// (Spec) in service.go still work everywhere.
 package pilotservice
 
 // StateRoot is a placeholder on unsupported platforms (the service step fails before

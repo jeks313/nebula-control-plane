@@ -4,15 +4,16 @@
 //
 //	service_linux.go   — systemd (template unit pilot@<mesh> + EnvironmentFile)
 //	service_darwin.go  — launchd (a per-mesh LaunchDaemon plist)         [ADR 0008 Phase 4]
-//	service_other.go   — stubs (ErrUnsupported) for everything else      [e.g. Windows SCM, later]
+//	service_windows.go — Windows SCM (a per-mesh auto-start Win32 service) [ADR 0008 Phase 4]
+//	service_other.go   — stubs (ErrUnsupported) for everything else      [e.g. the *BSDs]
 //
 // Per ADR 0008 a host can join multiple meshes, so each mesh is its own service
 // with its own state dir (StateRoot/<mesh>) and config. The service is keep-alive
 // only — pilot supervises nebula internally (backoff) and self-updates in place
 // (ADR 0003), so the OS never manages nebula restarts.
 //
-// Each platform file provides the same API: the StateRoot const, Install/Uninstall/
-// Status/RemoveTemplate, and ServiceLabel/LogHint (for human-facing messages).
+// Each platform file provides the same API: StateRoot, Install/Uninstall/Status/
+// RemoveTemplate, Render, and ServiceLabel/LogHint (for human-facing messages).
 package pilotservice
 
 import "errors"
