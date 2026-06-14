@@ -14,8 +14,9 @@ Implementation-plan **3.1**. Genesis bootstraps the control plane's two trust ro
 
 1. **CA key** — signs all host/lighthouse/Core certificates. (design §2.1 TCB root)
 2. **Config-signing key** — signs the JWS config/cert **bundles** Pilot consumes (protocol §3/§6). **Distinct** from the CA key, so compromise of one is not compromise of the other.
-3. **First lighthouse certificate** — issued from the lighthouse's *own* public key (P1: the lighthouse generates its key locally; genesis never holds it).
-4. **Recorded keys + audit** — both roots land in the `keys` table; every step is an entry in the hash-chained audit log (2.2) under both operator identities.
+3. **First lighthouse certificate** — issued from the lighthouse's *own* public key (P1: the lighthouse generates its key locally; genesis never holds it), in group `lighthouse`.
+4. **First Core (control-plane) certificate** *(recommended; `-core-pub`)* — issued from Core's own public key (P1), in group **`control-plane`**. The firewall baseline (policy §6.3) routes *every* host's renew/heartbeat to `group:control-plane`, so a Core node **must** hold that group or it is silently unreachable. Issuing it here keeps the bootstrap self-consistent with the baseline. If you skip `-core-pub`, you **must** mint Core's cert out-of-band before bring-up (`harbor issue-cert -groups control-plane …`) — genesis prints a warning in that case.
+5. **Recorded keys + audit** — both roots land in the `keys` table; every step is an entry in the hash-chained audit log (2.2) under both operator identities.
 
 ## Trust-root custody
 
@@ -35,9 +36,10 @@ Implementation-plan **3.1**. Genesis bootstraps the control plane's two trust ro
 ## Procedure (local / software)
 
 ```bash
-# 1. The lighthouse generates ITS OWN key (P1). Run on the lighthouse host, or
-#    locally and ship only host.key to it afterwards.
+# 1. The lighthouse AND Core each generate THEIR OWN key (P1). Run on each host, or
+#    locally and ship only host.key to each afterwards.
 pilot init -dir /tmp/lh            # writes host.key (0600) + host.pub
+pilot init -dir /tmp/core          # Core's own key (the control-plane node)
 
 # 2. The two operators run the ceremony. Operators must be distinct.
 harbor genesis \
@@ -46,9 +48,11 @@ harbor genesis \
   -lighthouse-pub /tmp/lh/host.pub \
   -lighthouse-ip 100.64.0.1 \
   -lighthouse-addr 198.51.100.1:4242 \
+  -core-pub /tmp/core/host.pub \
+  -core-ip 100.64.0.2 \
   -pool 100.64.0.0/16
-# -> ./genesis/{ca.crt, config-signing.pub, lighthouse-1.crt, genesis.json,
-#               ca.key, config-signing.key}
+# -> ./genesis/{ca.crt, config-signing.pub, lighthouse-1.crt, harbor-core.crt,
+#               genesis.json, ca.key, config-signing.key}
 ```
 
 Production variant: replace the backend flags —
@@ -65,7 +69,8 @@ harbor genesis -out ./genesis -operator-a alice -operator-b bob \
 - `ca.crt` → every member's trust bundle (`pki.ca`).
 - `config-signing.pub` → **pinned into Pilot** (the bundle-verification root, protocol §6). Treat the pin as code: changing it is a trust event.
 - `lighthouse-1.crt` + the lighthouse's `host.key` → the lighthouse host.
-- `genesis.json` → archive (records CA fingerprint, config-signing key id, lighthouse fingerprint, operators, timestamp).
+- `harbor-core.crt` + Core's `host.key` → the Core host (its control-plane identity).
+- `genesis.json` → archive (records CA fingerprint, config-signing key id, lighthouse + core fingerprints, operators, timestamp).
 - `ca.key` / `config-signing.key` (software only) → **secure offline storage**; these are the crown jewels.
 
 ## Bring up the lighthouse
@@ -74,13 +79,23 @@ Render a Nebula config with `am_lighthouse: true`, `pki.ca = ca.crt`,
 `pki.cert = lighthouse-1.crt`, `pki.key = host.key`, then run it under Pilot
 (`pilot supervise`, M1.6). Validate first with `nebula -test -config <cfg>`.
 
+## Bring up Core
+
+Run Core's Nebula node with `pki.cert = harbor-core.crt` + Core's `host.key`, then start
+`harbor core-api` with **`-host-cert ./genesis/harbor-core.crt`**. At boot, core-api
+verifies that cert carries `group:control-plane` and **fails fast** if it does not — so a
+mis-issued or wrong-group Core identity is caught at bring-up rather than silently
+breaking fleet-wide renew/heartbeat. It logs `control-plane identity verified` on success;
+omitting `-host-cert` logs a warning that the invariant is unverified.
+
 ## Verification (the 3.1 "done when")
 
 ```bash
 nebula-cert verify -ca genesis/ca.crt -crt genesis/lighthouse-1.crt   # cert chains to CA
 nebula -test -config <lighthouse.yml>                                  # config is valid
 harbor audit verify                                                    # chain intact:
-#   genesis-ca, genesis-config-key, issue-cert, genesis-complete
+#   genesis-ca, genesis-config-key, issue-cert (lighthouse), genesis-core, genesis-complete
+nebula-cert verify -ca genesis/ca.crt -crt genesis/harbor-core.crt     # Core cert chains to CA
 ```
 
 The automated equivalent is `internal/integration` `TestGenesisRun`.
