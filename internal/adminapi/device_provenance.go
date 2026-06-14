@@ -3,9 +3,11 @@ package adminapi
 import (
 	"context"
 	"encoding/json"
+	"sort"
 
 	"github.com/jeks313/nebula-control-plane/internal/enrollment"
 	"github.com/jeks313/nebula-control-plane/internal/joinkey"
+	"github.com/jeks313/nebula-control-plane/internal/policy"
 )
 
 // Device provenance: each device's enrollment lineage — how it joined the mesh and
@@ -108,6 +110,44 @@ func (s *Server) overlayIPsForScope(ctx context.Context, provider, account, join
 		allow[r.OverlayIP] = true
 	}
 	return allow, nil
+}
+
+// fleetGroupMap builds the fleet-wide group -> hosts membership (and the full issued
+// host population) for blast-radius, from each host's AUTHORITATIVE (latest issued)
+// enrollment groups — the same latest-issued-per-overlay_ip dedup as the provenance
+// path. Reserved groups (control-plane/lighthouse) are excluded as keys (no user rule
+// can change their reachability), but those hosts still count in allHosts (an `any`
+// rule touches them). Issued — not heartbeats — is the right population: groups live
+// on enrollments, and a policy change affects every cert-holder whether or not it has
+// recently reported.
+func (s *Server) fleetGroupMap(ctx context.Context) (groupHosts map[string][]string, allHosts []string, err error) {
+	var rows []enrollProv
+	if err = s.cfg.Store.DB.WithContext(ctx).
+		Select(provSelect).
+		Where("status = ? AND overlay_ip <> ''", enrollment.StatusIssued).
+		Order("id DESC").
+		Find(&rows).Error; err != nil {
+		return nil, nil, err
+	}
+	groupHosts = map[string][]string{}
+	seen := make(map[string]bool, len(rows))
+	for _, r := range rows {
+		if seen[r.OverlayIP] {
+			continue // only the latest issued enrollment per overlay_ip
+		}
+		seen[r.OverlayIP] = true
+		allHosts = append(allHosts, r.OverlayIP)
+		var groups []string
+		_ = json.Unmarshal([]byte(r.Groups), &groups)
+		for _, g := range groups {
+			if g == policy.GroupControlPlane || g == policy.GroupLighthouse {
+				continue
+			}
+			groupHosts[g] = append(groupHosts[g], r.OverlayIP)
+		}
+	}
+	sort.Strings(allHosts)
+	return groupHosts, allHosts, nil
 }
 
 // joinKeyNameMap returns join-key id -> name for ALL keys (including revoked ones,

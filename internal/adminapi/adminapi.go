@@ -217,6 +217,7 @@ func (s *Server) routeTable() []route {
 		{"POST", "/admin/v1/policy/reachability", s.handlePolicyReachability},
 		{"POST", "/admin/v1/policy/matrix", s.handlePolicyMatrix},
 		{"POST", "/admin/v1/policy/tests", s.handlePolicyTests},
+		{"POST", "/admin/v1/policy/diff", s.handlePolicyDiff},
 		// Cloud-attestation trust config (dual-control; approved via /approvals).
 		{"GET", "/admin/v1/cloudtrust/active", s.handleCloudTrustActive},
 		{"POST", "/admin/v1/cloudtrust/propose", s.handleCloudTrustPropose},
@@ -1026,6 +1027,79 @@ func (s *Server) handlePolicyTests(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"results": results, "passed": passed, "failed": len(results) - passed, "ok": passed == len(results),
 	})
+}
+
+// POST /admin/v1/policy/diff — read-only analysis (A1.2): the user-rule flow delta
+// between the active published policy and a draft, plus the blast radius (the real
+// hosts whose compiled firewall changes). Dry-run; ungated like the other analysis
+// endpoints (it is authenticated, like all of /admin/v1, but carries no perm/step-up).
+func (s *Server) handlePolicyDiff(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Policy string `json:"policy"`
+	}
+	if !readJSON(w, r, &body) {
+		return
+	}
+	draft, err := policy.Parse(body.Policy)
+	if err != nil {
+		writeProblem(w, http.StatusBadRequest, "invalid policy", err.Error())
+		return
+	}
+	// Bound the draft: FlowDiff is O(distinct group-pairs) and the handler also scans the
+	// fleet, so an enormous caller-supplied draft must not pin a worker (mirrors the matrix
+	// group cap). The active policy is our own bounded committed state.
+	const maxDraftRules = 4096
+	if len(draft.Rules) > maxDraftRules {
+		writeProblem(w, http.StatusBadRequest, "policy too large", fmt.Sprintf("diff supports at most %d rules", maxDraftRules))
+		return
+	}
+	// A draft that violates the publish invariants (e.g. references a reserved group) can
+	// be previewed, but it can never be committed — surface that as a non-fatal warning so
+	// the preview is honest (the propose path hard-rejects it).
+	warning := ""
+	if cerr := policy.CheckInvariants(draft); cerr != nil {
+		warning = cerr.Error()
+	}
+	// Active side = the latest committed publish. Absent => empty policy (everything in
+	// the draft is "added"). A committed policy that fails to parse is a 500, not a 400:
+	// the draft is the caller's input, the active policy is our own committed state.
+	active := policy.Policy{}
+	activeInfo := map[string]any{"published": false}
+	if ch, ok, lerr := s.dc.LatestCommitted(r.Context(), policy.PublishKind); lerr != nil {
+		s.fail(w, r, "read active policy failed", lerr)
+		return
+	} else if ok {
+		if active, err = policy.Parse(string(ch.Payload)); err != nil {
+			s.fail(w, r, "active policy is unparseable", err)
+			return
+		}
+		activeInfo = map[string]any{"published": true, "change_id": ch.ID, "hash": hex.EncodeToString(ch.PayloadHash)}
+	}
+
+	diff := policy.FlowDiff(active, draft)
+
+	groupHosts, allHosts, gerr := s.fleetGroupMap(r.Context())
+	if gerr != nil {
+		s.fail(w, r, "fleet group map failed", gerr)
+		return
+	}
+	blast := policy.BlastRadius(diff, groupHosts, allHosts)
+	// Cap the host list in the response; `count` stays the true blast radius.
+	const maxBlastHosts = 200
+	hosts, truncated := blast.Hosts, false
+	if len(hosts) > maxBlastHosts {
+		hosts, truncated = hosts[:maxBlastHosts], true
+	}
+	resp := map[string]any{
+		"active":  activeInfo,
+		"added":   diff.Added,
+		"removed": diff.Removed,
+		"blast":   map[string]any{"count": blast.Count, "total": blast.Total, "hosts": hosts, "truncated": truncated},
+	}
+	if warning != "" {
+		resp["warning"] = warning
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func toRules(in []nebulaconfig.Rule) []nebulaRule {

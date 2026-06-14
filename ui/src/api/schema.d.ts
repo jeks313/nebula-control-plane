@@ -317,6 +317,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/v1/policy/diff": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Flow delta (active vs draft) + blast radius. (A1.2 analysis)
+         * @description The user-rule reachability flows added/removed between the active published policy and the draft, plus the blast radius — the real hosts whose compiled firewall would change. Dry-run; read-only.
+         */
+        post: operations["policyDiff"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/admin/v1/lighthouses/{ip}": {
         parameters: {
             query?: never;
@@ -754,6 +774,41 @@ export interface components {
             passed: number;
             failed: number;
             ok: boolean;
+        };
+        PolicyDiffRequest: {
+            /** @description the draft DSL; diffed against the active committed policy */
+            policy: string;
+        };
+        FlowDelta: {
+            /** @description literal rule from-group (may be 'any') */
+            from: string;
+            /** @description literal rule to-group (may be 'any') */
+            to: string;
+            flow: components["schemas"]["Flow"];
+        };
+        BlastRadius: {
+            /** @description true number of hosts whose firewall changes */
+            count: number;
+            /** @description total issued hosts in the fleet */
+            total: number;
+            /** @description affected overlay IPs (capped; count is authoritative) */
+            hosts?: string[];
+            /** @description true if the hosts list was capped */
+            truncated?: boolean;
+        };
+        PolicyDiff: {
+            /** @description the active-policy identity the diff was computed against (published:false if none) */
+            active: {
+                published: boolean;
+                /** Format: int64 */
+                change_id?: number;
+                hash?: string;
+            };
+            added: components["schemas"]["FlowDelta"][];
+            removed: components["schemas"]["FlowDelta"][];
+            blast: components["schemas"]["BlastRadius"];
+            /** @description present if the draft violates a publish invariant (it can be previewed but never committed) */
+            warning?: string;
         };
         LighthouseAdd: {
             overlay_ip: string;
@@ -1383,6 +1438,32 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PolicyTestResults"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    policyDiff: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PolicyDiffRequest"];
+            };
+        };
+        responses: {
+            /** @description Added/removed flows + blast radius. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PolicyDiff"];
                 };
             };
             400: components["responses"]["Problem"];

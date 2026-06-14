@@ -75,9 +75,29 @@ So the UI has two hard predecessors, tracked as a **backend track** that runs
     dimension → "reachable" when enforcement blocks; now each dimension is evaluated
     independently, with regression tests), a control-plane-sender baseline false-allow,
     a matrix O(n²) DoS (group cap), and query input validation.
-  - **Deferred to A1.2:** flow-diff (active vs draft) + **blast-radius** (needs a device
-    group-membership source; the devices/heartbeats table has no groups today),
-    assertion **storage + publish-gate** wiring, and richer per-rule invariant diagnostics.
+  - ✅ **A1.2a flow-diff + blast-radius (2026-06-13).** Added to `internal/policy/
+    analysis.go` (pure, reusing the A1.1 primitives): **`FlowDiff(active, draft)`** — the
+    user-rule flows **added/removed** vs the active policy, diffed per *literal* group pair
+    (so an `any` rule shows as itself, not fanned out), deduped per (proto,port) with
+    `N-N`→`N` port canonicalization, directional, baseline excluded; and
+    **`BlastRadius(diff, groupHosts, allHosts)`** — the real hosts a change touches (a
+    changed `A->B` flow affects group A ∪ group B, since `CompileHost` writes both
+    endpoints; an `any` side ⇒ the whole fleet). The host-membership source (the A1.2
+    blocker) is now `fleetGroupMap` — fleet-wide group→hosts from each host's **latest
+    issued enrollment** groups (the just-landed provenance data; reserved groups excluded
+    as keys, those hosts still in the `any` denominator). New read-only endpoint
+    `POST /admin/v1/policy/diff` (flow-diff + blast in one call; draft-rule cap; an
+    unpublishable draft is previewed with a non-fatal `warning`). UI: a **"Changes vs
+    active"** panel on the Policy page (added/removed flows + "up to N of M hosts
+    affected"). Adversarially reviewed (5-agent + verify): **11 confirmed of 31, all
+    LOW/MEDIUM** — fixed the draft-rule **DoS cap**, the reserved-group **warning**,
+    honest **superset** wording for blast radius, port-range churn, and added
+    fleet-group-map / truncation / conformance tests.
+  - **Deferred to A1.2b (the dual-control integration):** assertion **storage +
+    publish-gate** (bundle policy+tests in the `policy.publish` payload as a versioned
+    JSON envelope — one `PayloadHash` binds them, the no-TOCTOU §4.4 snapshot for free;
+    gate at propose **and** in the commit committer) + surfacing the test-results/diff
+    snapshot to the approver, and richer per-rule invariant diagnostics.
 - **A2 — Change/event emitter.** A fan-out (heartbeat upserts, rollout transitions,
   approval state) behind one multiplexed SSE endpoint. Until it exists, the rollout
   monitor polls.
@@ -1050,11 +1070,12 @@ The v1 UI-0…UI-6 pretended the backend was done. Reframe as a **backend track*
     commit → active; self-approve → 409). Adversarially reviewed (3-agent): 1 low fixed
     (the transient `committing` state now shows under an All tab, so a change is never
     invisible mid-commit).
-  - **Deferred to A1 / UI-4b:** the reachability **matrix** (default view), the **Tag
-    Canvas**, the analysis rail beyond single-host compile (**reachability query, test
-    authoring, blast-radius, server-computed diff overlay**), the CodeMirror DSL editor
-    with rich per-span diagnostics, canary-rollout monitor + drift panel, and Network/
-    IPAM — all need the A1 policy-analysis engine + new endpoints.
+  - **Analysis rail delivered incrementally:** reachability query + test runner + matrix
+    grid (A1.1), and the **active-vs-draft flow-diff + blast-radius** panel (A1.2a). Still
+    **deferred to UI-4b:** the reachability **matrix as the default view**, the **Tag
+    Canvas**, **test authoring/save** + the publish-gate result surfaced in Approvals
+    (A1.2b), the visual **diff overlay onto the matrix**, the CodeMirror DSL editor with
+    rich per-span diagnostics, canary-rollout monitor + drift panel, and Network/IPAM.
 - ✅ **Device provenance + /devices filtering (2026-06-13) — backend predecessor + UI.**
   The keystone slice that unblocked three §3.4 planned changes at once (provenance + scope
   filters, join-key name on Enrollments, dashboard "why" drill-downs — see those callouts).

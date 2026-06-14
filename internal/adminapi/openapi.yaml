@@ -320,6 +320,27 @@ paths:
               schema: { $ref: "#/components/schemas/PolicyTestResults" }
         "400": { $ref: "#/components/responses/Problem" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+  /admin/v1/policy/diff:
+    post:
+      summary: Flow delta (active vs draft) + blast radius. (A1.2 analysis)
+      description: >-
+        The user-rule reachability flows added/removed between the active published
+        policy and the draft, plus the blast radius — the real hosts whose compiled
+        firewall would change. Dry-run; read-only.
+      operationId: policyDiff
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PolicyDiffRequest" }
+      responses:
+        "200":
+          description: Added/removed flows + blast radius.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PolicyDiff" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
   /admin/v1/lighthouses/{ip}:
     put:
       summary: Re-address (and re-activate) a lighthouse.
@@ -843,6 +864,42 @@ components:
         passed: { type: integer }
         failed: { type: integer }
         ok: { type: boolean }
+    PolicyDiffRequest:
+      type: object
+      required: [policy]
+      properties:
+        policy: { type: string, description: "the draft DSL; diffed against the active committed policy" }
+    FlowDelta:
+      type: object
+      required: [from, to, flow]
+      properties:
+        from: { type: string, description: "literal rule from-group (may be 'any')" }
+        to: { type: string, description: "literal rule to-group (may be 'any')" }
+        flow: { $ref: "#/components/schemas/Flow" }
+    BlastRadius:
+      type: object
+      required: [count, total]
+      properties:
+        count: { type: integer, description: "true number of hosts whose firewall changes" }
+        total: { type: integer, description: "total issued hosts in the fleet" }
+        hosts: { type: array, items: { type: string }, description: "affected overlay IPs (capped; count is authoritative)" }
+        truncated: { type: boolean, description: "true if the hosts list was capped" }
+    PolicyDiff:
+      type: object
+      required: [active, added, removed, blast]
+      properties:
+        active:
+          type: object
+          description: "the active-policy identity the diff was computed against (published:false if none)"
+          required: [published]
+          properties:
+            published: { type: boolean }
+            change_id: { type: integer, format: int64 }
+            hash: { type: string }
+        added: { type: array, items: { $ref: "#/components/schemas/FlowDelta" } }
+        removed: { type: array, items: { $ref: "#/components/schemas/FlowDelta" } }
+        blast: { $ref: "#/components/schemas/BlastRadius" }
+        warning: { type: string, description: "present if the draft violates a publish invariant (it can be previewed but never committed)" }
     LighthouseAdd:
       type: object
       required: [overlay_ip, public_addrs]

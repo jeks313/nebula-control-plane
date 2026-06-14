@@ -6,9 +6,11 @@ import {
   useReachability,
   usePolicyMatrix,
   useRunPolicyTests,
+  useFlowDiff,
   type CompileResult,
   type Decision,
   type ReachabilityMatrix,
+  type PolicyDiff,
 } from '../api/hooks'
 import { usePermissions } from '../api/perms'
 import { isApiError, isCentrallyHandled } from '../api/errors'
@@ -27,10 +29,6 @@ export function Policy() {
         <ActivePolicyCard />
         <DraftEditor draft={draft} setDraft={setDraft} mayPropose={mayPropose} />
         <AnalysisRail draft={draft} />
-        <p className="text-[12px] text-ink-faint">
-          Blast-radius (affected hosts) and the visual active-vs-draft diff overlay (§4.4) land with A1.2 + the device
-          group-membership source.
-        </p>
       </div>
     </Page>
   )
@@ -177,11 +175,80 @@ function AnalysisRail({ draft }: { draft: string }) {
         Analysis <span className="text-ink-faint">(server-computed)</span>
       </div>
       <div className="flex flex-col gap-5 px-4 py-3">
+        <FlowDiffView draft={draft} />
         <ReachabilityQuery draft={draft} />
         <PolicyTests draft={draft} />
         <MatrixView draft={draft} />
       </div>
     </Card>
+  )
+}
+
+// FlowDiffView — the §4.4 "what does this change do" panel: the flows this draft adds
+// (accent) / removes (amber) vs the active published policy, and the blast radius (how
+// many real hosts whose firewall would change). Server-computed.
+function FlowDiffView({ draft }: { draft: string }) {
+  const toast = useToast()
+  const diff = useFlowDiff()
+  return (
+    <div>
+      <div className="mb-2 flex items-center gap-2">
+        <span className="text-[11px] uppercase tracking-wide text-ink-faint">Changes vs active</span>
+        <Button
+          onClick={() =>
+            diff.mutate({ policy: draft }, { onError: (e) => toast.notify(isApiError(e) ? e.detail || e.title : 'Diff failed.', 'error') })
+          }
+          disabled={diff.isPending}
+        >
+          {diff.isPending ? '…' : 'Diff'}
+        </Button>
+      </div>
+      {diff.data && <FlowDiffResult d={diff.data} />}
+    </div>
+  )
+}
+
+function FlowDiffResult({ d }: { d: PolicyDiff }) {
+  const added = d.added ?? []
+  const removed = d.removed ?? []
+  const b = d.blast
+  const warning = d.warning ? (
+    <div className="rounded-[6px] border border-warn/40 bg-warn/10 px-3 py-2 text-[12px] text-warn">
+      Won&rsquo;t publish: {d.warning}
+    </div>
+  ) : null
+  if (added.length === 0 && removed.length === 0) {
+    return (
+      <div className="flex flex-col gap-2">
+        {warning}
+        <div className="text-[12px] text-ink-faint">No reachability change vs the active policy.</div>
+      </div>
+    )
+  }
+  return (
+    <div className="flex flex-col gap-2">
+      {warning}
+      {b && (
+        <div className="text-[12px] text-ink-dim">
+          Blast radius: up to <span className="nums text-ink">{b.count}</span> of <span className="nums">{b.total}</span>{' '}
+          hosts affected <span className="text-ink-faint" title="members of the changed rules' groups — a conservative superset">(?)</span>
+          {b.hosts && b.hosts.length > 0 && (
+            <span className="ml-1 font-mono text-[11px] text-ink-faint">
+              {b.hosts.slice(0, 8).join(', ')}
+              {b.truncated || b.hosts.length > 8 ? ' …' : ''}
+            </span>
+          )}
+        </div>
+      )}
+      <ul className="flex flex-col gap-0.5 font-mono text-[11px]">
+        {removed.map((f, i) => (
+          <li key={`r${i}`} className="text-warn">− allow {f.from} -&gt; {f.to} {f.flow.proto} {f.flow.port}</li>
+        ))}
+        {added.map((f, i) => (
+          <li key={`a${i}`} className="text-permit">+ allow {f.from} -&gt; {f.to} {f.flow.proto} {f.flow.port}</li>
+        ))}
+      </ul>
+    </div>
   )
 }
 

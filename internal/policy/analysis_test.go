@@ -141,6 +141,105 @@ func TestMatrixAnySourceFansOut(t *testing.T) {
 	}
 }
 
+func hasDelta(ds []FlowDelta, from, to, proto, port string) bool {
+	for _, d := range ds {
+		if d.From == from && d.To == to && d.Flow.Proto == proto && d.Flow.Port == port {
+			return true
+		}
+	}
+	return false
+}
+
+func TestFlowDiff(t *testing.T) {
+	active := mustParse(t, "allow web -> db tcp 5432\nallow laptops -> web tcp 443\n")
+	draft := mustParse(t, "allow laptops -> web tcp 443\nallow contractors -> web tcp 443\n")
+	d := FlowDiff(active, draft)
+	// db flow removed; contractors->web added; laptops->web unchanged (in both).
+	if !hasDelta(d.Removed, "web", "db", "tcp", "5432") {
+		t.Errorf("expected web->db tcp/5432 removed, got %+v", d.Removed)
+	}
+	if !hasDelta(d.Added, "contractors", "web", "tcp", "443") {
+		t.Errorf("expected contractors->web tcp/443 added, got %+v", d.Added)
+	}
+	if hasDelta(d.Added, "laptops", "web", "tcp", "443") || hasDelta(d.Removed, "laptops", "web", "tcp", "443") {
+		t.Errorf("laptops->web is in both policies — must not appear in the diff: %+v", d)
+	}
+}
+
+func TestFlowDiffEmptyActiveAllAdded(t *testing.T) {
+	d := FlowDiff(Policy{}, mustParse(t, "allow web -> db tcp 5432\n"))
+	if len(d.Removed) != 0 {
+		t.Errorf("nothing to remove against an empty active policy, got %+v", d.Removed)
+	}
+	if !hasDelta(d.Added, "web", "db", "tcp", "5432") || len(d.Added) != 1 {
+		t.Errorf("all draft flows should be added, got %+v", d.Added)
+	}
+}
+
+func TestFlowDiffNormalizesDuplicatesAndOrder(t *testing.T) {
+	active := mustParse(t, "allow web -> db tcp 5432\nallow laptops -> web tcp 443\n")
+	// same flows, reordered + duplicated — semantically identical, so no change.
+	draft := mustParse(t, "allow laptops -> web tcp 443\nallow web -> db tcp 5432\nallow web -> db tcp 5432\n")
+	d := FlowDiff(active, draft)
+	if len(d.Added) != 0 || len(d.Removed) != 0 {
+		t.Errorf("reorder + duplicate must not register as a change: %+v", d)
+	}
+}
+
+func TestFlowDiffCanonicalizesSingleValueRange(t *testing.T) {
+	// 443 and 443-443 are reachability-identical — must not register as a change.
+	active := mustParse(t, "allow web -> db tcp 443\n")
+	draft := mustParse(t, "allow web -> db tcp 443-443\n")
+	d := FlowDiff(active, draft)
+	if len(d.Added) != 0 || len(d.Removed) != 0 {
+		t.Errorf("443 vs 443-443 must be a no-op diff, got %+v", d)
+	}
+	// A genuinely different range still diffs.
+	if d2 := FlowDiff(active, mustParse(t, "allow web -> db tcp 443-445\n")); len(d2.Added) == 0 {
+		t.Errorf("443 vs 443-445 should register a change, got %+v", d2)
+	}
+}
+
+func TestFlowDiffDirectionAndAny(t *testing.T) {
+	active := mustParse(t, "allow web -> db tcp 443\n")
+	draft := mustParse(t, "allow db -> web tcp 443\nallow any -> web tcp 80\n")
+	d := FlowDiff(active, draft)
+	if !hasDelta(d.Removed, "web", "db", "tcp", "443") {
+		t.Errorf("web->db removed expected (direction matters): %+v", d.Removed)
+	}
+	if !hasDelta(d.Added, "db", "web", "tcp", "443") {
+		t.Errorf("db->web added expected: %+v", d.Added)
+	}
+	if !hasDelta(d.Added, "any", "web", "tcp", "80") {
+		t.Errorf("any-source rule must appear literally as an `any` row, got %+v", d.Added)
+	}
+}
+
+func TestBlastRadius(t *testing.T) {
+	groupHosts := map[string][]string{
+		"web": {"10.0.0.1", "10.0.0.2"},
+		"db":  {"10.0.0.3"},
+	}
+	all := []string{"10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4"}
+
+	// A web->db change touches web hosts (outbound) + db hosts (inbound), deduped.
+	diff := DiffResult{Added: []FlowDelta{{From: "web", To: "db", Flow: Flow{"tcp", "5432"}}}}
+	b := BlastRadius(diff, groupHosts, all)
+	if b.Count != 3 || b.Total != 4 {
+		t.Fatalf("blast = %+v, want count 3 total 4", b)
+	}
+	want := []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}
+	if !reflect.DeepEqual(b.Hosts, want) {
+		t.Fatalf("blast hosts = %v, want %v", b.Hosts, want)
+	}
+
+	// An `any` side fans out to the whole fleet.
+	anyDiff := DiffResult{Added: []FlowDelta{{From: "any", To: "web", Flow: Flow{"tcp", "80"}}}}
+	if a := BlastRadius(anyDiff, groupHosts, all); a.Count != 4 {
+		t.Fatalf("any-source blast = %+v, want count 4 (whole fleet)", a)
+	}
+}
+
 func TestParseAndRunTests(t *testing.T) {
 	p := mustParse(t, "allow laptops -> db tcp 5432\n")
 	asserts, err := ParseTests("# tests\nassert allow group:laptops -> group:db tcp 5432\nassert deny laptops -> db tcp 22\nassert allow any -> control-plane tcp 443\n")
