@@ -250,16 +250,19 @@ resource "aws_iam_instance_profile" "node" {
 
 # ── Nodes ───────────────────────────────────────────────────────────────────
 locals {
-  nodes = {
+  base_nodes = {
     lighthouse = { role = "lighthouse", eip = true } # stable address for static_host_map
     harbor     = { role = "harbor", eip = true }     # stable control-plane address
-    gateway    = { role = "gateway", eip = true }    # stable public enroll URL (off-mesh, ADR 0005)
     client     = { role = "client", eip = false }    # cloud test member
   }
+  # The gateway is an EC2 node only when gateway_runtime = "ec2"; under "fargate"
+  # it's a serverless container (gateway_fargate.tf) and gets no VM.
+  ec2_gateway = var.gateway_runtime == "ec2" ? { gateway = { role = "gateway", eip = true } } : {}
+  nodes       = merge(local.base_nodes, local.ec2_gateway)
   sg_for = {
     lighthouse = aws_security_group.lighthouse.id
     harbor     = aws_security_group.harbor.id
-    gateway    = aws_security_group.gateway.id
+    gateway    = aws_security_group.gateway.id # used by the EC2 node when present
     client     = aws_security_group.client.id
   }
 }

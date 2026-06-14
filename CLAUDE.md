@@ -207,6 +207,11 @@ bootstrap; reuse result-TTL; pinned-cert-sufficient).
   then `SSH_KEY=~/.ssh/absolute bash ../scripts/bootstrap-genesis.sh` — dedicated VPC, tiered subnets,
   lighthouse + harbor (mesh) + the OFF-MESH gateway (Harbor pulls it) + a cloud client; prints the
   enroll commands + config-signing pin. (Not applied to live AWS from here.)
+  - **Fargate gateway (spike):** `gateway_runtime = "fargate"` swaps the gateway EC2 for an ECS
+    Fargate service + NLB (`gateway_fargate.tf`, `deploy/fargate/` image+scripts) — feasible because
+    the gateway runs no `nebula`/TUN. Same ADR-0005 posture (enroll public, collect Harbor-only) at
+    the NLB SG; config from Secrets Manager. `terraform validate` clean both runtimes; not live-applied.
+    The lighthouse + harbor stay on EC2 (they run `nebula` → need TUN → no Fargate/Lambda).
 
 Note: the durable queue (`internal/queue`) is now safe for concurrent first-open by several processes
 (the co-located gateway+worker+admin) — AutoMigrate tolerates the benign create race.

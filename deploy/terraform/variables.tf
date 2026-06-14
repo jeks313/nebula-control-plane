@@ -83,6 +83,35 @@ variable "collect_port" {
   default     = 9443
 }
 
+variable "gateway_runtime" {
+  description = "How to host the off-mesh gateway: 'ec2' (a VM, the default) or 'fargate' (a serverless container — no VM, since the gateway runs no nebula/TUN). Fargate needs gateway_image pushed (deploy/fargate/build-push.sh) and the config secret populated."
+  type        = string
+  default     = "ec2"
+
+  validation {
+    condition     = contains(["ec2", "fargate"], var.gateway_runtime)
+    error_message = "gateway_runtime must be \"ec2\" or \"fargate\"."
+  }
+}
+
+variable "gateway_image" {
+  description = "Container image URI for the Fargate gateway (gateway_runtime=fargate). Empty defaults to the ECR repo created here, tag 'latest' — push it with deploy/fargate/build-push.sh."
+  type        = string
+  default     = ""
+}
+
+variable "gateway_fargate_cpu" {
+  description = "Fargate task CPU units for the gateway (256 = 0.25 vCPU)."
+  type        = number
+  default     = 256
+}
+
+variable "gateway_fargate_memory" {
+  description = "Fargate task memory (MiB) for the gateway."
+  type        = number
+  default     = 512
+}
+
 variable "gateway_cidr" {
   description = <<-EOT
     CIDR allowed to reach the enrollment gateway. The off-cloud iMac enrolls over
