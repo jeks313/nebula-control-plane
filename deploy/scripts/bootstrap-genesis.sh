@@ -76,23 +76,19 @@ echo "    lighthouse=$LH_IP  harbor=$HB_IP  gateway=${GW_IP:-<fargate>}  client=
 echo "    lighthouse underlay=$LH_ADDR  enroll=$GW_URL  collect=$GW_COLLECT  harbor-overlay=$HARBOR_OVERLAY"
 echo "    runtimes: gateway=$GATEWAY_RUNTIME  lighthouse=$LIGHTHOUSE_RUNTIME"
 
-# The EC2 lighthouse path (default) is what this orchestrator wires. The Fargate
-# lighthouse is a spike whose genesis steps differ (host key generated off-box +
-# injected via Secrets Manager) and aren't automated here — see deploy/fargate/README.md.
-if [[ "$LIGHTHOUSE_RUNTIME" == "fargate" ]]; then
-  echo "ERROR: lighthouse_runtime=fargate is not wired into this bootstrap yet (spike)." >&2
-  echo "       Use lighthouse_runtime=ec2 here, or follow the lighthouse section of deploy/fargate/README.md." >&2
-  exit 2
-fi
-
-# The Fargate gateway path needs the AWS CLI + docker locally (build/push the image,
-# populate the config secret, force the ECS deploy). Run the bootstrap under the same
-# AWS creds you used for terraform (e.g. `aws-vault exec nebula -- bash ...`).
-if [[ "$GATEWAY_RUNTIME" == "fargate" ]]; then
-  command -v aws >/dev/null || { echo "missing tool (gateway_runtime=fargate): aws" >&2; exit 1; }
+# Any Fargate component (gateway and/or the SPIKE lighthouse) needs the AWS CLI + a
+# container engine locally (build/push the image, populate the config secret, force the
+# ECS deploy). Run the bootstrap under the same AWS creds you used for terraform
+# (e.g. `aws-vault exec nebula -- bash ...`).
+if [[ "$GATEWAY_RUNTIME" == "fargate" || "$LIGHTHOUSE_RUNTIME" == "fargate" ]]; then
+  command -v aws >/dev/null || { echo "missing tool (a *_runtime=fargate): aws" >&2; exit 1; }
   command -v "${CONTAINER_ENGINE:-podman}" >/dev/null || command -v docker >/dev/null || {
-    echo "missing container engine (gateway_runtime=fargate): install podman or docker, or set CONTAINER_ENGINE" >&2; exit 1; }
+    echo "missing container engine (a *_runtime=fargate): install podman or docker, or set CONTAINER_ENGINE" >&2; exit 1; }
 fi
+# SPIKE: lighthouse_runtime=fargate generates the lighthouse host key OFF-box (here) and
+# injects it via Secrets Manager (vs the EC2 path where it never leaves the node). The
+# UDP-NLB preserve_client_ip behaviour is the thing this spike proves on a live apply.
+[[ "$LIGHTHOUSE_RUNTIME" == "fargate" ]] && echo "    NOTE: lighthouse on Fargate (spike) — host key generated off-box + injected"
 
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 LH="$LH_OVERLAY=$LH_ADDR"
@@ -103,9 +99,10 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
   ( cd "$ROOT" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "$WORK/harbor" ./cmd/harbor \
     && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "$WORK/pilot" ./cmd/pilot \
     && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "$WORK/gateway" ./cmd/gateway )
-  # lighthouse/harbor/client are always EC2 here; the gateway is an EC2 node only when
-  # gateway_runtime=ec2 (under fargate it's a container — no VM to scp to).
-  NODE_IPS=("$LH_IP" "$HB_IP" "$CL_IP")
+  # harbor/client are always EC2; the lighthouse + gateway are EC2 nodes only under their
+  # "ec2" runtime (under fargate each is a container — no VM to scp to).
+  NODE_IPS=("$HB_IP" "$CL_IP")
+  [[ "$LIGHTHOUSE_RUNTIME" == "ec2" && -n "$LH_IP" ]] && NODE_IPS+=("$LH_IP")
   [[ "$GATEWAY_RUNTIME" == "ec2" && -n "$GW_IP" ]] && NODE_IPS+=("$GW_IP")
   for ip in "${NODE_IPS[@]}"; do
     echo "    -> $ip"
@@ -114,9 +111,17 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
   done
 fi
 
-# ── 1. lighthouse: init (host key never leaves the box) ─────────────────────
-echo "==> [lighthouse] pilot init -am-lighthouse"
-rsh "$LH_IP" 'sudo pilot init -am-lighthouse -dir /etc/nebula >/dev/null && sudo cat /etc/nebula/host.pub' > "$WORK/lh-host.pub"
+# ── 1. lighthouse: init ──────────────────────────────────────────────────────
+# EC2: init on the box (host key never leaves it). Fargate (spike): generate the keypair
+# HERE (off-box) — there is no node — and inject it via Secrets Manager in step 4.
+if [[ "$LIGHTHOUSE_RUNTIME" == "ec2" ]]; then
+  echo "==> [lighthouse/ec2] pilot init -am-lighthouse"
+  rsh "$LH_IP" 'sudo pilot init -am-lighthouse -dir /etc/nebula >/dev/null && sudo cat /etc/nebula/host.pub' > "$WORK/lh-host.pub"
+else
+  echo "==> [lighthouse/fargate] generate lighthouse keypair off-box"
+  "$WORK/pilot" init -am-lighthouse -dir "$WORK/lhkeys" >/dev/null
+  cp "$WORK/lhkeys/host.pub" "$WORK/lh-host.pub"
+fi
 echo "    got lighthouse host pubkey"
 
 # ── 2. harbor: init its OWN mesh key, with the lighthouse in static_host_map ─
@@ -175,17 +180,34 @@ rcp "$SSH_USER@$HB_IP:ncp/genesis/harbor-core.crt"    "$WORK/harbor-core.crt"
 rcp "$SSH_USER@$HB_IP:ncp/genesis/config-signing.pub" "$WORK/config-signing.pub"
 echo "    genesis done; pulled ca.crt + lighthouse + harbor-core certs + config-signing pin"
 
-# ── 4. lighthouse: install issued cert + start nebula ───────────────────────
-echo "==> [lighthouse] install cert + start nebula"
-rcp "$WORK/ca.crt"           "$SSH_USER@$LH_IP:/tmp/ca.crt"
-rcp "$WORK/lighthouse-1.crt" "$SSH_USER@$LH_IP:/tmp/host.crt"
-rsh "$LH_IP" 'set -e
-  sudo install -m0644 /tmp/ca.crt   /etc/nebula/ca.crt
-  sudo install -m0644 /tmp/host.crt /etc/nebula/host.crt
-  rm -f /tmp/ca.crt /tmp/host.crt
-  sudo systemd-run --unit ncp-nebula --collect /usr/local/bin/nebula -config /etc/nebula/config.yml >/dev/null
-  echo started'
-echo "    lighthouse nebula running"
+# ── 4. lighthouse: install issued cert + start ──────────────────────────────
+if [[ "$LIGHTHOUSE_RUNTIME" == "ec2" ]]; then
+  echo "==> [lighthouse/ec2] install cert + start nebula"
+  rcp "$WORK/ca.crt"           "$SSH_USER@$LH_IP:/tmp/ca.crt"
+  rcp "$WORK/lighthouse-1.crt" "$SSH_USER@$LH_IP:/tmp/host.crt"
+  rsh "$LH_IP" 'set -e
+    sudo install -m0644 /tmp/ca.crt   /etc/nebula/ca.crt
+    sudo install -m0644 /tmp/host.crt /etc/nebula/host.crt
+    rm -f /tmp/ca.crt /tmp/host.crt
+    sudo systemd-run --unit ncp-nebula --collect /usr/local/bin/nebula -config /etc/nebula/config.yml >/dev/null
+    echo started'
+  echo "    lighthouse nebula running (EC2)"
+else
+  # Fargate (spike): build/push the tun.disabled nebula image, inject ca+cert+key via
+  # Secrets Manager, force the ECS deploy. The lighthouse keypair was generated in step 1.
+  echo "==> [lighthouse/fargate] build+push nebula image + populate ${NAME_PREFIX}-lighthouse-config + deploy"
+  bash "$ROOT/deploy/fargate/build-push.sh" lighthouse
+  LH_SECRET_JSON="$(jq -n \
+    --rawfile ca "$WORK/ca.crt" \
+    --rawfile crt "$WORK/lighthouse-1.crt" \
+    --rawfile key "$WORK/lhkeys/host.key" \
+    '{ca_crt_pem:$ca, host_crt_pem:$crt, host_key_pem:$key}')"
+  aws secretsmanager put-secret-value --region "$TF_REGION" \
+    --secret-id "${NAME_PREFIX}-lighthouse-config" --secret-string "$LH_SECRET_JSON" >/dev/null
+  aws ecs update-service --region "$TF_REGION" \
+    --cluster "${NAME_PREFIX}-lighthouse" --service "${NAME_PREFIX}-lighthouse" --force-new-deployment >/dev/null
+  echo "    lighthouse image pushed, secret populated, ECS deployment forced (tun.disabled nebula behind the UDP NLB)"
+fi
 
 # ── 5. harbor: install control-plane cert + join the mesh ───────────────────
 echo "==> [harbor] install control-plane cert + start nebula (joins the mesh at $HARBOR_OVERLAY)"

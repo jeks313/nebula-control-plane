@@ -112,7 +112,7 @@ resource "aws_security_group" "lighthouse_nlb" {
     cidr_blocks = [local.tier_cidr["mesh"]]
   }
   egress {
-    description = "Health check the tasks' stats port (mesh subnet)"
+    description = "Health check the task stats port (mesh subnet)"
     from_port   = var.lighthouse_stats_port
     to_port     = var.lighthouse_stats_port
     protocol    = "tcp"
