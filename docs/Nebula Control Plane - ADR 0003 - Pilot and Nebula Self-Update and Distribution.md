@@ -225,6 +225,17 @@ judged worth the single-process win — neither of which is established today.
     review (13 findings: arm-before-swap, defer-if-no-nebula, validate-pidfile-before-delete,
     revert loop-breaker, corrupt-marker, version-matched Confirm). The "binary won't even start"
     case still needs the optional `pilot launch` watchdog (Option B) as the immutable anchor.
+    - **Service-manager interaction (resolved + one open item).** The happy-path re-exec is
+      transparent to the OS: `Type=exec`/launchd track pilot's main PID, and `syscall.Exec`
+      keeps the same PID, so systemd never sees an exit and never spuriously restarts. To keep
+      nebula alive across a pilot CRASH (the revert path), the units must not kill the data
+      plane when pilot dies: **systemd `KillMode=process`** (was `mixed`) + **launchd
+      `AbandonProcessGroup`** — the pilot owns nebula's lifecycle (clean stop: pilot stops
+      nebula; crash: nebula survives for the auto-restarted pilot to re-adopt via the pidfile).
+      Done. ⚠️ **Open (blocks 3b on a hardened host):** `ProtectSystem=strict` makes
+      `/usr/local/bin/pilot` read-only, so the self-update swap fails with EROFS — the
+      self-updatable binary must move to a writable, `ReadWritePaths`-included dir (touches the
+      install layout + ADR 0008). Tracked separately.
   - **3c (remaining) — pilot-version distribution.** The trigger: bundle carries
     `pilot_version`/`pilot_sha256`/`pilot_url`; the pilot reads its desired version and the
     rollout engine stages it on a `pilot` lane — the mechanical mirror of the nebula
