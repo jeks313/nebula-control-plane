@@ -11,10 +11,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -87,6 +89,7 @@ func main() {
 	if err != nil {
 		fatalf("%v", err)
 	}
+	defer closeQueue(q) // flush + close the durable (SQLite) queue on exit; no-op for the in-memory queue
 
 	gwCfg := gateway.Config{
 		Nonces:  ring,
@@ -120,14 +123,16 @@ func main() {
 		_ = srv.Shutdown(shutCtx)
 	}()
 
+	var wg sync.WaitGroup // background servers, joined on shutdown so we never exit mid-drain
 	if *collectAddr != "" {
-		startCollect(ctx, log, q, *collectAddr, *collectCert, *collectKey, *harborClientCert)
+		startCollect(ctx, &wg, log, q, *collectAddr, *collectCert, *collectKey, *harborClientCert)
 	}
 
 	log.Info("gateway listening", "addr", *addr, "scheme", httpserve.Scheme(*tlsCert, *tlsKey), "version", version, "access", "public/credential-less")
 	if err := httpserve.Serve(srv, *tlsCert, *tlsKey); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		fatalf("%v", err)
 	}
+	wg.Wait() // let the collect server finish its in-flight drain before we exit
 	log.Info("gateway stopped")
 }
 
@@ -135,7 +140,7 @@ func main() {
 // pulls candidates from this gateway's LOCAL durable queue and pushes results
 // back. It requires the durable queue (claim/ack/put-result) and a leaf-pinned
 // mTLS pair (the gateway's own server cert + Harbor's pinned client cert).
-func startCollect(ctx context.Context, log *slog.Logger, q queue.Queue, addr, certPath, keyPath, harborCertPath string) {
+func startCollect(ctx context.Context, wg *sync.WaitGroup, log *slog.Logger, q queue.Queue, addr, certPath, keyPath, harborCertPath string) {
 	dq, ok := q.(*queue.Durable)
 	if !ok {
 		fatalf("-collect-addr requires the durable queue (-queue-dsn); the in-memory dev queue cannot be collected")
@@ -171,12 +176,22 @@ func startCollect(ctx context.Context, log *slog.Logger, q queue.Queue, addr, ce
 		defer cancel()
 		_ = srv.Shutdown(sc)
 	}()
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		log.Info("gateway collect API listening", "addr", addr, "access", "Harbor-only (mTLS, leaf-pinned)")
-		if err := srv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+		if err := srv.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Error("gateway collect API failed", "err", err)
 		}
 	}()
+}
+
+// closeQueue closes the durable (SQLite) queue on shutdown; the in-memory dev
+// queue has nothing to close (the io.Closer assertion simply fails).
+func closeQueue(q queue.Queue) {
+	if c, ok := q.(io.Closer); ok {
+		_ = c.Close()
+	}
 }
 
 // loadKeys reads the primary (and optional previous) nonce key. For dev
