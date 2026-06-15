@@ -122,9 +122,16 @@ Ordered so each phase de-risks the next; KMS + Aurora are the foundation.
   least-priv **`core_kms_sign`** IAM policy (`kms:Sign`/`GetPublicKey` on exactly the two
   ARNs) the `app/` stack attaches to the Core role. `terraform fmt`/`validate` clean;
   adversarially reviewed (KMS admin-vs-use separation tightened — no `kms:PutKeyPolicy` for
-  lifecycle admins). Bootstrap is local-state → `init -migrate-state` into the bucket. The
-  remaining `app/` layers (network → data/Aurora → compute → edge → artifacts → obs) build on
-  top, layer by layer.
+  lifecycle admins). Bootstrap is local-state → `init -migrate-state` into the bucket.
+  - ✅ **`app/` network layer** — the `app/` stack now exists (the lab root `.tf` relocated +
+    a missing `user_data.sh.tftpl` restored so it validates), wired to `foundation` via
+    `terraform_remote_state` (re-exports the KMS ARNs + `core_kms_sign` policy). Network
+    hardened: VPC flow logs → CloudWatch, the VPC default SG emptied (deny-all), an S3 gateway
+    endpoint, and a **private multi-AZ data tier** for Aurora — on top of the existing tiered
+    subnets + per-role SGs + edge NACL. (The relocation also fixed the operator bootstrap's
+    `TFDIR`/pin paths.) `fmt`/`validate` clean; reviewed.
+  - Remaining `app/` layers: data (Aurora + Secrets Manager) → compute (Core/gateway/lighthouse
+    role gets `core_kms_sign`) → edge (ALB + ACM + WAF) → artifacts (S3 + CloudFront) → obs.
 - **Phase 3 — IdP (Entra SAML).** Configure the existing SAML SP per the **runbook**;
   custody a **stable SP keypair**; add OIDC client-secret-from-file (SAML already uses key
   files); schedule `SessionStore.GC`; sessions persist via Aurora (Phase 1). Pin a

@@ -70,10 +70,28 @@ output "name_prefix" {
 
 output "bootstrap_hint" {
   description = "How to run the genesis bootstrap (control plane + data plane)."
-  value       = "SSH_KEY=~/.ssh/absolute bash ../scripts/bootstrap-genesis.sh   # reads these outputs via 'terraform output -json'"
+  value       = "SSH_KEY=~/.ssh/absolute bash ../../bootstrap-genesis.sh   # run from app/; reads these outputs via 'terraform output -json'"
 }
 
 output "console_hint" {
   description = "The admin console is mesh-only (Harbor's overlay IP, default 10.44.0.2:8445). After the bootstrap, reach it from an enrolled mesh member, or SSH-tunnel ports 8445+8446 to Harbor (see deploy README / the bootstrap output)."
   value       = "mesh-only — http://<harbor-overlay>:8445 (default 10.44.0.2); not exposed in any security group by design"
+}
+
+# ── Trust root (re-exported from the foundation stack) ───────────────────────
+# So the genesis bootstrap can read every value it needs from this one stack's
+# outputs. Key MATERIAL never leaves KMS — these are just ARNs/identifiers.
+output "ca_key_arn" {
+  description = "CA signing KMS key ARN — `harbor genesis -kms-ca-key-id` / core-api -kms-ca-key-id."
+  value       = local.ca_key_arn
+}
+
+output "config_signing_key_arn" {
+  description = "Config-signing KMS key ARN — `harbor genesis -kms-config-key-id` / core-api -kms-config-key-id."
+  value       = local.config_signing_key_arn
+}
+
+output "core_kms_sign_policy_arn" {
+  description = "IAM policy (kms:Sign + GetPublicKey on both keys) attached to the Core role in the compute layer."
+  value       = local.core_kms_sign_policy_arn
 }
