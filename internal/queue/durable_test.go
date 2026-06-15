@@ -2,8 +2,11 @@ package queue
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -157,5 +160,64 @@ func TestLeaseReclaim(t *testing.T) {
 	// Not acked; lease already expired -> reclaimable.
 	if l, _ := d.Claim(ctx, 1, time.Minute); len(l) != 1 {
 		t.Fatal("expired lease should be reclaimable")
+	}
+}
+
+// putIssued stores an issued result retrievable with secret.
+func putIssued(t *testing.T, d *Durable, id, secret string, bundle []byte) {
+	t.Helper()
+	sum := sha256.Sum256([]byte(secret))
+	if err := d.PutResult(context.Background(), id, "issued", sum[:], bundle, "", time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestGetResultOneTime: an issued bundle is delivered exactly once; a second read
+// is ErrResultGone.
+func TestGetResultOneTime(t *testing.T) {
+	d := newDurable(t)
+	ctx := context.Background()
+	putIssued(t, d, "e1", "sek", []byte("bundle-bytes"))
+
+	r, err := d.GetResult(ctx, "e1", "sek")
+	if err != nil {
+		t.Fatalf("first read: %v", err)
+	}
+	if string(r.Bundle) != "bundle-bytes" {
+		t.Fatalf("bundle = %q, want bundle-bytes", r.Bundle)
+	}
+	if _, err := d.GetResult(ctx, "e1", "sek"); !errors.Is(err, ErrResultGone) {
+		t.Fatalf("second read err = %v, want ErrResultGone", err)
+	}
+}
+
+// TestGetResultConcurrentOneTime proves the consume is atomic: with N readers
+// racing the same issued result, exactly one gets the bundle (no cross-process /
+// concurrent TOCTOU double-delivery).
+func TestGetResultConcurrentOneTime(t *testing.T) {
+	d := newDurable(t)
+	putIssued(t, d, "e2", "sek", []byte("once"))
+
+	const n = 8
+	var delivered int64
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r, err := d.GetResult(context.Background(), "e2", "sek")
+			switch {
+			case err == nil && len(r.Bundle) > 0:
+				atomic.AddInt64(&delivered, 1)
+			case errors.Is(err, ErrResultGone):
+				// expected for the losers
+			default:
+				t.Errorf("unexpected GetResult result: bundle=%q err=%v", r.Bundle, err)
+			}
+		}()
+	}
+	wg.Wait()
+	if delivered != 1 {
+		t.Fatalf("one-time bundle delivered %d times, want exactly 1", delivered)
 	}
 }
