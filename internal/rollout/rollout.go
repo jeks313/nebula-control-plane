@@ -473,13 +473,20 @@ func (e *Engine) NebulaGenFor(ctx context.Context, overlayIP string) (gen int, g
 		return r.TargetVersion, true
 	case StateCanary, StateWidening:
 		var h Host
-		if err := e.db.WithContext(ctx).Where("rollout_id = ? AND overlay_ip = ?", r.ID, overlayIP).First(&h).Error; err != nil {
-			return r.PrevVersion, true // not a member: hold on prev while the rollout is in flight
-		}
-		if h.Wave <= r.ActiveWave {
+		err := e.db.WithContext(ctx).Where("rollout_id = ? AND overlay_ip = ?", r.ID, overlayIP).First(&h).Error
+		switch {
+		case errors.Is(err, gorm.ErrRecordNotFound):
+			return r.PrevVersion, true // genuinely not a member: hold on prev while the rollout is in flight
+		case err != nil:
+			// A transient DB error is NOT "not a member" — don't silently stamp prev (or
+			// worse, flip a host's version on a blip). Treat as ungoverned so the caller
+			// keeps the host's current nebula; the next bundle build retries.
+			return 0, false
+		case h.Wave <= r.ActiveWave:
 			return r.TargetVersion, true
+		default:
+			return r.PrevVersion, true
 		}
-		return r.PrevVersion, true
 	default: // StateRolledBack | StateAborted
 		return r.PrevVersion, true
 	}

@@ -18,11 +18,13 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/gatewayreg"
 	"github.com/jeks313/nebula-control-plane/internal/ipam"
 	"github.com/jeks313/nebula-control-plane/internal/lighthouse"
+	"github.com/jeks313/nebula-control-plane/internal/nebularelease"
 	"github.com/jeks313/nebula-control-plane/internal/nonce"
 	"github.com/jeks313/nebula-control-plane/internal/policy"
 	"github.com/jeks313/nebula-control-plane/internal/queue"
 	"github.com/jeks313/nebula-control-plane/internal/replay"
 	"github.com/jeks313/nebula-control-plane/internal/revocation"
+	"github.com/jeks313/nebula-control-plane/internal/rollout"
 	"github.com/jeks313/nebula-control-plane/internal/signer"
 	"github.com/jeks313/nebula-control-plane/internal/store"
 	"github.com/jeks313/nebula-control-plane/internal/wire"
@@ -177,12 +179,26 @@ func (cf *coreFlags) buildConsumer(s *store.Store, results enrollment.ResultSink
 	}
 	cfgPub, _ := cfgB.PublicKey()
 	ct := cf.cloudTrust(s) // nil unless -cloudtrust-db && a config is published
+	// A newly enrolling host joins on the CURRENT fleet-desired nebula release (the
+	// latest completed nebula-lane rollout, 6.6/1c), falling back to the static flags
+	// when no release has settled. Staged updates after enrollment converge via renew.
+	eng := rollout.New(s.DB, audit)
+	reg := nebularelease.New(s.DB)
+	nebulaReleaseFor := func(ctx context.Context) (version, sha256, url string) {
+		if gen := eng.CurrentNebulaGen(ctx); gen != 0 {
+			if v, sh, u, ok := reg.Lookup(ctx, gen); ok {
+				return v, sh, u
+			}
+		}
+		return *cf.nebulaVersion, *cf.nebulaSHA256, *cf.nebulaURL
+	}
 	return enrollment.New(enrollment.Config{
 		Store: s, Nonces: ring, Replay: replay.New(2 * time.Minute),
 		Signer: sg, Allocator: alloc, Pool: pool, CertLifetime: *cf.certLifetime,
 		TunDev: *cf.tunDev, ListenPort: *cf.listenPort,
 		NebulaVersion: *cf.nebulaVersion, NebulaSHA256: *cf.nebulaSHA256, NebulaURL: *cf.nebulaURL,
-		ConfigBackend: cfgB, ConfigKeyID: wire.PubkeyHash(cfgPub),
+		NebulaReleaseFor: nebulaReleaseFor,
+		ConfigBackend:    cfgB, ConfigKeyID: wire.PubkeyHash(cfgPub),
 		CABundlePEM: caPEM, Lighthouses: parseLighthouses(*cf.lighthouse), LighthouseSource: cf.lighthouseSource(s), Policy: cf.policy(s),
 		BlocklistSource: cf.blocklistSource(s),
 		Results:         results, ResultTTL: time.Hour,

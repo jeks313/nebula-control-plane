@@ -2,6 +2,9 @@ package heartbeat
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -62,6 +65,31 @@ func TestReporterToleratesCoreDown(t *testing.T) {
 
 	if atomic.LoadInt32(&renews) != 0 || atomic.LoadInt32(&restarts) != 0 {
 		t.Fatalf("a down Core must not trigger commands: renews=%d restarts=%d", renews, restarts)
+	}
+}
+
+// TestReporterReportsRunningNebula is the ADR 0003 Phase 1c convergence signal: the
+// reporter sends NebulaSHAFn as nebula_sha256 (the convergence key Harbor maps to a
+// generation) and NebulaVersionFn as nebula_version (fleet display).
+func TestReporterReportsRunningNebula(t *testing.T) {
+	var gotVer, gotSHA string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req wire.HeartbeatRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		gotVer, gotSHA = req.NebulaVersion, req.NebulaSHA256
+		_ = json.NewEncoder(w).Encode(wire.HeartbeatResponse{ProtocolVersion: wire.ProtocolVersion})
+	}))
+	defer srv.Close()
+
+	rep := New(Config{
+		CoreURL:         srv.URL,
+		Layout:          paths.New(t.TempDir()),
+		NebulaVersionFn: func() string { return "1.10.3" },
+		NebulaSHAFn:     func() string { return "abc123" },
+	})
+	rep.beat(context.Background())
+	if gotVer != "1.10.3" || gotSHA != "abc123" {
+		t.Fatalf("reported version=%q sha=%q, want 1.10.3 / abc123", gotVer, gotSHA)
 	}
 }
 

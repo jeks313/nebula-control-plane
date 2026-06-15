@@ -112,9 +112,27 @@ func (s *Store) Lookup(ctx context.Context, gen int) (version, sha256, url strin
 	return r.Version, r.SHA256, r.URL, true
 }
 
-// GenForVersion maps a running version STRING back to a generation so the rollout
-// engine can judge nebula-lane convergence (0 if unknown). When several gens share
-// a version string, the newest (highest gen) wins.
+// GenForSHA maps a running binary's SHA-256 back to a generation (0 if unknown).
+// The sha is the artifact's identity, so this is unambiguous even across rebuilds
+// that share a version string — the convergence key the rollout engine uses (1c).
+// When several gens somehow share a sha (the same artifact registered twice), the
+// newest wins.
+func (s *Store) GenForSHA(ctx context.Context, sha256 string) int {
+	sha256 = strings.ToLower(strings.TrimSpace(sha256))
+	if sha256 == "" {
+		return 0
+	}
+	var r Release
+	if err := s.db.WithContext(ctx).Where("sha256 = ?", sha256).Order("id DESC").First(&r).Error; err != nil {
+		return 0
+	}
+	return int(r.Gen)
+}
+
+// GenForVersion maps a running version STRING back to a generation (0 if unknown).
+// Display/diagnostic use only — version strings are NOT unique across rebuilds, so
+// convergence keys on the sha (GenForSHA) instead. When several gens share a version
+// string, the newest (highest gen) wins.
 func (s *Store) GenForVersion(ctx context.Context, version string) int {
 	version = strings.TrimSpace(version)
 	if version == "" {

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"sort"
@@ -17,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jeks313/nebula-control-plane/internal/binverify"
 	"github.com/jeks313/nebula-control-plane/internal/clilog"
 	"github.com/jeks313/nebula-control-plane/internal/clock"
 	"github.com/jeks313/nebula-control-plane/internal/drift"
@@ -275,6 +277,51 @@ func fatalf(format string, a ...any) {
 	os.Exit(1)
 }
 
+// nebulaVersion runs `<path> -version` and returns the reported version (e.g.
+// "1.10.3"), or "" if it can't be determined. It reads the on-disk binary (a fresh
+// short-lived invocation, independent of the running tunnel), so it reflects a
+// version that changed under a self-update. Reported in heartbeats for fleet DISPLAY.
+func nebulaVersion(path string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, path, "-version").Output()
+	if err != nil {
+		return ""
+	}
+	// nebula prints "Version: X.Y.Z".
+	return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(out)), "Version:"))
+}
+
+// cachedNebulaSHA returns a function that reports the sha256 of the on-disk nebula
+// binary (ADR 0003 Phase 1c convergence key), recomputing only when the file changes
+// (by mtime+size) so it tracks a self-update / revert without re-hashing ~20 MB every
+// heartbeat. "" if the binary can't be read.
+func cachedNebulaSHA(path string) func() string {
+	var (
+		mu      sync.Mutex
+		sha     string
+		modTime time.Time
+		size    int64
+	)
+	return func() string {
+		fi, err := os.Stat(path)
+		if err != nil {
+			return ""
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if sha != "" && fi.ModTime().Equal(modTime) && fi.Size() == size {
+			return sha
+		}
+		got, err := binverify.FileSHA256(path)
+		if err != nil {
+			return ""
+		}
+		sha, modTime, size = got, fi.ModTime(), fi.Size()
+		return sha
+	}
+}
+
 func cmdSupervise(args []string) {
 	fs := flag.NewFlagSet("supervise", flag.ExitOnError)
 	nebulaPath := fs.String("nebula", "nebula", "path to the nebula binary")
@@ -345,6 +392,11 @@ func cmdSupervise(args []string) {
 			// blocklist/policy/lighthouse change applies fast without a cert re-issue.
 			hb := heartbeat.New(heartbeat.Config{
 				CoreURL: *core, Layout: layout, PilotVersion: version, PinnedConfigPub: pinned,
+				// Report the RUNNING nebula binary each beat: its sha (the convergence key
+				// Harbor maps to a release generation to drive nebula-lane rollout +
+				// auto-rollback, 1c) and its version string (fleet display).
+				NebulaVersionFn: func() string { return nebulaVersion(*nebulaPath) },
+				NebulaSHAFn:     cachedNebulaSHA(*nebulaPath),
 				Handlers: heartbeat.Handlers{
 					Renew:   mgr.RenewNow,
 					Restart: sup.Restart,
