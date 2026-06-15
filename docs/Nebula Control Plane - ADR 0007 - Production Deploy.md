@@ -130,8 +130,17 @@ Ordered so each phase de-risks the next; KMS + Aurora are the foundation.
     endpoint, and a **private multi-AZ data tier** for Aurora — on top of the existing tiered
     subnets + per-role SGs + edge NACL. (The relocation also fixed the operator bootstrap's
     `TFDIR`/pin paths.) `fmt`/`validate` clean; reviewed.
-  - Remaining `app/` layers: data (Aurora + Secrets Manager) → compute (Core/gateway/lighthouse
-    role gets `core_kms_sign`) → edge (ALB + ACM + WAF) → artifacts (S3 + CloudFront) → obs.
+  - ✅ **`app/` data layer (Phase 1)** — `data.tf`: Aurora PostgreSQL, Multi-AZ (a writer +
+    reader, one per private data-tier AZ), in the private subnets; storage + the RDS-managed
+    master secret (Secrets Manager — never in TF state) + Performance Insights all under a
+    customer-managed KMS CMK; `rds.force_ssl=1`; a DB SG reachable on 5432 from the harbor SG
+    only with explicit deny-all egress; PITR (14-day backups), `deletion_protection` +
+    `prevent_destroy`, unique final-snapshot id. Harbor SG gained an explicit 5432 egress to
+    the data tier so Core can actually reach it. `fmt`/`validate` clean; reviewed (the
+    aws_security_group egress-is-Optional+Computed allow-all trap was caught + fixed). Code
+    follow-up (not infra): point Core at the DSN + move the durable queue off SQLite.
+  - Remaining `app/` layers: compute (Core/gateway/lighthouse role gets `core_kms_sign` +
+    the DB secret) → edge (ALB + ACM + WAF) → artifacts (S3 + CloudFront) → obs.
 - **Phase 3 — IdP (Entra SAML).** Configure the existing SAML SP per the **runbook**;
   custody a **stable SP keypair**; add OIDC client-secret-from-file (SAML already uses key
   files); schedule `SessionStore.GC`; sessions persist via Aurora (Phase 1). Pin a

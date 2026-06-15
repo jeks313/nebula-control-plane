@@ -95,3 +95,37 @@ output "core_kms_sign_policy_arn" {
   description = "IAM policy (kms:Sign + GetPublicKey on both keys) attached to the Core role in the compute layer."
   value       = local.core_kms_sign_policy_arn
 }
+
+# ── Data layer (Aurora) — consumed by the compute layer to point Core at the DB ──
+output "db_cluster_endpoint" {
+  description = "Aurora writer endpoint (Core connects here)."
+  value       = aws_rds_cluster.aurora.endpoint
+}
+
+output "db_reader_endpoint" {
+  description = "Aurora reader endpoint (read replicas)."
+  value       = aws_rds_cluster.aurora.reader_endpoint
+}
+
+output "db_port" {
+  value = aws_rds_cluster.aurora.port
+}
+
+output "db_name" {
+  value = aws_rds_cluster.aurora.database_name
+}
+
+output "db_master_secret_arn" {
+  description = "Secrets Manager ARN of the RDS-managed master credential. Core's role gets secretsmanager:GetSecretValue on it (compute layer); the value never enters TF state."
+  value       = aws_rds_cluster.aurora.master_user_secret[0].secret_arn
+}
+
+output "db_security_group_id" {
+  description = "Attach to Core so it can reach Aurora on 5432 (the DB SG ingress is from the harbor SG)."
+  value       = aws_security_group.db.id
+}
+
+output "rds_kms_key_arn" {
+  description = "CMK encrypting Aurora storage + the master secret."
+  value       = aws_kms_key.rds.arn
+}
