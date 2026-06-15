@@ -12,16 +12,29 @@ package cloudtrust
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
 
 	"github.com/jeks313/nebula-control-plane/internal/awsattest"
+	"github.com/jeks313/nebula-control-plane/internal/dualcontrol"
 )
 
 // PublishKind is the dual-control change kind for a cloud-trust config publish.
 const PublishKind = "cloudtrust.publish"
+
+// RegisterCommitter installs the cloudtrust.publish commit-time validator on dc —
+// the single canonical definition shared by every wiring site (harbor CLI, admin
+// API, demo seeder), so the gate can't drift by call site. Re-parsing at commit is
+// defense in depth.
+func RegisterCommitter(dc *dualcontrol.Controller) {
+	dc.Register(PublishKind, func(_ context.Context, ch dualcontrol.Change) error {
+		_, err := Parse(ch.Payload)
+		return err
+	})
+}
 
 // Provider identifiers (stored as attestation evidence + a discriminator for future
 // provider sections).

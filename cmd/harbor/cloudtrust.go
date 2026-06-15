@@ -86,10 +86,7 @@ func publishCloudTrust(s *store.Store, cfg cloudtrust.Config, opA, opB, target s
 	ctx := context.Background()
 	audit := func(c context.Context, a, ac, t, d string) error { _, e := s.AppendAudit(c, a, ac, t, d); return e }
 	dc := dualcontrol.New(dualcontrol.Config{DB: s.DB, Audit: audit})
-	dc.Register(cloudtrust.PublishKind, func(_ context.Context, ch dualcontrol.Change) error {
-		_, perr := cloudtrust.Parse(ch.Payload)
-		return perr
-	})
+	cloudtrust.RegisterCommitter(dc)
 	payload, _ := json.Marshal(cfg)
 	ch, err := dc.Propose(ctx, cloudtrust.PublishKind, target, payload, opA)
 	if err != nil {

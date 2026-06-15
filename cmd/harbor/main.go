@@ -1228,18 +1228,10 @@ const KindPolicyPublish = policy.PublishKind
 func newPolicyController(s *store.Store) *dualcontrol.Controller {
 	audit := func(c context.Context, a, ac, t, d string) error { _, e := s.AppendAudit(c, a, ac, t, d); return e }
 	dc := dualcontrol.New(dualcontrol.Config{DB: s.DB, Audit: audit})
-	dc.Register(KindPolicyPublish, func(ctx context.Context, ch dualcontrol.Change) error {
-		p, err := policy.Parse(string(ch.Payload))
-		if err != nil {
-			return err
-		}
-		return policy.CheckInvariants(p)
-	})
-	// Cloud-trust-publish committer so the CLI approve path commits these changes too.
-	dc.Register(cloudtrust.PublishKind, func(_ context.Context, ch dualcontrol.Change) error {
-		_, err := cloudtrust.Parse(ch.Payload)
-		return err
-	})
+	// Commit-time validation lives in the domain packages (single canonical
+	// definition, shared with the admin API + demo seeder so the gate can't drift).
+	policy.RegisterCommitter(dc)
+	cloudtrust.RegisterCommitter(dc)
 	return dc
 }
 

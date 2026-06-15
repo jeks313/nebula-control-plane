@@ -157,21 +157,12 @@ func New(cfg Config) *Server {
 			// Store-only: list + deny work; approve is gated by CanIssue (false here).
 			s.cfg.Enrollment = enrollment.New(enrollment.Config{Store: cfg.Store})
 		}
-		// Policy-publish committer: re-validate at commit (defense in depth; the
-		// active policy is the latest committed change of this kind).
-		s.dc.Register(policy.PublishKind, func(_ context.Context, ch dualcontrol.Change) error {
-			p, err := policy.Parse(string(ch.Payload))
-			if err != nil {
-				return err
-			}
-			return policy.CheckInvariants(p)
-		})
-		// Cloud-trust-publish committer: re-validate at commit (defense in depth; the
-		// active cloud-trust config is the latest committed change of this kind).
-		s.dc.Register(cloudtrust.PublishKind, func(_ context.Context, ch dualcontrol.Change) error {
-			_, err := cloudtrust.Parse(ch.Payload)
-			return err
-		})
+		// Commit-time validation for the dual-control publish kinds (defense in
+		// depth; the active config is the latest committed change of each kind). The
+		// committers live in the domain packages so the CLI, this API, and the demo
+		// seeder all commit through the same validation.
+		policy.RegisterCommitter(s.dc)
+		cloudtrust.RegisterCommitter(s.dc)
 	}
 	return s
 }

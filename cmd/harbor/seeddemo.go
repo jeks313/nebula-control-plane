@@ -179,10 +179,7 @@ func cmdSeedDemo(args []string) {
 	}
 	payload, _ := json.Marshal(ctCfg)
 	dc := dualcontrol.New(dualcontrol.Config{DB: s.DB, Audit: audit})
-	dc.Register(cloudtrust.PublishKind, func(_ context.Context, ch dualcontrol.Change) error {
-		_, err := cloudtrust.Parse(ch.Payload)
-		return err
-	})
+	cloudtrust.RegisterCommitter(dc)
 	ch, err := dc.Propose(ctx, cloudtrust.PublishKind, "AWS production accounts", payload, "chris@hyde.ca")
 	if err != nil {
 		fatalf("seed cloud-trust propose: %v", err)
@@ -195,13 +192,7 @@ func cmdSeedDemo(args []string) {
 	// the Policy page and the Approvals inbox demo the dual-control publish loop. The
 	// pending change is proposed by chris, leaving a distinct admin (e.g. the mock-IdP
 	// Ada Admin) able to approve it in the demo.
-	dc.Register(policy.PublishKind, func(_ context.Context, ch dualcontrol.Change) error {
-		p, perr := policy.Parse(string(ch.Payload))
-		if perr != nil {
-			return perr
-		}
-		return policy.CheckInvariants(p)
-	})
+	policy.RegisterCommitter(dc)
 	active := "allow group:laptops -> group:servers tcp 22\nallow any -> group:web tcp 443\n"
 	pch, err := dc.Propose(ctx, policy.PublishKind, "baseline access", []byte(active), "chris@hyde.ca")
 	if err != nil {
