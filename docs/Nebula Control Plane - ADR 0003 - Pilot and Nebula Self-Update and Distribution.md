@@ -232,10 +232,11 @@ judged worth the single-process win — neither of which is established today.
       plane when pilot dies: **systemd `KillMode=process`** (was `mixed`) + **launchd
       `AbandonProcessGroup`** — the pilot owns nebula's lifecycle (clean stop: pilot stops
       nebula; crash: nebula survives for the auto-restarted pilot to re-adopt via the pidfile).
-      Done. ⚠️ **Open (blocks 3b on a hardened host):** `ProtectSystem=strict` makes
-      `/usr/local/bin/pilot` read-only, so the self-update swap fails with EROFS — the
-      self-updatable binary must move to a writable, `ReadWritePaths`-included dir (touches the
-      install layout + ADR 0008). Tracked separately.
+      Done. **Writable binary (resolved):** `ProtectSystem=strict` makes `/usr/local/bin/pilot`
+      read-only, so the self-update swap would fail with EROFS. The service now runs a MANAGED
+      copy at `/var/lib/pilot/bin/pilot` (under StateRoot, in `ReadWritePaths`); `pilot install`
+      copies the running binary there and `ExecStart` points at it, keeping `ProtectSystem=strict`
+      for everything else. (Linux-only; macOS `/usr/local` is writable.)
   - **3c (remaining) — pilot-version distribution.** The trigger: bundle carries
     `pilot_version`/`pilot_sha256`/`pilot_url`; the pilot reads its desired version and the
     rollout engine stages it on a `pilot` lane — the mechanical mirror of the nebula
