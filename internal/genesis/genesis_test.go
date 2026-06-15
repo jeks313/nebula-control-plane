@@ -127,6 +127,22 @@ func TestGenesisCoreRequiresValidIP(t *testing.T) {
 	}
 }
 
+// TestGenesisRejectsSameTrustRoot: passing the SAME signing key for both the CA and the
+// config-signing role (an easy slip with id-based backends — the same KMS arn / pkcs11
+// label in both flags) must fail closed, since one key able to mint certs AND forge
+// bundles defeats the §3/§6 trust separation the ceremony establishes.
+func TestGenesisRejectsSameTrustRoot(t *testing.T) {
+	b, _ := signer.NewSoftwareBackend() // one key used for BOTH roles
+	_, err := Run(context.Background(), newStore(t), b, b, Params{
+		OperatorA: "a", OperatorB: "b", CAName: "ca", Pool: netip.MustParsePrefix("100.64.0.0/16"),
+		LighthouseName: "lh1", LighthouseIP: netip.MustParseAddr("100.64.0.1"), LighthousePub: hostPub(t),
+		CALifetime: 24 * time.Hour, CertLifetime: 12 * time.Hour,
+	})
+	if err == nil {
+		t.Fatal("genesis must reject the same key for the CA and config-signing roles")
+	}
+}
+
 func TestVerifyControlPlaneCertRejectsGarbage(t *testing.T) {
 	if _, err := VerifyControlPlaneCert([]byte("-----BEGIN NEBULA CERTIFICATE-----\nnope\n-----END NEBULA CERTIFICATE-----")); err == nil {
 		t.Error("garbage must not verify")

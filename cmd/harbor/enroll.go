@@ -39,6 +39,7 @@ type coreFlags struct {
 	backend                                *string
 	caCert, caKey, configKey               *string
 	module, token, pin, caLbl, configLbl   *string
+	caKmsKeyID, cfgKmsKeyID, kmsRegion     *string
 	hmacKey, queueDSN, queueKey            *string
 	pool                                   *string
 	tunDev                                 *string
@@ -58,7 +59,7 @@ type coreFlags struct {
 func addCoreFlags(fs *flag.FlagSet) *coreFlags {
 	cf := &coreFlags{}
 	cf.driver, cf.dsn = dbFlags(fs)
-	cf.backend = fs.String("backend", "software", "CA/config backend: software|pkcs11")
+	cf.backend = fs.String("backend", "software", "CA/config backend: software|pkcs11|kms")
 	cf.caCert = fs.String("ca-cert", "", "CA certificate PEM (required)")
 	cf.caKey = fs.String("ca-key", "", "software CA key (software backend)")
 	cf.configKey = fs.String("config-key", "", "software config-signing key (software backend)")
@@ -67,6 +68,9 @@ func addCoreFlags(fs *flag.FlagSet) *coreFlags {
 	cf.pin = fs.String("pkcs11-pin", "", "PKCS#11 PIN")
 	cf.caLbl = fs.String("pkcs11-ca-key-label", "", "PKCS#11 CA key label")
 	cf.configLbl = fs.String("pkcs11-config-key-label", "", "PKCS#11 config-signing key label")
+	cf.caKmsKeyID = fs.String("kms-ca-key-id", "", "KMS CA key id/arn (kms backend)")
+	cf.cfgKmsKeyID = fs.String("kms-config-key-id", "", "KMS config-signing key id/arn (kms backend)")
+	cf.kmsRegion = fs.String("kms-region", "", "AWS region for KMS (kms backend; else the default chain)")
 	cf.hmacKey = fs.String("hmac-key", "", "nonce HMAC key (base64url, shared with gateway) (required)")
 	cf.queueDSN = fs.String("queue-dsn", "", "durable queue DSN (required)")
 	cf.queueKey = fs.String("queue-key", "", "queue HMAC key (base64url, shared with gateway) (required)")
@@ -163,8 +167,8 @@ func (cf *coreFlags) buildConsumer(s *store.Store, results enrollment.ResultSink
 	if err != nil {
 		fatalf("read -ca-cert: %v", err)
 	}
-	caB := cf.loadBackend(*cf.caKey, *cf.caLbl, "CA")
-	cfgB := cf.loadBackend(*cf.configKey, *cf.configLbl, "config-signing")
+	caB := cf.loadBackend(*cf.caKey, *cf.caLbl, *cf.caKmsKeyID, "CA")
+	cfgB := cf.loadBackend(*cf.configKey, *cf.configLbl, *cf.cfgKmsKeyID, "config-signing")
 	audit := func(c context.Context, a, ac, t, d string) error { _, e := s.AppendAudit(c, a, ac, t, d); return e }
 	sg, err := signer.New(signer.Config{
 		CACertPEM: caPEM, Backend: caB,
@@ -237,7 +241,7 @@ func (cf *coreFlags) build() (*enrollment.Consumer, *queue.Durable, *store.Store
 	return cons, q, s
 }
 
-func (cf *coreFlags) loadBackend(softKey, label, what string) signer.Backend {
+func (cf *coreFlags) loadBackend(softKey, label, kmsKeyID, what string) signer.Backend {
 	switch *cf.backend {
 	case "software":
 		if softKey == "" {
@@ -256,6 +260,15 @@ func (cf *coreFlags) loadBackend(softKey, label, what string) signer.Backend {
 		b, err := signer.NewPKCS11Backend(signer.PKCS11Config{ModulePath: *cf.module, TokenLabel: *cf.token, Pin: *cf.pin, KeyLabel: label})
 		if err != nil {
 			fatalf("enroll: %s pkcs11: %v", what, err)
+		}
+		return b
+	case "kms":
+		if kmsKeyID == "" {
+			fatalf("enroll: kms backend requires the %s KMS key id", what)
+		}
+		b, err := signer.NewKMSBackend(context.Background(), signer.KMSConfig{KeyID: kmsKeyID, Region: *cf.kmsRegion})
+		if err != nil {
+			fatalf("enroll: %s kms: %v", what, err)
 		}
 		return b
 	default:

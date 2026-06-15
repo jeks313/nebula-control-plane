@@ -96,11 +96,22 @@ Ordered so each phase de-risks the next; KMS + Aurora are the foundation.
   add a `case "postgres"` pool-tuning block at `store.go:63`; **decide the queue backend**
   (SQS+DLQ recommended — the queue is ephemeral per-gateway today); run `harbor migrate up`
   as a one-shot init job against the Aurora **writer**; add Postgres CI integration tests.
-- **Phase 2 — KMS.** `internal/signer/kms.go` (implement `signer.Backend` via `kms.Sign`
-  MessageType=DIGEST / `GetPublicKey`); add `"kms"` to `loadBackend`/`genesis`/`ca-init`
-  (`cmd/harbor/main.go:597,1781,342`) + `-kms-ca-key-arn`/`-kms-config-key-arn`; terraform
-  two ECC_P256 keys + least-priv IAM; update the genesis ceremony to pre-create the keys
-  and **stop writing/scp-ing** `ca.key`/`config-signing.key`; populate `store.Key.URI`.
+- ✅ **Phase 2 — KMS backend (code done; AWS live-validation pending).** `internal/signer/kms.go`
+  implements `signer.Backend` over `aws-sdk-go-v2` (pure-Go, no build tag): `SignDigest` →
+  `kms:Sign` MessageType=DIGEST / ECDSA_SHA_256, returning KMS's ASN.1-DER unchanged;
+  `PublicKey` → `kms:GetPublicKey`, validates `KeySpec==ECC_NIST_P256`, converts the DER SPKI
+  to the 65-byte point, cached. `"kms"` is wired into all three selectors — `genesis` +
+  `ca-init` (`cmd/harbor/ca.go`), `backendFlags.load` (`cmd/harbor/main.go`, `-kms-key-id`),
+  and the runtime `coreFlags.loadBackend` used by `serve` + the enroll worker
+  (`cmd/harbor/enroll.go`, `-kms-ca-key-id`/`-kms-config-key-id`/`-kms-region`). Keys
+  pre-exist in KMS; genesis self-signs the CA cert from them and does NOT write
+  `ca.key`/`config-signing.key` (only `software` does). `signer.New` already fails closed if a
+  key id's pubkey ≠ the CA cert. Software + SoftHSM/PKCS#11 paths are unchanged (minimal
+  self-hosted / debug). Unit-tested via an injected fake KMS backed by a real P256 key,
+  including the full `SelfSignCA → New → Issue → verify` path. **Still to do:** terraform two
+  `aws_kms_key` (ECC_P256) + least-priv IAM (`kms:Sign`/`GetPublicKey`), populate
+  `store.Key.URI`, and validate against real AWS KMS (no creds in CI; this is the live gate,
+  like the 3b host validation).
 - **Phase 3 — IdP (Entra SAML).** Configure the existing SAML SP per the **runbook**;
   custody a **stable SP keypair**; add OIDC client-secret-from-file (SAML already uses key
   files); schedule `SessionStore.GC`; sessions persist via Aurora (Phase 1). Pin a

@@ -132,19 +132,22 @@ usage:
   harbor policy list       [-pending] [db flags]
   harbor policy active     [db flags]                 show the published policy
   harbor genesis           -out DIR -operator-a A -operator-b B -lighthouse-pub PEM [...]
-  harbor ca-init           -ca-cert OUT [-backend software|pkcs11] [-ca-key OUT] [...]
+  harbor ca-init           -ca-cert OUT [-backend software|pkcs11|kms] [-ca-key OUT] [...]
   harbor issue-cert        -name DEVICE -in-pub HOST.pub -ca-cert CA [-groups a,b] [...]
   harbor version
 
 core flags (enroll worker/approve): -ca-cert, -ca-key/-config-key (software) or
-  -pkcs11-* labels, -hmac-key, -queue-dsn, -queue-key, -pool, -cert-lifetime,
+  -pkcs11-* labels or -kms-ca-key-id/-kms-config-key-id [-kms-region] (kms),
+  -hmac-key, -queue-dsn, -queue-key, -pool, -cert-lifetime,
   -lighthouse "overlayIP=host:port[,...]", -blocklist-db (source pki.blocklist
   from the revocations registry, 7.1).
 
 backend flags (ca-init, issue-cert):
-  -backend software|pkcs11   software persists the CA key to -ca-key (local dev);
-                             pkcs11 uses a SoftHSM/HSM token (requires -tags pkcs11):
+  -backend software|pkcs11|kms  software persists the CA key to -ca-key (local dev);
+                                pkcs11 uses a SoftHSM/HSM token (requires -tags pkcs11);
+                                kms uses an AWS KMS ECC_NIST_P256 key (production).
   -pkcs11-module PATH -pkcs11-token LABEL -pkcs11-pin PIN -pkcs11-key-label LABEL
+  -kms-key-id ID [-kms-region REGION]
 
 db flags default to a local SQLite file (./harbor.db). Set -driver postgres
 -dsn "postgres://user:pass@host/db?sslmode=require" for production.
@@ -299,16 +302,19 @@ func cmdIPAM(args []string) {
 // backendFlags adds the CA-backend selection flags shared by ca-init/issue-cert.
 type backendFlags struct {
 	kind, caKey, module, token, pin, keyLabel *string
+	kmsKeyID, kmsRegion                       *string
 }
 
 func addBackendFlags(fs *flag.FlagSet) *backendFlags {
 	return &backendFlags{
-		kind:     fs.String("backend", "software", "CA backend: software|pkcs11"),
-		caKey:    fs.String("ca-key", "", "software CA private key path (software backend)"),
-		module:   fs.String("pkcs11-module", "/usr/lib/softhsm/libsofthsm2.so", "PKCS#11 module"),
-		token:    fs.String("pkcs11-token", "", "PKCS#11 token label"),
-		pin:      fs.String("pkcs11-pin", "", "PKCS#11 user PIN"),
-		keyLabel: fs.String("pkcs11-key-label", "", "PKCS#11 CA key label"),
+		kind:      fs.String("backend", "software", "CA backend: software|pkcs11|kms"),
+		caKey:     fs.String("ca-key", "", "software CA private key path (software backend)"),
+		module:    fs.String("pkcs11-module", "/usr/lib/softhsm/libsofthsm2.so", "PKCS#11 module"),
+		token:     fs.String("pkcs11-token", "", "PKCS#11 token label"),
+		pin:       fs.String("pkcs11-pin", "", "PKCS#11 user PIN"),
+		keyLabel:  fs.String("pkcs11-key-label", "", "PKCS#11 CA key label"),
+		kmsKeyID:  fs.String("kms-key-id", "", "KMS CA key id/arn (kms backend)"),
+		kmsRegion: fs.String("kms-region", "", "AWS region for KMS (kms backend; else the default chain)"),
 	}
 }
 
@@ -328,8 +334,13 @@ func (b *backendFlags) load() (signer.Backend, error) {
 		return signer.NewPKCS11Backend(signer.PKCS11Config{
 			ModulePath: *b.module, TokenLabel: *b.token, Pin: *b.pin, KeyLabel: *b.keyLabel,
 		})
+	case "kms":
+		if *b.kmsKeyID == "" {
+			return nil, fmt.Errorf("kms backend requires -kms-key-id")
+		}
+		return signer.NewKMSBackend(context.Background(), signer.KMSConfig{KeyID: *b.kmsKeyID, Region: *b.kmsRegion})
 	default:
-		return nil, fmt.Errorf("unknown backend %q (want software|pkcs11)", *b.kind)
+		return nil, fmt.Errorf("unknown backend %q (want software|pkcs11|kms)", *b.kind)
 	}
 }
 

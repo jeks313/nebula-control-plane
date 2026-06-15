@@ -10,10 +10,12 @@
 package genesis
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/netip"
 	"time"
@@ -125,6 +127,14 @@ func Run(ctx context.Context, s *store.Store, caBackend, configBackend signer.Ba
 	configPub, err := configBackend.PublicKey()
 	if err != nil {
 		return Result{}, fmt.Errorf("genesis: config-signing public key: %w", err)
+	}
+	// The two trust roots MUST be distinct keys (§3/§6 separation: the CA mints certs, the
+	// config-signing key signs the bundles Pilot pins). Id-based backends (kms/pkcs11) take
+	// operator-supplied identifiers, so the same key id / label in both flags would collapse
+	// both roots onto one key that can mint certs AND forge bundles — fail closed. (Software
+	// always generates two fresh keys, so this never trips there.)
+	if bytes.Equal(caPub, configPub) {
+		return Result{}, errors.New("genesis: CA key and config-signing key must be distinct trust roots (the same key was given for both)")
 	}
 	configPubPEM := cert.MarshalSigningPublicKeyToPEM(cert.Curve_P256, configPub)
 	configKeyID := keyID(configPub)

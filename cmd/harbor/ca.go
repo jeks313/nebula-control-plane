@@ -22,7 +22,7 @@ import (
 func cmdGenesis(args []string) {
 	fs := flag.NewFlagSet("genesis", flag.ExitOnError)
 	driver, dsn := dbFlags(fs)
-	backend := fs.String("backend", "software", "CA/config-signing backend: software|pkcs11")
+	backend := fs.String("backend", "software", "CA/config-signing backend: software|pkcs11|kms")
 	outDir := fs.String("out", "", "output directory for keys/certs/manifest (required)")
 	opA := fs.String("operator-a", "", "first ceremony operator (required)")
 	opB := fs.String("operator-b", "", "second ceremony operator (required, must differ)")
@@ -46,6 +46,11 @@ func cmdGenesis(args []string) {
 	pin := fs.String("pkcs11-pin", "", "PKCS#11 PIN")
 	caLabel := fs.String("pkcs11-ca-key-label", "", "PKCS#11 CA key label")
 	cfgLabel := fs.String("pkcs11-config-key-label", "", "PKCS#11 config-signing key label")
+	// kms key ids/arns (ECC_NIST_P256). The keys pre-exist in KMS (operator/terraform);
+	// genesis self-signs the CA cert + emits the config-signing pub from them.
+	kmsCAKeyID := fs.String("kms-ca-key-id", "", "KMS CA key id/arn (kms backend)")
+	kmsCfgKeyID := fs.String("kms-config-key-id", "", "KMS config-signing key id/arn (kms backend)")
+	kmsRegion := fs.String("kms-region", "", "AWS region for KMS (kms backend; else the default chain)")
 	_ = fs.Parse(args)
 
 	if *outDir == "" || *opA == "" || *opB == "" || *lhPub == "" {
@@ -103,6 +108,17 @@ func cmdGenesis(args []string) {
 		}
 		if cfgB, err = signer.NewPKCS11Backend(signer.PKCS11Config{ModulePath: *module, TokenLabel: *token, Pin: *pin, KeyLabel: *cfgLabel}); err != nil {
 			fatalf("genesis: config-signing backend: %v", err)
+		}
+	case "kms":
+		if *kmsCAKeyID == "" || *kmsCfgKeyID == "" {
+			fatalf("genesis: kms backend requires -kms-ca-key-id and -kms-config-key-id")
+		}
+		ctx := context.Background()
+		if caB, err = signer.NewKMSBackend(ctx, signer.KMSConfig{KeyID: *kmsCAKeyID, Region: *kmsRegion}); err != nil {
+			fatalf("genesis: CA KMS backend: %v", err)
+		}
+		if cfgB, err = signer.NewKMSBackend(ctx, signer.KMSConfig{KeyID: *kmsCfgKeyID, Region: *kmsRegion}); err != nil {
+			fatalf("genesis: config-signing KMS backend: %v", err)
 		}
 	default:
 		fatalf("genesis: unknown backend %q", *backend)
@@ -211,8 +227,8 @@ func cmdCAInit(args []string) {
 			fatalf("ca-init: export CA key: %v", err)
 		}
 		backend = sb
-	case "pkcs11":
-		backend, err = bf.load() // key must already exist in the token
+	case "pkcs11", "kms":
+		backend, err = bf.load() // key must already exist in the token / KMS
 		if err != nil {
 			fatalf("ca-init: %v", err)
 		}
