@@ -32,6 +32,8 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/fleet"
 	"github.com/jeks313/nebula-control-plane/internal/lighthouse"
 	"github.com/jeks313/nebula-control-plane/internal/nebulaconfig"
+	"github.com/jeks313/nebula-control-plane/internal/nebularelease"
+	"github.com/jeks313/nebula-control-plane/internal/pilotrelease"
 	"github.com/jeks313/nebula-control-plane/internal/policy"
 	"github.com/jeks313/nebula-control-plane/internal/rollout"
 	"github.com/jeks313/nebula-control-plane/internal/store"
@@ -101,6 +103,11 @@ type Config struct {
 	Identity    IdentityProvider
 	Rollout     *rollout.Engine      // optional; feeds the health rollup
 	Lighthouses *lighthouse.Registry // optional; /lighthouses
+	// NebulaReleases / PilotReleases back the /releases view (ADR 0003 1c/3c): the
+	// release registries the console lists + stages rollouts from. Optional; defaulted
+	// from the store like Rollout.
+	NebulaReleases *nebularelease.Store
+	PilotReleases  *pilotrelease.Store
 	// Enrollment drives the approval queue. A Store-only consumer (the default)
 	// supports list + deny; a fully-configured one (CanIssue) also approves
 	// (issues a cert). CanIssue gates the approve endpoint.
@@ -152,6 +159,12 @@ func New(cfg Config) *Server {
 		}
 		if s.cfg.Lighthouses == nil {
 			s.cfg.Lighthouses = lighthouse.New(cfg.Store.DB, audit)
+		}
+		if s.cfg.NebulaReleases == nil {
+			s.cfg.NebulaReleases = nebularelease.New(cfg.Store.DB)
+		}
+		if s.cfg.PilotReleases == nil {
+			s.cfg.PilotReleases = pilotrelease.New(cfg.Store.DB)
 		}
 		if s.cfg.Enrollment == nil {
 			// Store-only: list + deny work; approve is gated by CanIssue (false here).
@@ -220,6 +233,11 @@ func (s *Server) routeTable() []route {
 		{"POST", "/admin/v1/rollouts", s.handleRolloutStart},
 		{"POST", "/admin/v1/rollouts/current/step", s.handleRolloutStep},
 		{"POST", "/admin/v1/rollouts/current/abort", s.handleRolloutAbort},
+		// Binary releases (nebula + pilot) — list the registries + each lane's rollout,
+		// stage a fleet upgrade, abort it (ADR 0003 1c/3c).
+		{"GET", "/admin/v1/releases", s.handleReleasesList},
+		{"POST", "/admin/v1/releases/{kind}/rollouts", s.handleReleaseRolloutStart},
+		{"POST", "/admin/v1/releases/{kind}/rollouts/current/abort", s.handleReleaseRolloutAbort},
 		{"GET", "/admin/v1/joinkeys", s.handleJoinKeys},
 		{"POST", "/admin/v1/joinkeys", s.handleJoinKeyCreate},
 		{"PATCH", "/admin/v1/joinkeys/{name}", s.handleJoinKeyUpdate},
