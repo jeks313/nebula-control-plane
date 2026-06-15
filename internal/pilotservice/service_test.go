@@ -40,7 +40,8 @@ func TestTemplateUnitShape(t *testing.T) {
 	}
 	for _, want := range []string{
 		"%i", // systemd instance templating
-		"ExecStart=/usr/local/bin/pilot supervise",
+		"ExecStart=/var/lib/pilot/bin/pilot supervise", // managed writable binary (ADR 0003 Phase 3)
+		"ReadWritePaths=/var/lib/pilot/%i /var/lib/pilot/bin",
 		"-core ${NCP_CORE_URL}",
 		"ExecReload=/bin/kill -HUP $MAINPID",
 		"KillMode=process", // pilot owns nebula's lifecycle; survives a pilot crash for re-adopt (ADR 0003 Phase 3)

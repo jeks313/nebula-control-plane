@@ -5,6 +5,7 @@ package pilotservice
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,16 @@ import (
 
 // StateRoot is the parent of every per-mesh state dir on Linux.
 const StateRoot = "/var/lib/pilot"
+
+// BinDir is the writable dir (under StateRoot, included in the unit's ReadWritePaths)
+// that holds the managed pilot binary; see BinPath.
+const BinDir = StateRoot + "/bin"
+
+// BinPath is the MANAGED pilot binary the service runs (ADR 0003 Phase 3). It lives in
+// BinDir — writable — NOT /usr/local/bin, which ProtectSystem=strict makes read-only:
+// the pilot self-update swaps this binary in place, so it must be writable by the
+// service. `Install` copies the running pilot here.
+const BinPath = BinDir + "/pilot"
 
 // UnitTemplatePath is where the (single) systemd template unit is installed.
 const UnitTemplatePath = "/etc/systemd/system/pilot@.service"
@@ -45,6 +56,12 @@ func Render(s Spec) string {
 // Install writes the systemd template unit + this mesh's EnvironmentFile, then
 // enables and starts the per-mesh instance. Idempotent.
 func Install(s Spec) error {
+	// Place the MANAGED pilot binary in the writable BinDir (the unit's ExecStart). The
+	// service runs this copy so the Phase 3 self-update can swap it under ProtectSystem=
+	// strict; the operator's install-time binary (often /usr/local/bin/pilot) stays put.
+	if err := installManagedBinary(); err != nil {
+		return err
+	}
 	if err := os.WriteFile(UnitTemplatePath, []byte(templateUnit), 0o644); err != nil {
 		return fmt.Errorf("write unit %s: %w", UnitTemplatePath, err)
 	}
@@ -55,6 +72,52 @@ func Install(s Spec) error {
 		return err
 	}
 	return systemctl("enable", "--now", ServiceLabel(s.Mesh))
+}
+
+// installManagedBinary copies the running pilot binary into the writable BinDir (the
+// unit's ExecStart), atomically, so the service runs a binary the Phase 3 self-update
+// can swap under ProtectSystem=strict. No-op when already running from BinPath. The
+// rename is safe even if BinPath is a running executable (the running process keeps its
+// old inode).
+func installManagedBinary() error {
+	self, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("locate running pilot: %w", err)
+	}
+	if self == BinPath {
+		return nil
+	}
+	if err := os.MkdirAll(BinDir, 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", BinDir, err)
+	}
+	in, err := os.Open(self)
+	if err != nil {
+		return fmt.Errorf("open running pilot %s: %w", self, err)
+	}
+	defer in.Close()
+	tmp := BinPath + ".new"
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", tmp, err)
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("copy pilot binary: %w", err)
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Chmod(tmp, 0o755); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, BinPath); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("install managed pilot %s: %w", BinPath, err)
+	}
+	return nil
 }
 
 // Uninstall disables + stops the per-mesh instance and clears any failed state.
@@ -121,7 +184,9 @@ Type=exec
 # Per-mesh runtime config (NCP_CORE_URL, NCP_NEBULA), written by ` + "`pilot install`" + `.
 EnvironmentFile=-/var/lib/pilot/%i/service.env
 # pilot supervises nebula (its child); systemd supervises pilot. Paths are %i-derived.
-ExecStart=/usr/local/bin/pilot supervise \
+# ExecStart is the MANAGED binary in the writable BinDir (ADR 0003 Phase 3), so a pilot
+# self-update can swap it; ProtectSystem=strict keeps /usr read-only.
+ExecStart=/var/lib/pilot/bin/pilot supervise \
     -dir /var/lib/pilot/%i \
     -config /var/lib/pilot/%i/config.yml \
     -config-pub /var/lib/pilot/%i/config-signing.pub \
@@ -141,8 +206,9 @@ KillSignal=SIGTERM
 TimeoutStopSec=15
 Restart=on-failure
 RestartSec=2
-# The per-mesh dir must be writable despite ProtectSystem=strict (renew rewrites cert/config).
-ReadWritePaths=/var/lib/pilot/%i
+# Writable despite ProtectSystem=strict: the per-mesh dir (renew rewrites cert/config)
+# and the managed bin dir (the Phase 3 pilot self-update swaps its own binary there).
+ReadWritePaths=/var/lib/pilot/%i /var/lib/pilot/bin
 
 # --- Least privilege (M1.9): nebula needs CAP_NET_ADMIN for the TUN; nothing else.
 AmbientCapabilities=CAP_NET_ADMIN
