@@ -7,9 +7,11 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net/netip"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -25,6 +27,7 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/pilotsetup"
 	"github.com/jeks313/nebula-control-plane/internal/renew"
 	"github.com/jeks313/nebula-control-plane/internal/supervisor"
+	"github.com/slackhq/nebula/cert"
 )
 
 // version is overridden at build time via -ldflags "-X main.version=...".
@@ -495,6 +498,11 @@ func cmdInstall(args []string) {
 		}
 	}
 
+	// Multi-mesh safety (ADR 0008 Phase 3): a host joining multiple meshes needs
+	// DISJOINT overlay pools, or two tun devices cover the same CIDR and the host's
+	// route into it is ambiguous. Best-effort warning, not fatal.
+	warnOverlappingCIDR(*mesh, base)
+
 	// 3. Place the pin where the service's `supervise` reads it (-config-pub).
 	if err := os.WriteFile(filepath.Join(base, "config-signing.pub"), pubPEM, 0o644); err != nil {
 		fatalf("install: write config-signing.pub: %v", err)
@@ -610,6 +618,64 @@ func listMeshes() []string {
 		}
 	}
 	return out
+}
+
+// meshOverlay returns the masked overlay prefix a mesh sits in (e.g. 10.44.0.0/16),
+// derived from its host cert's network. ok is false if the cert is missing/unparseable.
+func meshOverlay(base string) (netip.Prefix, bool) {
+	pem, err := os.ReadFile(paths.New(base).HostCert())
+	if err != nil {
+		return netip.Prefix{}, false
+	}
+	c, _, err := cert.UnmarshalCertificateFromPEM(pem)
+	if err != nil {
+		return netip.Prefix{}, false
+	}
+	nets := c.Networks()
+	if len(nets) == 0 {
+		return netip.Prefix{}, false
+	}
+	return nets[0].Masked(), true
+}
+
+// overlappingMeshes returns the names of meshes (from others) whose overlay range
+// overlaps mine — sorted. Multi-mesh on one host needs disjoint pools (ADR 0008):
+// two tun devices covering the same CIDR give the host an ambiguous route.
+func overlappingMeshes(mine netip.Prefix, others map[string]netip.Prefix) []string {
+	var hits []string
+	for name, p := range others {
+		if mine.Overlaps(p) {
+			hits = append(hits, name)
+		}
+	}
+	sort.Strings(hits)
+	return hits
+}
+
+// warnOverlappingCIDR prints a best-effort warning if this mesh's overlay range
+// overlaps an already-installed mesh's. Not fatal — the operator may be bridging
+// intentionally, or needs to repoint the mesh's Harbor -pool to a distinct range.
+func warnOverlappingCIDR(mesh, base string) {
+	mine, ok := meshOverlay(base)
+	if !ok {
+		return
+	}
+	others := map[string]netip.Prefix{}
+	for _, m := range listMeshes() {
+		if m == mesh {
+			continue
+		}
+		if p, ok := meshOverlay(filepath.Join(pilotservice.StateRoot, m)); ok {
+			others[m] = p
+		}
+	}
+	for _, m := range overlappingMeshes(mine, others) {
+		fmt.Fprintf(os.Stderr,
+			"install: WARNING: mesh %q overlay %s overlaps already-installed mesh %q (%s).\n"+
+				"  Multi-mesh on one host needs disjoint overlay pools (ADR 0008) — two tun devices on the\n"+
+				"  same CIDR give an ambiguous route. Repoint a mesh's Harbor -pool to a distinct range.\n",
+			mesh, mine, m, others[m])
+	}
 }
 
 // validMeshID accepts ids safe as both a path segment and a systemd instance name:

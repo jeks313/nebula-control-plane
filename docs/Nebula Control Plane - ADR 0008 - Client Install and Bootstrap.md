@@ -222,9 +222,15 @@ Lifecycle siblings: `pilot status` (installed? enrolled? healthy? per mesh), `pi
   the per-mesh pin comes from the artifact (supersede ADR 0003's in-pilot pin); topology +
   groups stay in the post-auth bundle. Add the org-root KMS key + IAM to `deploy/prod` (ADR 0007).
 - **Phase 3 — multi-mesh.** ✅ The tun/port collision guard is **done** (mesh-wide
-  `-tun-dev`/`-listen-port` on Harbor → every bundle, default `nebula1`/`4242`). Remaining:
-  exercise additive `pilot install` for a 2nd mesh end-to-end, the best-effort disjoint-CIDR
-  warning, and (with Phase 2) one org root federating N meshes.
+  `-tun-dev`/`-listen-port` on Harbor → every bundle, default `nebula1`/`4242`). ✅ The
+  **best-effort disjoint-CIDR warning** is done — `pilot install` derives each
+  installed mesh's overlay pool from its host cert (`meshOverlay`) and warns if a new
+  mesh's pool overlaps an existing one (`overlappingMeshes`), since two tun devices on
+  the same CIDR give the host an ambiguous route. The additive multi-mesh install path
+  + the overlap detection are exercised by `cmd/pilot` tests (three meshes' host certs
+  on one host; only the overlapping pool is flagged). Remaining: a **live** two-mesh
+  deploy on one host (two distinct-pool meshes, two services/tun devices) and — with
+  Phase 2 — one org root federating N meshes.
 - **Phase 4 — cross-platform.** ✅ **launchd (macOS)** done — `service_darwin.go` renders a
   per-mesh LaunchDaemon plist + drives `launchctl bootstrap/bootout/kickstart`.
   **Validated on real macOS 26 (arm64):** the darwin/arm64 binary runs, `clock-check`
