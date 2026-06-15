@@ -22,6 +22,7 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/drift"
 	"github.com/jeks313/nebula-control-plane/internal/enrollclient"
 	"github.com/jeks313/nebula-control-plane/internal/heartbeat"
+	"github.com/jeks313/nebula-control-plane/internal/nebulaupdate"
 	"github.com/jeks313/nebula-control-plane/internal/paths"
 	"github.com/jeks313/nebula-control-plane/internal/pilotservice"
 	"github.com/jeks313/nebula-control-plane/internal/pilotsetup"
@@ -366,7 +367,13 @@ func cmdSupervise(args []string) {
 			dm := drift.New(drift.Config{Layout: layout, PinnedConfigPub: pinned, Reload: sup.Reload, Locker: &applyMu})
 			wg.Add(1)
 			go func() { defer wg.Done(); _ = dm.Run(ctx) }()
-			log.Info("pilot background tasks enabled", "renew", true, "heartbeat", true, "drift", true, "core", *core)
+
+			// Nebula self-update (ADR 0003 Phase 1): converge the data-plane binary on
+			// the version the signed bundle pins; a swap is a supervised Restart.
+			nu := nebulaupdate.New(nebulaupdate.Config{Layout: layout, PinnedConfigPub: pinned, NebulaPath: *nebulaPath, Restart: sup.Restart})
+			wg.Add(1)
+			go func() { defer wg.Done(); _ = nu.Run(ctx) }()
+			log.Info("pilot background tasks enabled", "renew", true, "heartbeat", true, "drift", true, "nebula_update", true, "core", *core)
 		}
 
 		err := sup.Run(ctx)
