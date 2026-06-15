@@ -32,7 +32,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-TFDIR="$ROOT/deploy/prod/terraform"
+TFDIR="$ROOT/deploy/prod/terraform/app" # the app stack (foundation/ is layer 0, applied separately)
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/absolute.pub}"   # public key selecting the agent identity (private may be passphrase-locked in the agent)
 SSH_USER="${SSH_USER:-ec2-user}"
 SKIP_BUILD=0
@@ -369,7 +369,7 @@ rsh "$HB_IP" "set -e
     -addr $HARBOR_OVERLAY:$ADMIN_PORT -mock-idp -mock-idp-addr $HARBOR_OVERLAY:$MOCK_IDP_PORT \
     -base-url http://$HARBOR_OVERLAY:$ADMIN_PORT -environment development >/dev/null
   echo ok"
-cp "$WORK/config-signing.pub" "$ROOT/deploy/prod/terraform/config-signing.pub"  # gitignored; the pin for clients
+cp "$WORK/config-signing.pub" "$ROOT/deploy/prod/terraform/app/config-signing.pub"  # gitignored; the pin for clients
 echo "    core-api + admin console up"
 
 cat <<EOF
@@ -383,12 +383,12 @@ cat <<EOF
                      INTERNAL enroll URL (a public NLB isn't reachable from inside the VPC).
  Lighthouse        : $LH_OVERLAY @ $LH_ADDR  (pool $POOL)
  Harbor (mesh)     : $HARBOR_OVERLAY  — core-api :$CORE_PORT, console :$ADMIN_PORT (mesh-only)
- Config-signing pin: deploy/prod/terraform/config-signing.pub  (give this to clients)
+ Config-signing pin: deploy/prod/terraform/app/config-signing.pub  (give this to clients)
  Cloud-trust       : account $ACCOUNT / role $ROLE -> groups [workloads], auto-issue
 
  Enroll the CLOUD CLIENT — KEYLESS via aws-sigv4 attestation (its IAM role). It's IN the
  VPC, so it enrolls via the INTERNAL gateway URL:
-   scp -i $SSH_KEY deploy/prod/terraform/config-signing.pub $SSH_USER@$CL_IP:/tmp/
+   scp -i $SSH_KEY deploy/prod/terraform/app/config-signing.pub $SSH_USER@$CL_IP:/tmp/
    ssh -i $SSH_KEY $SSH_USER@$CL_IP \\
      'sudo pilot enroll -dir /etc/nebula -gateway $GW_URL_INTERNAL -aws-sigv4 -region $REGION \\
         -config-pub /tmp/config-signing.pub -name aws-client && \\
@@ -399,7 +399,7 @@ cat <<EOF
  Enroll the OFF-CLOUD iMac — join key, MANUAL approval (uses the PUBLIC enroll URL):
    imac join secret: ${IMAC_KEY:-<existed already; re-create with: harbor joinkey create -name imac -groups laptops>}
    pilot enroll -dir ~/.nebula -gateway $GW_URL -join-key ${IMAC_KEY:-<imac-key>} \\
-     -config-pub deploy/prod/terraform/config-signing.pub -name imac
+     -config-pub deploy/prod/terraform/app/config-signing.pub -name imac
    # approve it in the CONSOLE (below) or via CLI:
    ssh -i $SSH_KEY $SSH_USER@$HB_IP \\
      'EID=\$(harbor enroll pending -dsn ~/ncp/harbor.db | awk "/imac/{print \\\$1}"); \\

@@ -10,6 +10,12 @@
 
 data "aws_availability_zones" "available" {
   state = "available"
+  # Standard regional AZs only — exclude Local Zones / Wavelength / opt-in zones, so the
+  # multi-AZ data tier (network_hardening.tf) pins to RDS-eligible zones deterministically.
+  filter {
+    name   = "opt-in-status"
+    values = ["opt-in-not-required"]
+  }
 }
 
 resource "aws_vpc" "main" {

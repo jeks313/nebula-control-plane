@@ -1,4 +1,20 @@
-# Minimal AWS lab (Terraform)
+# Production `app` stack (Terraform)
+
+> **Hybrid layout (ADR 0007).** This is the `app` stack — everything except the trust
+> root. The **`../foundation`** stack (S3 state bucket + the two KMS keys, deletion-
+> protected) must be **applied first**; this stack reads its outputs via
+> `terraform_remote_state` (`remote_state.tf`) for the KMS key ARNs + the `core_kms_sign`
+> IAM policy. Set `state_bucket_name` (foundation's `state_bucket` output) and configure
+> the `backend "s3"` block in `versions.tf` (key `app.tfstate`, same bucket).
+>
+> **Layers (built up incrementally):** ✅ network (this: tiered subnets + per-role SGs +
+> edge NACL + flow logs + locked default SG + S3 endpoint + private multi-AZ data subnets)
+> → next: data (Aurora + Secrets Manager) → compute (Core/gateway/lighthouse, role gets
+> `core_kms_sign`) → edge (ALB + ACM + WAF) → artifacts (S3 + CloudFront) → observability.
+> `terraform fmt`/`validate` are clean; resources are NOT applied (operator step).
+
+The node topology below is inherited from the lab and still describes the app stack's
+nodes (it is hardened layer by layer):
 
 A small cloud lab for trying the Nebula control plane end to end — **3 EC2 nodes + a
 serverless Fargate gateway** by default:
@@ -117,8 +133,8 @@ and stands up the **full control plane + data plane**:
 ```bash
 # default (gateway_runtime=fargate) also builds/pushes the gateway image + populates
 # its secret, so run it under the SAME AWS creds you used for terraform:
-aws-vault exec nebula -- env SSH_KEY=~/.ssh/absolute bash ../scripts/bootstrap-genesis.sh
-# (gateway_runtime=ec2 needs no AWS creds at bootstrap: SSH_KEY=~/.ssh/absolute bash ../scripts/bootstrap-genesis.sh)
+aws-vault exec nebula -- env SSH_KEY=~/.ssh/absolute bash ../../bootstrap-genesis.sh
+# (gateway_runtime=ec2 needs no AWS creds at bootstrap: SSH_KEY=~/.ssh/absolute bash ../../bootstrap-genesis.sh)
 ```
 Steps: lighthouse init → harbor init (its own mesh key) → genesis (CA + config-signing
 + lighthouse cert + **Harbor's `control-plane` cert**, so Harbor is a real mesh node) →

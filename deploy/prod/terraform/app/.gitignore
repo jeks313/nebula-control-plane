@@ -1,0 +1,11 @@
+# Local state + provider cache + secrets-bearing vars. The provider lock IS committed.
+.terraform/
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+*.auto.tfvars
+crash.log
+crash.*.log
+
+# The bootstrap writes the config-signing pin here (a public key, but a deploy artifact).
+config-signing.pub

@@ -165,3 +165,14 @@ variable "gateway_cidr" {
   type        = string
   default     = "0.0.0.0/0"
 }
+
+variable "state_bucket_name" {
+  description = "The foundation stack's Terraform state bucket (its `state_bucket` output) — this stack reads foundation's remote state from it for the KMS key ARNs + IAM policy. Same value you set in the backend block (versions.tf)."
+  type        = string
+}
+
+variable "flow_log_retention_days" {
+  description = "CloudWatch retention for VPC flow logs."
+  type        = number
+  default     = 90
+}
