@@ -31,6 +31,7 @@ func cmdPilot(args []string) {
 	file := fs.String("file", "", "local binary to hash for the sha256, instead of -sha256 (add); Harbor still does not host it")
 	url := fs.String("url", "", "artifact download URL the pilot fetches; a {version} token is substituted (add)")
 	note := fs.String("note", "", "optional note recorded with the release (add)")
+	skipURLCheck := fs.Bool("skip-url-check", false, "skip the best-effort reachability HEAD on -url at add time (air-gapped admin host)")
 	gen := fs.Int("gen", 0, "generation to release (release)")
 	canary := fs.Int("canary", 1, "canary wave size (release)")
 	waveSize := fs.Int("wave-size", 0, "post-canary hosts per wave; 0 = all remaining (release)")
@@ -58,6 +59,9 @@ func cmdPilot(args []string) {
 		}
 		fmt.Printf("registered pilot %s as generation %d (sha %s)\n", r.Version, r.Gen, r.SHA256[:12])
 		fmt.Printf("  release it with: harbor pilot release -gen %d\n", r.Gen)
+		if !*skipURLCheck {
+			reportReleaseURL(ctx, *file, rurl)
+		}
 	case "list":
 		rows, err := reg.List(ctx)
 		if err != nil {
