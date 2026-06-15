@@ -1,0 +1,8 @@
+# Copy to terraform.tfvars and fill in. NEVER put AWS credentials here.
+
+region            = "ca-central-1"
+name_prefix       = "nebula-prod"
+state_bucket_name = "REPLACE-with-a-globally-unique-name" # e.g. acme-nebula-tfstate-123456789012
+
+# Optional: principals allowed to ADMINISTER (not use) the KMS keys, beyond account IAM.
+# key_admin_principal_arns = ["arn:aws:iam::123456789012:role/PkiAdmins"]
