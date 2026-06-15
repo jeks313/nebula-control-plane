@@ -53,23 +53,29 @@ type Supervisor struct {
 	cmd *exec.Cmd // the currently running child, or nil
 }
 
+// defaults fills zero-valued config + creates restartCh. It runs exactly once
+// (sync.Once): Run and Restart both call it, and Restart fires from the heartbeat
+// goroutine, so filling the fields outside the Once would race the scalar writes.
+// The Once also publishes the writes (happens-before) to every later reader.
 func (s *Supervisor) defaults() {
-	if s.MinBackoff <= 0 {
-		s.MinBackoff = time.Second
-	}
-	if s.MaxBackoff <= 0 {
-		s.MaxBackoff = 30 * time.Second
-	}
-	if s.StableAfter <= 0 {
-		s.StableAfter = 60 * time.Second
-	}
-	if s.GracePeriod <= 0 {
-		s.GracePeriod = 10 * time.Second
-	}
-	if s.Logger == nil {
-		s.Logger = slog.Default()
-	}
-	s.initOnce.Do(func() { s.restartCh = make(chan struct{}, 1) })
+	s.initOnce.Do(func() {
+		if s.MinBackoff <= 0 {
+			s.MinBackoff = time.Second
+		}
+		if s.MaxBackoff <= 0 {
+			s.MaxBackoff = 30 * time.Second
+		}
+		if s.StableAfter <= 0 {
+			s.StableAfter = 60 * time.Second
+		}
+		if s.GracePeriod <= 0 {
+			s.GracePeriod = 10 * time.Second
+		}
+		if s.Logger == nil {
+			s.Logger = slog.Default()
+		}
+		s.restartCh = make(chan struct{}, 1)
+	})
 }
 
 // Run supervises nebula until ctx is cancelled, restarting it with backoff if it

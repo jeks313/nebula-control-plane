@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -309,6 +310,7 @@ func cmdSupervise(args []string) {
 		installReload(ctx, sup, log) // SIGHUP -> hot reload nebula (Unix); no-op on Windows
 		log.Info("pilot supervise starting", "config", *configPath, "nebula", *nebulaPath, "version", version)
 
+		var wg sync.WaitGroup // the background loops, joined on shutdown
 		if *core != "" {
 			if *configPub == "" {
 				return fmt.Errorf("supervise: -core requires -config-pub")
@@ -322,11 +324,16 @@ func cmdSupervise(args []string) {
 				return fmt.Errorf("supervise: %w", err)
 			}
 			layout := paths.New(*dir)
+			// One lock serializes every writer of the host layout — renew, drift
+			// revert, and apply_bundle — so concurrent loops can't tear config.yml or
+			// the identity files.
+			var applyMu sync.Mutex
 			mgr := renew.New(renew.Config{
 				Layout: layout, CoreURL: *core, PinnedConfigPub: pinned,
-				Reload: sup.Reload,
+				Reload: sup.Reload, Locker: &applyMu,
 			})
-			go func() { _ = mgr.Run(ctx) }()
+			wg.Add(1)
+			go func() { defer wg.Done(); _ = mgr.Run(ctx) }()
 
 			// Heartbeat + typed command channel (4.6): report state; act on the
 			// closed command set. Core-issued renew reuses the renewal path;
@@ -338,6 +345,8 @@ func cmdSupervise(args []string) {
 					Renew:   mgr.RenewNow,
 					Restart: sup.Restart,
 					ApplyBundle: func(ctx context.Context, _ int) error {
+						applyMu.Lock()
+						defer applyMu.Unlock()
 						if _, err := enrollclient.FetchConfig(ctx, enrollclient.RenewParams{
 							CoreURL: *core, Layout: layout, PinnedConfigPub: pinned,
 						}); err != nil {
@@ -347,14 +356,28 @@ func cmdSupervise(args []string) {
 					},
 				},
 			})
-			go func() { _ = hb.Run(ctx) }()
+			wg.Add(1)
+			go func() { defer wg.Done(); _ = hb.Run(ctx) }()
 
 			// Drift detection (M6.7): re-assert the signed config over any local edit.
-			dm := drift.New(drift.Config{Layout: layout, PinnedConfigPub: pinned, Reload: sup.Reload})
-			go func() { _ = dm.Run(ctx) }()
+			dm := drift.New(drift.Config{Layout: layout, PinnedConfigPub: pinned, Reload: sup.Reload, Locker: &applyMu})
+			wg.Add(1)
+			go func() { defer wg.Done(); _ = dm.Run(ctx) }()
 			log.Info("pilot background tasks enabled", "renew", true, "heartbeat", true, "drift", true, "core", *core)
 		}
-		return sup.Run(ctx)
+
+		err := sup.Run(ctx)
+		// On shutdown, give in-flight renew/drift/apply writes a bounded window to
+		// finish so we never exit mid-write (a torn config.yml / identity). The loops
+		// already return promptly on ctx.Done(); this only waits out an op in flight.
+		stopped := make(chan struct{})
+		go func() { wg.Wait(); close(stopped) }()
+		select {
+		case <-stopped:
+		case <-time.After(5 * time.Second):
+			log.Warn("supervise: background tasks did not stop within 5s")
+		}
+		return err
 	}
 
 	if err := runSupervisor(serve, log); err != nil {
