@@ -325,6 +325,16 @@ func (s *Supervisor) Health() Health {
 	}
 }
 
+// Healthy is the point-in-time data-plane verdict: nebula is up AND has held for at
+// least minUptime. The uptime floor distinguishes "came up and stayed" from a FAST
+// crash-loop (cycles shorter than minUptime, which keep resetting Uptime near zero under
+// backoff); a slower crash-loop that holds past minUptime each cycle still reads healthy.
+// Callers that report health should debounce a single negative — right after a legitimate
+// restart Uptime is briefly below the floor — so a transient is not mistaken for failure.
+func (h Health) Healthy(minUptime time.Duration) bool {
+	return h.Running && h.Uptime >= minUptime
+}
+
 // WaitHealthy blocks until the child that started AFTER notBefore has stayed up
 // CONTINUOUSLY for minUptime (it came up and held -> true), or until ctx is done /
 // timeout elapses without that (it never stabilized -> false; e.g. a bad binary
