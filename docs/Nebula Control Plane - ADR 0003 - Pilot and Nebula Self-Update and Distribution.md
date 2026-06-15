@@ -199,6 +199,32 @@ judged worth the single-process win — neither of which is established today.
 - **Phase 3 — pilot self-update.** Re-exec + nebula-pidfile re-adopt (zero drop) + last-good
   auto-revert, with the desired-pilot-version generation driven by the rollout engine.
   Optionally add the `pilot launch` watchdog as a recovery anchor.
+  - ✅ **3a — supervisor adopt-PID mode** (the load-bearing primitive). Launched with
+    `AdoptPID`, the supervisor monitors an already-running nebula it did NOT fork (signal-0
+    liveness poll — it can't `Wait()` a non-child; stop/reload by PID), and falls through to
+    normal fork supervision when that process exits or a restart is requested. So a
+    re-exec'd pilot re-adopts the nebula the previous pilot left running — zero data-plane
+    drop. Unix-only (Windows stubs → self-update there degrades to an SCM restart);
+    `Health`/`Reload` are dual-mode. Tested: adopt→fork-on-death, restart-stops-adopted-
+    then-forks, shutdown-stops-adopted (reparented-orphan stub so signal-0 reflects real
+    death). Cross-compiles for windows.
+  - **3b (remaining) — the re-exec + last-good revert mechanism.** A `pilotupdate` package:
+    swap the pilot binary (keep `<path>.last-good`), write nebula's PID to a pidfile, write a
+    pending-revert marker (deadline = now + confirm window), then `syscall.Exec` the new pilot
+    with `-adopt-nebula-pid <pid>`; the new pilot re-adopts nebula (3a) and, once healthy,
+    *confirms* (clears the marker). On startup, if a marker is past its deadline (the prior
+    new-pilot crashed/hung and the service restarted us), revert the binary to last-good. The
+    `syscall.Exec` seam is injectable so the swap/marker/revert/pidfile logic is unit-testable;
+    the re-exec itself and the service-restart-revert path are **not** — they MUST be
+    live-validated on a real host (Mac/AWS box) before production, as a bad pilot can brick a
+    mesh-only host. The "binary won't even start" case needs the optional `pilot launch`
+    watchdog (Option B) as the immutable anchor.
+  - **3c (remaining) — pilot-version distribution.** The trigger: bundle carries
+    `pilot_version`/`pilot_sha256`/`pilot_url`; the pilot reads its desired version and the
+    rollout engine stages it on a `pilot` lane — the mechanical mirror of the nebula
+    registry/lane/stamping built in Phase 1c (`nebula_versions` → `pilot_versions`, `LaneNebula`
+    → `LanePilot`, `NebulaGenFor` → `PilotGenFor`). Lower-risk, well-understood; deferred so the
+    high-stakes 3b mechanism can be built + live-tested in isolation first.
 - **Phase 4 — evaluate in-process nebula.** Only after 1–3 are proven; weigh the isolation
   loss against the single-process simplification (the fork above).
 
