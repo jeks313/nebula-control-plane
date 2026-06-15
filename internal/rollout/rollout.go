@@ -49,10 +49,16 @@ const (
 const (
 	LanePolicy    = "policy"
 	LaneBlocklist = "blocklist"
+	// LaneNebula stages a new nebula (data-plane) RELEASE generation across the
+	// fleet (ADR 0003 Phase 1c). Like the policy lane it reverts touched hosts to
+	// the previous generation on rollback (a bad nebula binary downgrades), unlike
+	// the blocklist lane which freezes. The generation maps to a (version, sha256,
+	// url) tuple in the nebula_versions registry, stamped per-host into the bundle.
+	LaneNebula = "nebula"
 )
 
 // lanes is the fixed set Evaluate sweeps each heartbeat.
-var lanes = []string{LanePolicy, LaneBlocklist}
+var lanes = []string{LanePolicy, LaneBlocklist, LaneNebula}
 
 // healthBad is the set of reported health values that fail a wave immediately.
 var healthBad = map[string]bool{"unhealthy": true, "degraded": true, "error": true, "critical": true, "red": true}
@@ -106,16 +112,21 @@ type hb struct {
 	OverlayIP               string `gorm:"column:overlay_ip"`
 	AppliedBundleVersion    int    `gorm:"column:applied_bundle_version"`
 	AppliedBlocklistVersion int    `gorm:"column:applied_blocklist_version"`
+	AppliedNebulaVersion    int    `gorm:"column:applied_nebula_version"`
 	Health                  string `gorm:"column:health"`
 	LastSeen                int64  `gorm:"column:last_seen"`
 }
 
 // appliedFor returns the host's applied version on the given lane.
 func appliedFor(beat hb, lane string) int {
-	if lane == LaneBlocklist {
+	switch lane {
+	case LaneBlocklist:
 		return beat.AppliedBlocklistVersion
+	case LaneNebula:
+		return beat.AppliedNebulaVersion
+	default:
+		return beat.AppliedBundleVersion
 	}
-	return beat.AppliedBundleVersion
 }
 
 func (hb) TableName() string { return "heartbeats" }
@@ -364,6 +375,15 @@ func (e *Engine) BlocklistCommandFor(ctx context.Context, overlayIP string, repo
 	return e.commandForLane(ctx, LaneBlocklist, overlayIP, reportedVersion)
 }
 
+// NebulaCommandFor is CommandFor for the nebula lane (ADR 0003 Phase 1c).
+// reportedVersion is the host's applied nebula GENERATION (mapped from its running
+// version). Like the policy lane it reverts touched hosts to prev on rollback; the
+// emitted apply_bundle just re-fetches the host's bundle, which now carries the
+// generation's nebula tuple — the pilot's updater then swaps the binary (Phase 1b).
+func (e *Engine) NebulaCommandFor(ctx context.Context, overlayIP string, reportedVersion int) (wire.Command, bool) {
+	return e.commandForLane(ctx, LaneNebula, overlayIP, reportedVersion)
+}
+
 func (e *Engine) commandForLane(ctx context.Context, lane, overlayIP string, reportedVersion int) (wire.Command, bool) {
 	r, ok, err := e.current(ctx, lane)
 	if err != nil || !ok {
@@ -429,6 +449,55 @@ func (e *Engine) BlocklistVersion(ctx context.Context) int {
 		return 0
 	}
 	return *v
+}
+
+// NebulaGenFor returns the nebula-release GENERATION Core should stamp into a
+// host's bundle, and whether a nebula rollout governs it. Unlike the policy lane
+// (where bundle content is always-latest and the version is just a convergence
+// marker), the nebula tuple must match the generation a host should actually RUN,
+// so this gates content in every state:
+//   - canary|widening: in-wave hosts get the target gen, everyone else gets prev
+//   - completed: the whole fleet is on the target gen
+//   - rolledback|aborted: the whole fleet reverts to prev (the safe gen)
+//
+// gen 0 means "unpinned" (e.g. the prev of the first-ever rollout) — Core leaves
+// the host's nebula alone. governed=false means no nebula rollout exists at all, so
+// Core falls back to its static NebulaVersion config (Phase 1a/1b back-compat).
+func (e *Engine) NebulaGenFor(ctx context.Context, overlayIP string) (gen int, governed bool) {
+	r, ok, err := e.current(ctx, LaneNebula)
+	if err != nil || !ok {
+		return 0, false
+	}
+	switch r.State {
+	case StateCompleted:
+		return r.TargetVersion, true
+	case StateCanary, StateWidening:
+		var h Host
+		if err := e.db.WithContext(ctx).Where("rollout_id = ? AND overlay_ip = ?", r.ID, overlayIP).First(&h).Error; err != nil {
+			return r.PrevVersion, true // not a member: hold on prev while the rollout is in flight
+		}
+		if h.Wave <= r.ActiveWave {
+			return r.TargetVersion, true
+		}
+		return r.PrevVersion, true
+	default: // StateRolledBack | StateAborted
+		return r.PrevVersion, true
+	}
+}
+
+// CurrentNebulaGen is the live fleet-desired nebula generation: the target of the
+// most recently COMPLETED nebula rollout (0 if none). Used to compute a new
+// rollout's prev (the generation the fleet falls back to on rollback) and to know
+// which registry release is "current". A rolled-back rollout's target is excluded
+// (the fleet reverted off it), so this tracks what the fleet actually runs.
+func (e *Engine) CurrentNebulaGen(ctx context.Context) int {
+	var r Rollout
+	if err := e.db.WithContext(ctx).
+		Where("lane = ? AND state = ?", LaneNebula, StateCompleted).
+		Order("id DESC").First(&r).Error; err != nil {
+		return 0
+	}
+	return r.TargetVersion
 }
 
 // Status returns the policy lane's current rollout and its hosts.

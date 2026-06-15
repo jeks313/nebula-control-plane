@@ -122,6 +122,99 @@ func TestConcurrentLanesAndBlocklistFreeze(t *testing.T) {
 	}
 }
 
+// heartbeatNeb upserts a heartbeat reporting an applied NEBULA-lane generation.
+func heartbeatNeb(t *testing.T, db *gorm.DB, ip string, nebGen int, health string, lastSeen time.Time) {
+	t.Helper()
+	sql := `INSERT INTO heartbeats (overlay_ip, device_name, applied_nebula_version, health, last_seen)
+	        VALUES (?, ?, ?, ?, ?)
+	        ON CONFLICT(overlay_ip) DO UPDATE SET applied_nebula_version=excluded.applied_nebula_version,
+	          health=excluded.health, last_seen=excluded.last_seen`
+	if err := db.Exec(sql, ip, ip, nebGen, health, lastSeen.UnixNano()).Error; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestNebulaLaneStagesConvergesAndReverts is the ADR 0003 Phase 1c acceptance: a
+// nebula RELEASE generation is staged via its own lane — in-wave hosts get the new
+// generation while everyone else stays on prev (so Core stamps the right tuple per
+// host), a healthy canary widens then completes (whole fleet on target), and a
+// rollback reverts touched hosts to the prev generation (a bad nebula downgrades,
+// unlike the blocklist lane which freezes).
+func TestNebulaLaneStagesConvergesAndReverts(t *testing.T) {
+	eng, db, clk := newEngine(t)
+	ctx := context.Background()
+	hosts := []string{"100.64.0.1", "100.64.0.2"}
+
+	// Stage gen 2 over gen 1: canary = host[0], wave 1 = host[1].
+	if _, err := eng.Start(ctx, rollout.StartConfig{
+		Lane: rollout.LaneNebula, TargetVersion: 2, PrevVersion: 1, Hosts: hosts,
+		CanarySize: 1, Observe: 10 * time.Minute, MissingAfter: 3 * time.Minute, Actor: "alice",
+	}); err != nil {
+		t.Fatalf("nebula start: %v", err)
+	}
+
+	// Per-host stamping: the canary gets the NEW gen, the out-of-wave host stays prev.
+	if g, ok := eng.NebulaGenFor(ctx, "100.64.0.1"); !ok || g != 2 {
+		t.Fatalf("canary NebulaGenFor = %d ok=%v, want gen 2", g, ok)
+	}
+	if g, ok := eng.NebulaGenFor(ctx, "100.64.0.2"); !ok || g != 1 {
+		t.Fatalf("out-of-wave NebulaGenFor = %d ok=%v, want gen 1 (prev)", g, ok)
+	}
+	// The canary is told to converge (it still runs gen 1); the apply_bundle re-fetch
+	// delivers the gen-2 tuple.
+	if cmd, ok := eng.NebulaCommandFor(ctx, "100.64.0.1", 1); !ok || cmd.Type != wire.CmdApplyBundle {
+		t.Fatalf("canary cmd = %+v ok=%v, want apply_bundle", cmd, ok)
+	}
+
+	// Canary reports running gen 2, healthy -> widen to wave 1.
+	heartbeatNeb(t, db, "100.64.0.1", 2, "healthy", clk.now())
+	if changed, _ := eng.Evaluate(ctx); !changed {
+		t.Fatal("healthy nebula canary should widen")
+	}
+	if g, _ := eng.NebulaGenFor(ctx, "100.64.0.2"); g != 2 {
+		t.Fatalf("after widen, host2 NebulaGenFor = %d, want gen 2", g)
+	}
+
+	// host2 converges -> completed -> the whole fleet is on gen 2.
+	heartbeatNeb(t, db, "100.64.0.2", 2, "healthy", clk.now())
+	if _, err := eng.Evaluate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if r, _, _ := eng.StatusLane(ctx, rollout.LaneNebula); r.State != rollout.StateCompleted {
+		t.Fatalf("nebula rollout state = %s, want completed", r.State)
+	}
+	if g := eng.CurrentNebulaGen(ctx); g != 2 {
+		t.Fatalf("CurrentNebulaGen = %d, want 2 (the completed target)", g)
+	}
+
+	// Now stage a bad gen 3 over the live gen 2; the canary goes unhealthy.
+	if _, err := eng.Start(ctx, rollout.StartConfig{
+		Lane: rollout.LaneNebula, TargetVersion: 3, PrevVersion: eng.CurrentNebulaGen(ctx), Hosts: hosts,
+		CanarySize: 1, Observe: 10 * time.Minute, MissingAfter: 3 * time.Minute, Actor: "alice",
+	}); err != nil {
+		t.Fatalf("nebula start gen3: %v", err)
+	}
+	heartbeatNeb(t, db, "100.64.0.1", 3, "unhealthy", clk.now())
+	if _, err := eng.Evaluate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if r, _, _ := eng.StatusLane(ctx, rollout.LaneNebula); r.State != rollout.StateRolledBack {
+		t.Fatalf("bad nebula canary should roll back, got %s", r.State)
+	}
+	// Revert: the touched canary is stamped prev (gen 2) and commanded back to it
+	// (the nebula lane downgrades, unlike the blocklist freeze).
+	if g, _ := eng.NebulaGenFor(ctx, "100.64.0.1"); g != 2 {
+		t.Fatalf("after rollback, canary NebulaGenFor = %d, want gen 2 (prev)", g)
+	}
+	if cmd, ok := eng.NebulaCommandFor(ctx, "100.64.0.1", 3); !ok || cmd.BundleVersion != 2 {
+		t.Fatalf("rollback revert cmd = %+v ok=%v, want apply_bundle to gen 2", cmd, ok)
+	}
+	// The live desired gen is unchanged by the failed rollout.
+	if g := eng.CurrentNebulaGen(ctx); g != 2 {
+		t.Fatalf("CurrentNebulaGen after rollback = %d, want 2", g)
+	}
+}
+
 func start(t *testing.T, eng *rollout.Engine, hosts []string) {
 	t.Helper()
 	_, err := eng.Start(context.Background(), rollout.StartConfig{
