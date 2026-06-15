@@ -88,6 +88,7 @@ func cmdCoreAPI(args []string) {
 		BlocklistSource: cf.blocklistSource(s),
 		Rollout:         rollout.New(s.DB, audit),
 		Pool:            pool, TunDev: *cf.tunDev, ListenPort: *cf.listenPort, CertLifetime: *cf.certLifetime,
+		NebulaVersion: *cf.nebulaVersion, NebulaSHA256: *cf.nebulaSHA256, NebulaURL: *cf.nebulaURL,
 	})
 	srv := &http.Server{
 		Addr: *addr, Handler: api.Handler(),

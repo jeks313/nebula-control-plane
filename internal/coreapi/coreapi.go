@@ -78,9 +78,16 @@ type Config struct {
 	// TunDev + ListenPort are this mesh's nebula TUN device name + UDP listen port,
 	// stamped into renew + GET /v1/config bundles. MUST match enrollment.Config's, or a
 	// renew/refresh would flip a device's tun/port. Empty/zero -> nebula1/4242.
-	TunDev       string
-	ListenPort   int
-	CertLifetime time.Duration
+	TunDev     string
+	ListenPort int
+	// NebulaVersion / NebulaSHA256 / NebulaURL distribute the data-plane binary
+	// (ADR 0003 Phase 1) — stamped into every bundle so pilots converge on the
+	// version Harbor chooses. MUST match enrollment.Config's. All empty -> hosts
+	// keep their current nebula.
+	NebulaVersion string
+	NebulaSHA256  string
+	NebulaURL     string
+	CertLifetime  time.Duration
 	// RenewCommandThreshold: if a heartbeat reports a cert expiring within this
 	// window, Core replies with a `renew` command (a backstop to Pilot's own
 	// proactive renewal). 0 disables it.
@@ -380,6 +387,9 @@ func (s *Server) assembleBundle(ctx context.Context, dev enrollment.Enrollment, 
 		Blocklist:        s.blocklist(ctx),
 		TunDev:           s.cfg.TunDev,
 		ListenPort:       s.cfg.ListenPort,
+		NebulaVersion:    s.cfg.NebulaVersion,
+		NebulaSHA256:     s.cfg.NebulaSHA256,
+		NebulaURL:        s.cfg.NebulaURL,
 		NotAfter:         notAfter.UTC().Format(time.RFC3339),
 	}
 }

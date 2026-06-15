@@ -32,22 +32,23 @@ import (
 
 // coreFlags wires Core's enrollment consumer (worker/approve).
 type coreFlags struct {
-	driver, dsn                          *string
-	backend                              *string
-	caCert, caKey, configKey             *string
-	module, token, pin, caLbl, configLbl *string
-	hmacKey, queueDSN, queueKey          *string
-	pool                                 *string
-	tunDev                               *string
-	listenPort                           *int
-	certLifetime                         *time.Duration
-	maxPerHour                           *int
-	lighthouse                           *string
-	lighthouseDB                         *bool
-	blocklistDB                          *bool
-	policyFile                           *string
-	policyDB                             *bool
-	cloudTrustDB                         *bool
+	driver, dsn                            *string
+	backend                                *string
+	caCert, caKey, configKey               *string
+	module, token, pin, caLbl, configLbl   *string
+	hmacKey, queueDSN, queueKey            *string
+	pool                                   *string
+	tunDev                                 *string
+	listenPort                             *int
+	nebulaVersion, nebulaSHA256, nebulaURL *string
+	certLifetime                           *time.Duration
+	maxPerHour                             *int
+	lighthouse                             *string
+	lighthouseDB                           *bool
+	blocklistDB                            *bool
+	policyFile                             *string
+	policyDB                               *bool
+	cloudTrustDB                           *bool
 }
 
 func addCoreFlags(fs *flag.FlagSet) *coreFlags {
@@ -68,6 +69,9 @@ func addCoreFlags(fs *flag.FlagSet) *coreFlags {
 	cf.pool = fs.String("pool", "100.64.0.0/16", "overlay pool CIDR")
 	cf.tunDev = fs.String("tun-dev", "nebula1", "nebula TUN device name stamped into this mesh's bundles (use a DISTINCT name per mesh on multi-mesh hosts)")
 	cf.listenPort = fs.Int("listen-port", 4242, "nebula UDP listen port stamped into this mesh's bundles (use a DISTINCT port per mesh on multi-mesh hosts)")
+	cf.nebulaVersion = fs.String("nebula-version", "", "nebula version Harbor distributes to the fleet (ADR 0003); stamped into every bundle (empty -> hosts keep their current nebula)")
+	cf.nebulaSHA256 = fs.String("nebula-sha256", "", "hex SHA-256 of the nebula binary (the integrity anchor pilots verify before exec); required with -nebula-url")
+	cf.nebulaURL = fs.String("nebula-url", "", "URL pilots fetch the nebula binary from (sha-verified, so the source need not be trusted)")
 	cf.certLifetime = fs.Duration("cert-lifetime", 30*24*time.Hour, "issued cert validity")
 	cf.maxPerHour = fs.Int("max-certs-per-hour", 0, "signing circuit-breaker ceiling (0=unlimited)")
 	cf.lighthouse = fs.String("lighthouse", "", "lighthouses for the bundle: overlayIP=host:port[,...]")
@@ -177,6 +181,7 @@ func (cf *coreFlags) buildConsumer(s *store.Store, results enrollment.ResultSink
 		Store: s, Nonces: ring, Replay: replay.New(2 * time.Minute),
 		Signer: sg, Allocator: alloc, Pool: pool, CertLifetime: *cf.certLifetime,
 		TunDev: *cf.tunDev, ListenPort: *cf.listenPort,
+		NebulaVersion: *cf.nebulaVersion, NebulaSHA256: *cf.nebulaSHA256, NebulaURL: *cf.nebulaURL,
 		ConfigBackend: cfgB, ConfigKeyID: wire.PubkeyHash(cfgPub),
 		CABundlePEM: caPEM, Lighthouses: parseLighthouses(*cf.lighthouse), LighthouseSource: cf.lighthouseSource(s), Policy: cf.policy(s),
 		BlocklistSource: cf.blocklistSource(s),

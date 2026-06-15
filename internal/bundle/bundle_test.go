@@ -38,6 +38,37 @@ func TestSignVerifyRoundTrip(t *testing.T) {
 	}
 }
 
+// TestSignVerifyNebulaVersion is the ADR 0003 Phase 1 acceptance: the desired
+// nebula version + sha + url ride INSIDE the signed bundle, so they are
+// authenticated (tamper breaks Verify) and survive the round trip — the integrity
+// anchor a pilot trusts when fetching + swapping the data-plane binary.
+func TestSignVerifyNebulaVersion(t *testing.T) {
+	be, err := signer.NewSoftwareBackend()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubBytes, _ := be.PublicKey()
+	pinned, _ := jws.ParseP256PublicPoint(pubBytes)
+
+	in := Bundle{
+		BundleVersion: 1, Certificate: "C", CABundle: []string{"CA"}, NotAfter: "2026-07-12T00:00:00Z",
+		NebulaVersion: "1.10.3",
+		NebulaSHA256:  "99ac335caeb69d02a6b6b00a3d4b5d0a36ec3971df480a1cc50e6db378342955",
+		NebulaURL:     "https://artifacts.example/nebula/1.10.3/nebula-linux-amd64",
+	}
+	jwsBytes, err := Sign(be, "kid-1", in)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	out, err := Verify(jwsBytes, pinned)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if out.NebulaVersion != in.NebulaVersion || out.NebulaSHA256 != in.NebulaSHA256 || out.NebulaURL != in.NebulaURL {
+		t.Fatalf("nebula fields did not round-trip: %+v", out)
+	}
+}
+
 // TestSignedFirewallTamperRefused is the M6.4 acceptance: the firewall rides
 // inside the signed bundle, so tampering with it is refused by Verify.
 func TestSignedFirewallTamperRefused(t *testing.T) {

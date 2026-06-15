@@ -69,8 +69,16 @@ type Bundle struct {
 	// gets a distinct device + port per mesh and its nebula instances don't collide.
 	// Empty/zero -> the renderer's nebula1/4242 defaults, so legacy bundles are
 	// unaffected (omitempty keeps them out of older payloads).
-	TunDev         string `json:"tun_dev,omitempty"`
-	ListenPort     int    `json:"listen_port,omitempty"`
+	TunDev     string `json:"tun_dev,omitempty"`
+	ListenPort int    `json:"listen_port,omitempty"`
+	// NebulaVersion / NebulaSHA256 / NebulaURL distribute the data-plane binary
+	// itself (ADR 0003 Phase 1): the version Harbor wants this host to run, the hex
+	// SHA-256 the pilot verifies before exec (the integrity anchor — so the URL/CDN
+	// need not be trusted), and where to fetch the bytes. All empty -> the host keeps
+	// its current nebula; legacy bundles are unaffected (omitempty).
+	NebulaVersion  string `json:"nebula_version,omitempty"`
+	NebulaSHA256   string `json:"nebula_sha256,omitempty"`
+	NebulaURL      string `json:"nebula_url,omitempty"`
 	NotAfter       string `json:"not_after"`
 	NextRenewAfter string `json:"next_renew_after,omitempty"`
 }
