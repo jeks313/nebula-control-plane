@@ -67,6 +67,11 @@ func renderPlist(s Spec) string {
 	// Restart on a non-clean exit only (≈ systemd Restart=on-failure); a clean
 	// SIGTERM stop (uninstall) must not be auto-relaunched.
 	b.WriteString("  <key>KeepAlive</key>\n  <dict><key>SuccessfulExit</key><false/></dict>\n")
+	// AbandonProcessGroup: don't let launchd SIGKILL nebula's process group when the
+	// pilot job dies — the pilot owns nebula's lifecycle (ADR 0003), so a pilot crash
+	// must leave nebula running for the auto-restarted pilot to RE-ADOPT (Phase 3),
+	// not drop the data plane. The launchd analogue of systemd KillMode=process.
+	b.WriteString("  <key>AbandonProcessGroup</key><true/>\n")
 	fmt.Fprintf(&b, "  <key>WorkingDirectory</key><string>%s</string>\n", xmlEscape(s.StateDir))
 	logPath := filepath.Join(s.StateDir, "pilot.log")
 	fmt.Fprintf(&b, "  <key>StandardOutPath</key><string>%s</string>\n", xmlEscape(logPath))

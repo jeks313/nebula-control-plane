@@ -43,6 +43,7 @@ func TestTemplateUnitShape(t *testing.T) {
 		"ExecStart=/usr/local/bin/pilot supervise",
 		"-core ${NCP_CORE_URL}",
 		"ExecReload=/bin/kill -HUP $MAINPID",
+		"KillMode=process", // pilot owns nebula's lifecycle; survives a pilot crash for re-adopt (ADR 0003 Phase 3)
 		"CapabilityBoundingSet=CAP_NET_ADMIN",
 		"ProtectSystem=strict",
 		"DeviceAllow=/dev/net/tun rw",
