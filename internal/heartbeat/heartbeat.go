@@ -76,6 +76,9 @@ type Config struct {
 	// generation to drive nebula-lane rollout convergence + auto-rollback. Re-evaluated
 	// per beat so it reflects a binary that changed (or reverted) under a self-update.
 	NebulaSHAFn func() string
+	// PilotSHAFn is NebulaSHAFn for the PILOT binary (ADR 0003 Phase 3c): the sha256 of
+	// the running pilot, the convergence key for the pilot lane.
+	PilotSHAFn func() string
 	// PinnedConfigPub, if set, lets the reporter read the applied bundle +
 	// blocklist versions from the stored signed bundle (7.1b) so Core can track
 	// rollout convergence. Reporting only — the bundle is verified against the
@@ -119,16 +122,20 @@ func (r *Reporter) Run(ctx context.Context) error {
 }
 
 func (r *Reporter) beat(ctx context.Context) {
-	nebVer, nebSHA := "", ""
+	nebVer, nebSHA, pilotSHA := "", "", ""
 	if r.cfg.NebulaVersionFn != nil {
 		nebVer = r.cfg.NebulaVersionFn()
 	}
 	if r.cfg.NebulaSHAFn != nil {
 		nebSHA = r.cfg.NebulaSHAFn()
 	}
+	if r.cfg.PilotSHAFn != nil {
+		pilotSHA = r.cfg.PilotSHAFn()
+	}
 	req := wire.HeartbeatRequest{
 		ProtocolVersion: wire.ProtocolVersion, Type: "heartbeat",
-		PilotVersion: r.cfg.PilotVersion, NebulaVersion: nebVer, NebulaSHA256: nebSHA, Health: "ok",
+		PilotVersion: r.cfg.PilotVersion, PilotSHA256: pilotSHA,
+		NebulaVersion: nebVer, NebulaSHA256: nebSHA, Health: "ok",
 	}
 	if pem, err := os.ReadFile(r.cfg.Layout.HostCert()); err == nil {
 		if c, _, err := cert.UnmarshalCertificateFromPEM(pem); err == nil {

@@ -42,16 +42,17 @@ type Heartbeat struct {
 	AppliedBundleVersion    int    `gorm:"column:applied_bundle_version"`
 	AppliedBlocklistVersion int    `gorm:"column:applied_blocklist_version"`
 	AppliedNebulaVersion    int    `gorm:"column:applied_nebula_version"`
+	AppliedPilotVersion     int    `gorm:"column:applied_pilot_version"`
 	ClockOffsetMs           int    `gorm:"column:clock_offset_ms"`
 	Health                  string `gorm:"column:health"`
 	LastSeen                int64  `gorm:"column:last_seen"`
 }
 
-// NebulaReleaseSource is the nebula release registry (ADR 0003 Phase 1c) Core
-// consults to stamp the per-host nebula tuple and to map a host's reported running
-// version back to a generation for nebula-lane convergence. nil -> Core falls back
-// to its static NebulaVersion config (Phase 1a/1b behavior).
-type NebulaReleaseSource interface {
+// ReleaseSource is a binary-release registry Core consults to stamp a host's per-host
+// release tuple and to map its reported running binary back to a generation for lane
+// convergence — the nebula registry (1c) and the pilot registry (3c) both satisfy it.
+// nil -> Core falls back to its static config for that binary.
+type ReleaseSource interface {
 	// Lookup returns the (version, sha256, url) for a generation.
 	Lookup(ctx context.Context, gen int) (version, sha256, url string, ok bool)
 	// GenForSHA maps the RUNNING binary's sha256 to a generation (0 if unknown). The
@@ -95,8 +96,12 @@ type Config struct {
 	// generation (in-wave -> target, else prev) instead of the static NebulaVersion,
 	// and the heartbeat maps the host's running version back to a generation so the
 	// nebula lane can converge + auto-roll-back. nil -> the static NebulaVersion.
-	NebulaReleases NebulaReleaseSource
-	Pool           netip.Prefix
+	NebulaReleases ReleaseSource
+	// PilotReleases is NebulaReleases for the PILOT binary (ADR 0003 Phase 3c): the
+	// pilot version becomes a per-host rollout target on the pilot lane, stamped into
+	// the bundle, and the pilot self-updates by re-exec/re-adopt. nil -> static config.
+	PilotReleases ReleaseSource
+	Pool          netip.Prefix
 	// TunDev + ListenPort are this mesh's nebula TUN device name + UDP listen port,
 	// stamped into renew + GET /v1/config bundles. MUST match enrollment.Config's, or a
 	// renew/refresh would flip a device's tun/port. Empty/zero -> nebula1/4242.
@@ -109,7 +114,13 @@ type Config struct {
 	NebulaVersion string
 	NebulaSHA256  string
 	NebulaURL     string
-	CertLifetime  time.Duration
+	// PilotVersion / PilotSHA256 / PilotURL are the static fallback for the pilot binary
+	// (ADR 0003 Phase 3c), used when no pilot release/rollout is configured. Stamped into
+	// the bundle; the pilot self-updates to it. All empty -> hosts keep their current pilot.
+	PilotVersion string
+	PilotSHA256  string
+	PilotURL     string
+	CertLifetime time.Duration
 	// RenewCommandThreshold: if a heartbeat reports a cert expiring within this
 	// window, Core replies with a `renew` command (a backstop to Pilot's own
 	// proactive renewal). 0 disables it.
@@ -247,19 +258,25 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.NebulaReleases != nil {
 		appliedNebula = s.cfg.NebulaReleases.GenForSHA(ctx, req.NebulaSHA256)
 	}
+	// Likewise for the PILOT lane (3c): map the running pilot binary's sha to a gen.
+	appliedPilot := 0
+	if s.cfg.PilotReleases != nil {
+		appliedPilot = s.cfg.PilotReleases.GenForSHA(ctx, req.PilotSHA256)
+	}
 	hb := Heartbeat{
 		OverlayIP: dev.OverlayIP, DeviceName: dev.DeviceName,
 		PilotVersion: req.PilotVersion, NebulaVersion: req.NebulaVersion,
 		CertNotAfter: certNotAfter, AppliedBundleVersion: req.AppliedBundleVersion,
 		AppliedBlocklistVersion: req.AppliedBlocklistVersion, AppliedNebulaVersion: appliedNebula,
-		ClockOffsetMs: req.ClockOffsetMs, Health: req.Health, LastSeen: s.now().UnixNano(),
+		AppliedPilotVersion: appliedPilot,
+		ClockOffsetMs:       req.ClockOffsetMs, Health: req.Health, LastSeen: s.now().UnixNano(),
 	}
 	if err := s.cfg.Store.DB.WithContext(ctx).Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "overlay_ip"}},
 		DoUpdates: clause.AssignmentColumns([]string{
 			"device_name", "pilot_version", "nebula_version", "cert_not_after",
 			"applied_bundle_version", "applied_blocklist_version", "applied_nebula_version",
-			"clock_offset_ms", "health", "last_seen",
+			"applied_pilot_version", "clock_offset_ms", "health", "last_seen",
 		}),
 	}).Create(&hb).Error; err != nil {
 		wire.WriteError(w, wire.CodeInternal, "persist heartbeat failed")
@@ -277,14 +294,14 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 
 	wire.WriteJSON(w, http.StatusOK, wire.HeartbeatResponse{
 		ProtocolVersion: wire.ProtocolVersion,
-		Commands:        s.commandsFor(ctx, dev.OverlayIP, req.AppliedBundleVersion, req.AppliedBlocklistVersion, appliedNebula, certNotAfter),
+		Commands:        s.commandsFor(ctx, dev.OverlayIP, req.AppliedBundleVersion, req.AppliedBlocklistVersion, appliedNebula, appliedPilot, certNotAfter),
 	})
 }
 
 // commandsFor decides the typed commands to return: the near-expiry renew
 // backstop (4.6) plus, for 6.6, an apply_bundle that drives the host toward its
 // rollout target version (or back to prev after a rollback).
-func (s *Server) commandsFor(ctx context.Context, overlayIP string, appliedVersion, appliedBlocklist, appliedNebula int, certNotAfter int64) []wire.Command {
+func (s *Server) commandsFor(ctx context.Context, overlayIP string, appliedVersion, appliedBlocklist, appliedNebula, appliedPilot int, certNotAfter int64) []wire.Command {
 	var cmds []wire.Command
 	if s.cfg.RenewCommandThreshold > 0 && certNotAfter > 0 {
 		if time.Unix(0, certNotAfter).Sub(s.now()) < s.cfg.RenewCommandThreshold {
@@ -294,12 +311,14 @@ func (s *Server) commandsFor(ctx context.Context, overlayIP string, appliedVersi
 	if s.cfg.Rollout != nil {
 		// A single apply_bundle refetches the host's CURRENT bundle (the latest of
 		// every lane via GET /v1/config), so emit at most one even when several lanes
-		// (policy, blocklist, nebula) want this host to converge.
+		// (policy, blocklist, nebula, pilot) want this host to converge.
 		if cmd, ok := s.cfg.Rollout.CommandFor(ctx, overlayIP, appliedVersion); ok {
 			cmds = append(cmds, cmd)
 		} else if cmd, ok := s.cfg.Rollout.BlocklistCommandFor(ctx, overlayIP, appliedBlocklist); ok {
 			cmds = append(cmds, cmd)
 		} else if cmd, ok := s.cfg.Rollout.NebulaCommandFor(ctx, overlayIP, appliedNebula); ok {
+			cmds = append(cmds, cmd)
+		} else if cmd, ok := s.cfg.Rollout.PilotCommandFor(ctx, overlayIP, appliedPilot); ok {
 			cmds = append(cmds, cmd)
 		}
 	}
@@ -408,6 +427,7 @@ func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
 // refresh) and its expiry.
 func (s *Server) assembleBundle(ctx context.Context, dev enrollment.Enrollment, groups []string, certPEM string, notAfter time.Time) bundle.Bundle {
 	nebVer, nebSHA, nebURL := s.nebulaRelease(ctx, dev.OverlayIP)
+	pilotVer, pilotSHA, pilotURL := s.pilotRelease(ctx, dev.OverlayIP)
 	return bundle.Bundle{
 		BundleVersion:    s.bundleVersion(ctx, dev.OverlayIP),
 		BlocklistVersion: s.blocklistVersion(ctx),
@@ -423,6 +443,9 @@ func (s *Server) assembleBundle(ctx context.Context, dev enrollment.Enrollment, 
 		NebulaVersion:    nebVer,
 		NebulaSHA256:     nebSHA,
 		NebulaURL:        nebURL,
+		PilotVersion:     pilotVer,
+		PilotSHA256:      pilotSHA,
+		PilotURL:         pilotURL,
 		NotAfter:         notAfter.UTC().Format(time.RFC3339),
 	}
 }
@@ -445,6 +468,23 @@ func (s *Server) nebulaRelease(ctx context.Context, overlayIP string) (version, 
 		}
 	}
 	return s.cfg.NebulaVersion, s.cfg.NebulaSHA256, s.cfg.NebulaURL
+}
+
+// pilotRelease is nebulaRelease for the PILOT binary (ADR 0003 Phase 3c): the staged
+// pilot generation's tuple when a pilot rollout governs the host, else the static
+// PilotVersion config.
+func (s *Server) pilotRelease(ctx context.Context, overlayIP string) (version, sha256, url string) {
+	if s.cfg.Rollout != nil && s.cfg.PilotReleases != nil {
+		if gen, governed := s.cfg.Rollout.PilotGenFor(ctx, overlayIP); governed {
+			if gen == 0 {
+				return "", "", "" // unpinned (prev of the first rollout / rolled back to none)
+			}
+			if v, sh, u, ok := s.cfg.PilotReleases.Lookup(ctx, gen); ok {
+				return v, sh, u
+			}
+		}
+	}
+	return s.cfg.PilotVersion, s.cfg.PilotSHA256, s.cfg.PilotURL
 }
 
 // handleConfig implements GET /v1/config (spec §9): return the host's CURRENT

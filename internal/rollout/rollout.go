@@ -55,10 +55,15 @@ const (
 	// the blocklist lane which freezes. The generation maps to a (version, sha256,
 	// url) tuple in the nebula_versions registry, stamped per-host into the bundle.
 	LaneNebula = "nebula"
+	// LanePilot stages a new PILOT (agent) RELEASE generation across the fleet (ADR
+	// 0003 Phase 3c) — the same canary-staged + auto-rolled-back mechanism as the
+	// nebula lane, applied to the pilot binary (which the pilot then re-exec/re-adopts
+	// per Phase 3b). The generation maps to a tuple in the pilot_versions registry.
+	LanePilot = "pilot"
 )
 
 // lanes is the fixed set Evaluate sweeps each heartbeat.
-var lanes = []string{LanePolicy, LaneBlocklist, LaneNebula}
+var lanes = []string{LanePolicy, LaneBlocklist, LaneNebula, LanePilot}
 
 // healthBad is the set of reported health values that fail a wave immediately.
 var healthBad = map[string]bool{"unhealthy": true, "degraded": true, "error": true, "critical": true, "red": true}
@@ -113,6 +118,7 @@ type hb struct {
 	AppliedBundleVersion    int    `gorm:"column:applied_bundle_version"`
 	AppliedBlocklistVersion int    `gorm:"column:applied_blocklist_version"`
 	AppliedNebulaVersion    int    `gorm:"column:applied_nebula_version"`
+	AppliedPilotVersion     int    `gorm:"column:applied_pilot_version"`
 	Health                  string `gorm:"column:health"`
 	LastSeen                int64  `gorm:"column:last_seen"`
 }
@@ -124,6 +130,8 @@ func appliedFor(beat hb, lane string) int {
 		return beat.AppliedBlocklistVersion
 	case LaneNebula:
 		return beat.AppliedNebulaVersion
+	case LanePilot:
+		return beat.AppliedPilotVersion
 	default:
 		return beat.AppliedBundleVersion
 	}
@@ -384,6 +392,13 @@ func (e *Engine) NebulaCommandFor(ctx context.Context, overlayIP string, reporte
 	return e.commandForLane(ctx, LaneNebula, overlayIP, reportedVersion)
 }
 
+// PilotCommandFor is NebulaCommandFor for the pilot lane (ADR 0003 Phase 3c): drive an
+// in-wave host to re-fetch its bundle (which carries the new pilot tuple), which the
+// pilot updater then self-applies via re-exec.
+func (e *Engine) PilotCommandFor(ctx context.Context, overlayIP string, reportedVersion int) (wire.Command, bool) {
+	return e.commandForLane(ctx, LanePilot, overlayIP, reportedVersion)
+}
+
 func (e *Engine) commandForLane(ctx context.Context, lane, overlayIP string, reportedVersion int) (wire.Command, bool) {
 	r, ok, err := e.current(ctx, lane)
 	if err != nil || !ok {
@@ -464,7 +479,20 @@ func (e *Engine) BlocklistVersion(ctx context.Context) int {
 // the host's nebula alone. governed=false means no nebula rollout exists at all, so
 // Core falls back to its static NebulaVersion config (Phase 1a/1b back-compat).
 func (e *Engine) NebulaGenFor(ctx context.Context, overlayIP string) (gen int, governed bool) {
-	r, ok, err := e.current(ctx, LaneNebula)
+	return e.genForLane(ctx, LaneNebula, overlayIP)
+}
+
+// PilotGenFor is NebulaGenFor for the pilot lane (ADR 0003 Phase 3c): the pilot-release
+// generation Core stamps into a host's bundle. Same content-gating semantics.
+func (e *Engine) PilotGenFor(ctx context.Context, overlayIP string) (gen int, governed bool) {
+	return e.genForLane(ctx, LanePilot, overlayIP)
+}
+
+// genForLane is the shared content-gating logic for the binary-distribution lanes
+// (nebula, pilot): the generation a host should RUN, gated by rollout state. See
+// NebulaGenFor for the per-state semantics.
+func (e *Engine) genForLane(ctx context.Context, lane, overlayIP string) (gen int, governed bool) {
+	r, ok, err := e.current(ctx, lane)
 	if err != nil || !ok {
 		return 0, false
 	}
@@ -480,7 +508,7 @@ func (e *Engine) NebulaGenFor(ctx context.Context, overlayIP string) (gen int, g
 		case err != nil:
 			// A transient DB error is NOT "not a member" — don't silently stamp prev (or
 			// worse, flip a host's version on a blip). Treat as ungoverned so the caller
-			// keeps the host's current nebula; the next bundle build retries.
+			// keeps the host's current binary; the next bundle build retries.
 			return 0, false
 		case h.Wave <= r.ActiveWave:
 			return r.TargetVersion, true
@@ -498,9 +526,18 @@ func (e *Engine) NebulaGenFor(ctx context.Context, overlayIP string) (gen int, g
 // which registry release is "current". A rolled-back rollout's target is excluded
 // (the fleet reverted off it), so this tracks what the fleet actually runs.
 func (e *Engine) CurrentNebulaGen(ctx context.Context) int {
+	return e.currentCompletedGen(ctx, LaneNebula)
+}
+
+// CurrentPilotGen is CurrentNebulaGen for the pilot lane (ADR 0003 Phase 3c).
+func (e *Engine) CurrentPilotGen(ctx context.Context) int {
+	return e.currentCompletedGen(ctx, LanePilot)
+}
+
+func (e *Engine) currentCompletedGen(ctx context.Context, lane string) int {
 	var r Rollout
 	if err := e.db.WithContext(ctx).
-		Where("lane = ? AND state = ?", LaneNebula, StateCompleted).
+		Where("lane = ? AND state = ?", lane, StateCompleted).
 		Order("id DESC").First(&r).Error; err != nil {
 		return 0
 	}

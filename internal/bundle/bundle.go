@@ -76,9 +76,16 @@ type Bundle struct {
 	// SHA-256 the pilot verifies before exec (the integrity anchor — so the URL/CDN
 	// need not be trusted), and where to fetch the bytes. All empty -> the host keeps
 	// its current nebula; legacy bundles are unaffected (omitempty).
-	NebulaVersion  string `json:"nebula_version,omitempty"`
-	NebulaSHA256   string `json:"nebula_sha256,omitempty"`
-	NebulaURL      string `json:"nebula_url,omitempty"`
+	NebulaVersion string `json:"nebula_version,omitempty"`
+	NebulaSHA256  string `json:"nebula_sha256,omitempty"`
+	NebulaURL     string `json:"nebula_url,omitempty"`
+	// PilotVersion / PilotSHA256 / PilotURL distribute the PILOT (agent) binary the
+	// same way (ADR 0003 Phase 3c): the version Harbor wants this host's pilot to run,
+	// its integrity-anchor sha, and where to fetch it. The pilot self-updates by
+	// re-exec/re-adopt (Phase 3b). All empty -> the host keeps its current pilot.
+	PilotVersion   string `json:"pilot_version,omitempty"`
+	PilotSHA256    string `json:"pilot_sha256,omitempty"`
+	PilotURL       string `json:"pilot_url,omitempty"`
 	NotAfter       string `json:"not_after"`
 	NextRenewAfter string `json:"next_renew_after,omitempty"`
 }

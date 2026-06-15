@@ -20,6 +20,7 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/lighthouse"
 	"github.com/jeks313/nebula-control-plane/internal/nebularelease"
 	"github.com/jeks313/nebula-control-plane/internal/nonce"
+	"github.com/jeks313/nebula-control-plane/internal/pilotrelease"
 	"github.com/jeks313/nebula-control-plane/internal/policy"
 	"github.com/jeks313/nebula-control-plane/internal/queue"
 	"github.com/jeks313/nebula-control-plane/internal/replay"
@@ -43,6 +44,7 @@ type coreFlags struct {
 	tunDev                                 *string
 	listenPort                             *int
 	nebulaVersion, nebulaSHA256, nebulaURL *string
+	pilotVersion, pilotSHA256, pilotURL    *string
 	certLifetime                           *time.Duration
 	maxPerHour                             *int
 	lighthouse                             *string
@@ -74,6 +76,9 @@ func addCoreFlags(fs *flag.FlagSet) *coreFlags {
 	cf.nebulaVersion = fs.String("nebula-version", "", "nebula version Harbor distributes to the fleet (ADR 0003); stamped into every bundle (empty -> hosts keep their current nebula)")
 	cf.nebulaSHA256 = fs.String("nebula-sha256", "", "hex SHA-256 of the nebula binary (the integrity anchor pilots verify before exec); required with -nebula-url")
 	cf.nebulaURL = fs.String("nebula-url", "", "URL pilots fetch the nebula binary from (sha-verified, so the source need not be trusted)")
+	cf.pilotVersion = fs.String("pilot-version", "", "pilot (agent) version Harbor distributes to the fleet (ADR 0003 Phase 3c); stamped into every bundle (empty -> hosts keep their current pilot)")
+	cf.pilotSHA256 = fs.String("pilot-sha256", "", "hex SHA-256 of the pilot binary (the integrity anchor pilots verify before re-exec); required with -pilot-url")
+	cf.pilotURL = fs.String("pilot-url", "", "URL pilots fetch the new pilot binary from (sha-verified)")
 	cf.certLifetime = fs.Duration("cert-lifetime", 30*24*time.Hour, "issued cert validity")
 	cf.maxPerHour = fs.Int("max-certs-per-hour", 0, "signing circuit-breaker ceiling (0=unlimited)")
 	cf.lighthouse = fs.String("lighthouse", "", "lighthouses for the bundle: overlayIP=host:port[,...]")
@@ -192,13 +197,26 @@ func (cf *coreFlags) buildConsumer(s *store.Store, results enrollment.ResultSink
 		}
 		return *cf.nebulaVersion, *cf.nebulaSHA256, *cf.nebulaURL
 	}
+	// A new host also joins on the current fleet-desired PILOT release (3c), falling
+	// back to the static flags.
+	pilotReg := pilotrelease.New(s.DB)
+	pilotReleaseFor := func(ctx context.Context) (version, sha256, url string) {
+		if gen := eng.CurrentPilotGen(ctx); gen != 0 {
+			if v, sh, u, ok := pilotReg.Lookup(ctx, gen); ok {
+				return v, sh, u
+			}
+		}
+		return *cf.pilotVersion, *cf.pilotSHA256, *cf.pilotURL
+	}
 	return enrollment.New(enrollment.Config{
 		Store: s, Nonces: ring, Replay: replay.New(2 * time.Minute),
 		Signer: sg, Allocator: alloc, Pool: pool, CertLifetime: *cf.certLifetime,
 		TunDev: *cf.tunDev, ListenPort: *cf.listenPort,
 		NebulaVersion: *cf.nebulaVersion, NebulaSHA256: *cf.nebulaSHA256, NebulaURL: *cf.nebulaURL,
 		NebulaReleaseFor: nebulaReleaseFor,
-		ConfigBackend:    cfgB, ConfigKeyID: wire.PubkeyHash(cfgPub),
+		PilotVersion:     *cf.pilotVersion, PilotSHA256: *cf.pilotSHA256, PilotURL: *cf.pilotURL,
+		PilotReleaseFor: pilotReleaseFor,
+		ConfigBackend:   cfgB, ConfigKeyID: wire.PubkeyHash(cfgPub),
 		CABundlePEM: caPEM, Lighthouses: parseLighthouses(*cf.lighthouse), LighthouseSource: cf.lighthouseSource(s), Policy: cf.policy(s),
 		BlocklistSource: cf.blocklistSource(s),
 		Results:         results, ResultTTL: time.Hour,

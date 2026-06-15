@@ -237,12 +237,19 @@ judged worth the single-process win — neither of which is established today.
       copy at `/var/lib/pilot/bin/pilot` (under StateRoot, in `ReadWritePaths`); `pilot install`
       copies the running binary there and `ExecStart` points at it, keeping `ProtectSystem=strict`
       for everything else. (Linux-only; macOS `/usr/local` is writable.)
-  - **3c (remaining) — pilot-version distribution.** The trigger: bundle carries
-    `pilot_version`/`pilot_sha256`/`pilot_url`; the pilot reads its desired version and the
-    rollout engine stages it on a `pilot` lane — the mechanical mirror of the nebula
-    registry/lane/stamping built in Phase 1c (`nebula_versions` → `pilot_versions`, `LaneNebula`
-    → `LanePilot`, `NebulaGenFor` → `PilotGenFor`). Lower-risk, well-understood; deferred so the
-    high-stakes 3b mechanism can be built + live-tested in isolation first.
+  - ✅ **3c — pilot-version distribution.** The trigger: the bundle carries
+    `pilot_version`/`pilot_sha256`/`pilot_url`; the pilot reads its desired version from the
+    verified bundle and self-updates (3b). It is **canary-staged**, not pushed fleet-wide — the
+    rollout engine was generalized across lanes (`genForLane`/`currentCompletedGen`; nebula
+    behavior unchanged, asserted by the existing tests) and a `pilot` lane added, the mechanical
+    mirror of Phase 1c: a `pilot_versions` registry (migration 000017), `coreapi` stamps the
+    per-host pilot tuple (`PilotGenFor` → in-wave target / else prev / static fallback), the
+    pilot reports its **own** binary sha so Harbor maps it to a gen for convergence + auto-
+    rollback, and `harbor pilot add/list/release/status/abort` drives it. New hosts enroll on
+    the current settled gen. The manual `-pilot-version/-sha/-url` flags remain as an
+    all-or-nothing live-test override. Reviewed (no nebula-lane regression; the loop's flag
+    precedence + bundle read/verify visibility hardened). ⚠️ Still gated on the 3b re-exec
+    mechanism's live validation before a real fleet rollout.
 - **Phase 4 — evaluate in-process nebula.** Only after 1–3 are proven; weigh the isolation
   loss against the single-process simplification (the fork above).
 
