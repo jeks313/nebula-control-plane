@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -44,5 +47,35 @@ func TestResolveReleaseArgs(t *testing.T) {
 	// A missing -file is a clear error (not a silent empty sha).
 	if _, _, err := resolveReleaseArgs(filepath.Join(dir, "absent"), "1", "", "u"); err == nil {
 		t.Fatal("expected an error for a missing -file")
+	}
+}
+
+func TestCheckReleaseURL(t *testing.T) {
+	body := []byte("the artifact bytes")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/missing" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write(body) // sets Content-Length for the HEAD too
+	}))
+	defer srv.Close()
+	ctx := context.Background()
+
+	// Reachable + matching size -> ok.
+	if msg, ok := checkReleaseURL(ctx, srv.URL+"/ok", int64(len(body))); !ok {
+		t.Fatalf("reachable+matching should be ok, got %q", msg)
+	}
+	// Reachable but size mismatch -> warn.
+	if _, ok := checkReleaseURL(ctx, srv.URL+"/ok", int64(len(body)+10)); ok {
+		t.Fatal("a size mismatch must warn (ok=false)")
+	}
+	// 404 -> warn.
+	if _, ok := checkReleaseURL(ctx, srv.URL+"/missing", 0); ok {
+		t.Fatal("a 404 must warn (ok=false)")
+	}
+	// Unreachable -> warn (not a panic).
+	if _, ok := checkReleaseURL(ctx, "http://127.0.0.1:1/x", 0); ok {
+		t.Fatal("an unreachable url must warn (ok=false)")
 	}
 }
