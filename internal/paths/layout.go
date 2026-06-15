@@ -51,6 +51,11 @@ func (l Layout) EnrollTicket() string { return filepath.Join(l.Base, "enroll-tic
 // config drift and re-assert the signed version (M6.7).
 func (l Layout) Bundle() string { return filepath.Join(l.Base, "bundle.json") }
 
+// NebulaPid holds the running nebula PID across a pilot re-exec self-update, so the
+// re-exec'd pilot can re-adopt the data plane the previous pilot left running (ADR
+// 0003 Phase 3) instead of forking a new one.
+func (l Layout) NebulaPid() string { return filepath.Join(l.Base, "nebula.pid") }
+
 // Ensure creates the base directory with owner-only protection appropriate to
 // the platform. It is idempotent.
 func (l Layout) Ensure() error {

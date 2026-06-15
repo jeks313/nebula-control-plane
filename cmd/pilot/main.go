@@ -29,6 +29,7 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/paths"
 	"github.com/jeks313/nebula-control-plane/internal/pilotservice"
 	"github.com/jeks313/nebula-control-plane/internal/pilotsetup"
+	"github.com/jeks313/nebula-control-plane/internal/pilotupdate"
 	"github.com/jeks313/nebula-control-plane/internal/renew"
 	"github.com/jeks313/nebula-control-plane/internal/supervisor"
 	"github.com/slackhq/nebula/cert"
@@ -335,6 +336,14 @@ func cmdSupervise(args []string) {
 	configPub := fs.String("config-pub", "", "pinned config-signing public key PEM (required with -core)")
 	logFormat := fs.String("log-format", "auto", "log format: auto (text on a TTY, JSON as a service) | text | json")
 	logLevel := fs.String("log-level", "info", "log level: debug | info | warn | error")
+	// Pilot self-update (ADR 0003 Phase 3). -adopt-nebula-pid is set by the re-exec so
+	// the new pilot re-adopts the running nebula instead of forking. -pilot-* are the
+	// manual/test trigger for the re-exec mechanism (Phase 3c replaces them with the
+	// bundle's pilot_version/sha/url).
+	adoptNebulaPid := fs.Int("adopt-nebula-pid", 0, "re-adopt this running nebula PID instead of forking (set by the self-update re-exec; ADR 0003 Phase 3)")
+	pilotVersion := fs.String("pilot-version", "", "desired pilot version to self-update to (Phase 3 manual trigger)")
+	pilotSHA := fs.String("pilot-sha256", "", "hex sha256 of the desired pilot binary (the integrity anchor)")
+	pilotURL := fs.String("pilot-url", "", "URL to fetch the desired pilot binary from (sha-verified)")
 	_ = fs.Parse(args)
 
 	// Validate required flags BEFORE any service-mode setup: under the Windows SCM
@@ -354,10 +363,42 @@ func cmdSupervise(args []string) {
 	// serve runs the supervise work until ctx is cancelled. runSupervisor supplies
 	// that ctx: SIGINT/SIGTERM on Unix, the SCM Stop/Shutdown control on Windows.
 	serve := func(ctx context.Context) error {
+		// Pilot self-update (ADR 0003 Phase 3). self is the running pilot binary; the
+		// nebula PID handoff lives in the state dir (when -dir is set).
+		self, _ := os.Executable()
+		nebulaPidPath := ""
+		if *dir != "" {
+			nebulaPidPath = paths.New(*dir).NebulaPid()
+		}
+		pu := pilotupdate.New(pilotupdate.Config{
+			SelfPath: self, NebulaPidPath: nebulaPidPath, Args: os.Args,
+		})
+		// Before supervising anything: if a prior self-update re-exec'd but never
+		// confirmed health (it crashed/hung and the service restarted us), revert the
+		// pilot binary to last-good and exit non-zero so the service relaunches the good
+		// one (which re-adopts the still-running nebula via the pidfile).
+		if reverted, err := pu.CheckRevert(); err != nil {
+			// Revert was needed but impossible (no last-good / fs error). Looping (exit +
+			// service-restart) would just relaunch the same bad binary, so run the current
+			// one and alert loudly — a visible, heartbeating host an operator can recover
+			// beats a host that looks dead.
+			log.Error("pilot self-update: REVERT FAILED — running the current binary; manual recovery may be needed", "err", err)
+		} else if reverted {
+			return fmt.Errorf("pilot self-update reverted to last-good; relaunching")
+		}
+
+		// Re-adopt a nebula a previous pilot left running across a re-exec: the flag
+		// (re-exec lineage) takes precedence, else the persisted pidfile (a service
+		// restart after a revert) — so the data plane survives a pilot swap.
+		adoptPID := *adoptNebulaPid
+		if adoptPID == 0 && nebulaPidPath != "" {
+			adoptPID = pilotupdate.ReadAdoptPID(nebulaPidPath)
+		}
 		sup := &supervisor.Supervisor{
 			NebulaPath:     *nebulaPath,
 			ConfigPath:     *configPath,
 			ExpectedSHA256: *sha,
+			AdoptPID:       adoptPID,
 		}
 		// ADR 0003 Phase 2: on a fresh host with no nebula binary yet, materialize the
 		// one embedded in this pilot (offline first-boot). No-op once a binary exists
@@ -443,6 +484,52 @@ func cmdSupervise(args []string) {
 			wg.Add(1)
 			go func() { defer wg.Done(); _ = nu.Run(ctx) }()
 			log.Info("pilot background tasks enabled", "renew", true, "heartbeat", true, "drift", true, "nebula_update", true, "core", *core)
+		}
+
+		// Pilot self-update (ADR 0003 Phase 3). If THIS pilot is a re-exec on trial,
+		// confirm once it has stayed up a grace window (a proxy for "the new pilot came up
+		// healthy"); a crash before then leaves the marker, so the next start reverts.
+		if pu.Pending() {
+			log.Info("pilot self-update: on trial; confirming after a health grace window")
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				select {
+				case <-time.After(30 * time.Second):
+					if err := pu.Confirm(version); err != nil {
+						log.Warn("pilot self-update: confirm failed", "err", err)
+					}
+				case <-ctx.Done():
+				}
+			}()
+		}
+		// Manual self-update trigger (Phase 3 live-test; Phase 3c will drive this from the
+		// bundle's pilot_version/sha/url). Once nebula is up (so the re-exec'd pilot has
+		// something to re-adopt), a desired pilot version different from the running one is
+		// fetched + sha-verified + applied via re-exec (which does not return).
+		if *pilotURL != "" {
+			puLoop := pilotupdate.New(pilotupdate.Config{
+				SelfPath: self, NebulaPidPath: nebulaPidPath, Args: os.Args,
+				NebulaPID: func() int { return sup.Health().Pid },
+			})
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				t := time.NewTicker(10 * time.Second)
+				defer t.Stop()
+				for {
+					if sup.Health().Pid > 0 { // only swap once there's a nebula to re-adopt
+						if _, err := puLoop.Sync(*pilotVersion, *pilotSHA, *pilotURL); err != nil {
+							log.Warn("pilot self-update: sync failed; will retry", "err", err)
+						}
+					}
+					select {
+					case <-ctx.Done():
+						return
+					case <-t.C:
+					}
+				}
+			}()
 		}
 
 		err := sup.Run(ctx)
