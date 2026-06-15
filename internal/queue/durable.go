@@ -283,11 +283,19 @@ func (d *Durable) GetResult(ctx context.Context, enrollmentID, secret string) (P
 		return PollResult{}, ErrResultGone
 	}
 	if r.Status == "issued" {
-		if r.ReadCount > 0 {
-			return PollResult{}, ErrResultGone // one-time bundle read
-		}
-		d.db.WithContext(ctx).Model(&result{}).Where("id = ?", r.ID).
+		// Atomic one-time consume: only the reader whose UPDATE flips read_count
+		// 0 -> 1 gets the bundle. Guarding read_count in the WHERE (not on the stale
+		// SELECT above) closes a cross-process / concurrent TOCTOU where two readers
+		// both saw read_count==0 and both received the one-time bundle.
+		res := d.db.WithContext(ctx).Model(&result{}).
+			Where("id = ? AND status = ? AND read_count = 0", r.ID, "issued").
 			UpdateColumn("read_count", gorm.Expr("read_count + 1"))
+		if res.Error != nil {
+			return PollResult{}, fmt.Errorf("queue: consume result: %w", res.Error)
+		}
+		if res.RowsAffected == 0 {
+			return PollResult{}, ErrResultGone // already consumed (prior read or lost the race)
+		}
 	}
 	return PollResult{Status: r.Status, Bundle: r.Bundle, Reason: r.Reason}, nil
 }
