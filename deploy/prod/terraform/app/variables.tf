@@ -176,3 +176,28 @@ variable "flow_log_retention_days" {
   type        = number
   default     = 90
 }
+
+# ── Data layer (Aurora PostgreSQL) ───────────────────────────────────────────
+variable "aurora_engine_version" {
+  description = "Aurora PostgreSQL engine version. VERIFY it exists in your region: `aws rds describe-db-engine-versions --engine aurora-postgresql --query 'DBEngineVersions[].EngineVersion'`."
+  type        = string
+  default     = "16.6"
+}
+
+variable "db_instance_class" {
+  description = "Aurora instance class (one writer + one reader are created). db.t4g.medium suits a control plane; bump to db.r6g.* for heavier fleets."
+  type        = string
+  default     = "db.t4g.medium"
+}
+
+variable "db_name" {
+  description = "Initial database name created in the cluster (Harbor's schema; the Postgres path has 15 migrations under internal/store/migrate)."
+  type        = string
+  default     = "harbor"
+}
+
+variable "db_backup_retention_days" {
+  description = "Automated-backup / PITR retention (days). Aurora keeps continuous backups across this window."
+  type        = number
+  default     = 14
+}

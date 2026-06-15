@@ -96,6 +96,16 @@ resource "aws_security_group" "harbor" {
     cidr_blocks = [local.tier_cidr["edge"]]
   }
   egress {
+    # Core -> Aurora (data tier). Core INITIATES this, so it is harbor's egress; the DB SG
+    # (data.tf) has only the matching stateful ingress + deny-all egress. Target the
+    # data-subnet CIDRs (not the DB SG) to avoid an SG<->SG egress cycle, like collect above.
+    description = "Aurora PostgreSQL (data tier)"
+    from_port   = 5432
+    to_port     = 5432
+    protocol    = "tcp"
+    cidr_blocks = [for s in values(local.data_subnets) : s.cidr]
+  }
+  egress {
     description = "Nebula data plane + DNS (UDP)"
     from_port   = 0
     to_port     = 65535
