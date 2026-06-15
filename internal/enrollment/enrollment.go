@@ -125,6 +125,13 @@ type Config struct {
 	// existing meshes are unaffected).
 	TunDev     string
 	ListenPort int
+	// NebulaVersion / NebulaSHA256 / NebulaURL distribute the data-plane binary
+	// (ADR 0003 Phase 1), stamped into every issued bundle. MUST match coreapi.Config's
+	// so an enroll and a later renew agree on the nebula version. All empty -> hosts
+	// keep their current nebula.
+	NebulaVersion string
+	NebulaSHA256  string
+	NebulaURL     string
 	// LighthouseSource, if set, is consulted at bundle-build time so registry
 	// changes (6.8) propagate live; overrides Lighthouses, with a fallback to it
 	// on error (a transient registry read must not sever discovery).
@@ -591,6 +598,9 @@ func (c *Consumer) buildBundle(ctx context.Context, deviceName, ip string, group
 		Blocklist:     c.blocklist(ctx),
 		TunDev:        c.cfg.TunDev,
 		ListenPort:    c.cfg.ListenPort,
+		NebulaVersion: c.cfg.NebulaVersion,
+		NebulaSHA256:  c.cfg.NebulaSHA256,
+		NebulaURL:     c.cfg.NebulaURL,
 		NotAfter:      notAfter.UTC().Format(time.RFC3339),
 	}
 	return bundle.Sign(c.cfg.ConfigBackend, c.cfg.ConfigKeyID, b)
