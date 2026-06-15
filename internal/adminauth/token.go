@@ -135,6 +135,7 @@ func (t AdminToken) Active(now time.Time) bool {
 	return t.RevokedAt == 0 && (t.ExpiresAt == 0 || now.UnixNano() < t.ExpiresAt)
 }
 
+// RoleList returns the token's granted roles as a string slice.
 func (t AdminToken) RoleList() []string {
 	var roles []string
 	_ = json.Unmarshal([]byte(t.Roles), &roles)

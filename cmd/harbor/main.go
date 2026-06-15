@@ -236,7 +236,7 @@ func auditVerify(args []string) {
 	n, err := s.VerifyAudit(context.Background())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "audit: VERIFICATION FAILED after %d rows: %v\n", n, err)
-		os.Exit(1)
+		os.Exit(1) //nolint:gocritic // CLI fatal exit: deferred store Close is best-effort (OS reclaims on exit)
 	}
 	fmt.Printf("audit: chain verified, %d rows intact\n", n)
 }
@@ -434,7 +434,7 @@ func cmdFleet(args []string) {
 		}
 	}
 	if *alert && rep.HasAlerts() {
-		os.Exit(1)
+		os.Exit(1) //nolint:gocritic // intentional exit-code signal; deferred store Close is best-effort
 	}
 }
 

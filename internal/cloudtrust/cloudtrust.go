@@ -36,8 +36,8 @@ func RegisterCommitter(dc *dualcontrol.Controller) {
 	})
 }
 
-// Provider identifiers (stored as attestation evidence + a discriminator for future
-// provider sections).
+// ProviderAWS identifies AWS as the attestation provider — stored as attestation
+// evidence + a discriminator for future provider sections.
 const ProviderAWS = "aws"
 
 // AWSAccount is one trusted AWS account entry.

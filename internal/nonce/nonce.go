@@ -21,8 +21,9 @@ const (
 	label  = "ncp-nonce-v1" // domain separation
 	macLen = 16
 	tsLen  = 8
-	// Defaults from the protocol spec.
-	DefaultTTL     = 60 * time.Second
+	// DefaultTTL is the nonce lifetime from the protocol spec.
+	DefaultTTL = 60 * time.Second
+	// DefaultMaxSkew is the max clock skew tolerated for a nonce timestamp.
 	DefaultMaxSkew = 30 * time.Second
 )
 
