@@ -55,11 +55,6 @@ func cmdPolicy(args []string) {
 	}
 }
 
-// KindPolicyPublish is the dual-control change kind for firewall policy publish
-// (6.5); shared with the admin API via internal/policy so both write the same
-// dual-control records.
-const KindPolicyPublish = policy.PublishKind
-
 // newPolicyController builds the dual-control controller wired to the audit log,
 // with a committer that re-validates the policy payload at commit time (defense
 // in depth — invariants are also checked at propose).
@@ -95,7 +90,7 @@ func activeCloudTrust(ctx context.Context, s *store.Store) (cloudtrust.Config, b
 // policy.publish), if any.
 func activePolicy(ctx context.Context, s *store.Store) (policy.Policy, bool) {
 	dc := newPolicyController(s)
-	ch, ok, err := dc.LatestCommitted(ctx, KindPolicyPublish)
+	ch, ok, err := dc.LatestCommitted(ctx, policy.PublishKind)
 	if err != nil {
 		fatalf("policy: read active: %v", err)
 	}
@@ -132,7 +127,7 @@ func policyPropose(args []string) {
 	}
 	s := openStore(*driver, *dsn)
 	defer s.Close()
-	ch, err := newPolicyController(s).Propose(context.Background(), KindPolicyPublish,
+	ch, err := newPolicyController(s).Propose(context.Background(), policy.PublishKind,
 		fmt.Sprintf("firewall policy (%d rules)", len(p.Rules)), raw, *proposer)
 	if err != nil {
 		fatalf("policy propose: %v", err)
@@ -221,7 +216,7 @@ func policyActive(args []string) {
 	s := openStore(*driver, *dsn)
 	defer s.Close()
 	dc := newPolicyController(s)
-	ch, ok, err := dc.LatestCommitted(context.Background(), KindPolicyPublish)
+	ch, ok, err := dc.LatestCommitted(context.Background(), policy.PublishKind)
 	if err != nil {
 		fatalf("policy active: %v", err)
 	}
