@@ -369,8 +369,16 @@ func cmdSupervise(args []string) {
 			go func() { defer wg.Done(); _ = dm.Run(ctx) }()
 
 			// Nebula self-update (ADR 0003 Phase 1): converge the data-plane binary on
-			// the version the signed bundle pins; a swap is a supervised Restart.
-			nu := nebulaupdate.New(nebulaupdate.Config{Layout: layout, PinnedConfigPub: pinned, NebulaPath: *nebulaPath, Restart: sup.Restart})
+			// the version the signed bundle pins; a swap is a supervised Restart. The
+			// Healthy gate (Phase 1c) reverts to last-good if the new binary doesn't
+			// stay up for 30s within 90s — pilot-local recovery for a host whose new
+			// nebula would otherwise isolate it from the mesh (and from Harbor).
+			nu := nebulaupdate.New(nebulaupdate.Config{
+				Layout: layout, PinnedConfigPub: pinned, NebulaPath: *nebulaPath, Restart: sup.Restart,
+				Healthy: func(ctx context.Context, restartedAt time.Time) bool {
+					return sup.WaitHealthy(ctx, restartedAt, 30*time.Second, 90*time.Second)
+				},
+			})
 			wg.Add(1)
 			go func() { defer wg.Done(); _ = nu.Run(ctx) }()
 			log.Info("pilot background tasks enabled", "renew", true, "heartbeat", true, "drift", true, "nebula_update", true, "core", *core)

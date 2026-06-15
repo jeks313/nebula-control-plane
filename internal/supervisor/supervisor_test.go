@@ -70,6 +70,66 @@ func TestRunShutdownIsClean(t *testing.T) {
 	}
 }
 
+// TestWaitHealthy is the ADR 0003 Phase 1c health-gate signal: a binary that stays
+// up satisfies WaitHealthy (came up and held), while one that crash-loops never
+// does (it times out false) — the discriminator the nebula updater uses to keep or
+// revert a swap.
+func TestWaitHealthy(t *testing.T) {
+	t.Run("stays up -> healthy", func(t *testing.T) {
+		bin := writeScript(t, "sleep 30")
+		s := &Supervisor{NebulaPath: bin, ConfigPath: "x", MinBackoff: 10 * time.Millisecond, Logger: quietLogger()}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		before := time.Now()
+		go func() { _ = s.Run(ctx) }()
+		if !s.WaitHealthy(ctx, before, 300*time.Millisecond, 3*time.Second) {
+			t.Fatal("a binary that stays up should report healthy")
+		}
+	})
+
+	t.Run("crash-loops -> never healthy", func(t *testing.T) {
+		bin := writeScript(t, "exit 1") // dies immediately, forever
+		s := &Supervisor{
+			NebulaPath: bin, ConfigPath: "x",
+			MinBackoff: 10 * time.Millisecond, MaxBackoff: 20 * time.Millisecond, Logger: quietLogger(),
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		before := time.Now()
+		go func() { _ = s.Run(ctx) }()
+		if s.WaitHealthy(ctx, before, 300*time.Millisecond, time.Second) {
+			t.Fatal("a crash-looping binary must never report healthy")
+		}
+	})
+
+	// The race-fix guard: a long-up process that started BEFORE notBefore must not
+	// count (it's the old binary still shutting down), so WaitHealthy times out false.
+	t.Run("ignores the pre-notBefore process", func(t *testing.T) {
+		bin := writeScript(t, "sleep 30")
+		s := &Supervisor{NebulaPath: bin, ConfigPath: "x", MinBackoff: 10 * time.Millisecond, Logger: quietLogger()}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go func() { _ = s.Run(ctx) }()
+		// Let the (old) process get well established, THEN set the reference point.
+		time.Sleep(200 * time.Millisecond)
+		notBefore := time.Now()
+		if s.WaitHealthy(ctx, notBefore, 100*time.Millisecond, 600*time.Millisecond) {
+			t.Fatal("a process that started before notBefore must not satisfy the gate")
+		}
+	})
+
+	t.Run("ctx cancel -> false", func(t *testing.T) {
+		bin := writeScript(t, "sleep 30")
+		s := &Supervisor{NebulaPath: bin, ConfigPath: "x", MinBackoff: 10 * time.Millisecond, Logger: quietLogger()}
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() { _ = s.Run(ctx) }()
+		go func() { time.Sleep(50 * time.Millisecond); cancel() }()
+		if s.WaitHealthy(ctx, time.Time{}, 5*time.Second, 10*time.Second) {
+			t.Fatal("cancelled wait must return false")
+		}
+	})
+}
+
 func TestRunRestartsOnExit(t *testing.T) {
 	counter := filepath.Join(t.TempDir(), "runs")
 	bin := writeScript(t, "echo x >> "+counter+"; exit 1")

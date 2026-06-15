@@ -49,8 +49,21 @@ type Supervisor struct {
 	initOnce  sync.Once
 	restartCh chan struct{}
 
-	mu  sync.Mutex
-	cmd *exec.Cmd // the currently running child, or nil
+	mu        sync.Mutex
+	cmd       *exec.Cmd // the currently running child, or nil
+	startedAt time.Time // when cmd was last set (zero when not running)
+}
+
+// Health is a point-in-time view of the supervised child, for the self-update
+// health gate (ADR 0003 Phase 1c). A binary that won't come up shows Running=false
+// or an Uptime that keeps resetting near zero (it crash-loops under backoff), so a
+// caller that waits for a SUSTAINED Uptime can distinguish "came up and held" from
+// "flapping" — the signal the nebula updater uses to revert a bad swap.
+type Health struct {
+	Running   bool
+	Pid       int
+	StartedAt time.Time // when the current child started (zero if not running)
+	Uptime    time.Duration
 }
 
 // defaults fills zero-valued config + creates restartCh. It runs exactly once
@@ -203,7 +216,54 @@ func (s *Supervisor) Restart() error {
 func (s *Supervisor) setCmd(cmd *exec.Cmd) {
 	s.mu.Lock()
 	s.cmd = cmd
+	if cmd != nil {
+		s.startedAt = time.Now()
+	} else {
+		s.startedAt = time.Time{}
+	}
 	s.mu.Unlock()
+}
+
+// Health returns whether nebula is currently running and, if so, how long the
+// CURRENT child has been up (ADR 0003 Phase 1c).
+func (s *Supervisor) Health() Health {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cmd == nil || s.cmd.Process == nil {
+		return Health{}
+	}
+	return Health{Running: true, Pid: s.cmd.Process.Pid, StartedAt: s.startedAt, Uptime: time.Since(s.startedAt)}
+}
+
+// WaitHealthy blocks until the child that started AFTER notBefore has stayed up
+// CONTINUOUSLY for minUptime (it came up and held -> true), or until ctx is done /
+// timeout elapses without that (it never stabilized -> false; e.g. a bad binary
+// crash-looping). It is the health gate the nebula updater consults after a swap so
+// it can revert to last-good when the new binary won't come up (ADR 0003 Phase 1c).
+//
+// notBefore guards against a false pass: Restart only QUEUES a cycle, so the OLD
+// (healthy, long-up) process is still running for a moment — without the
+// StartedAt>notBefore check WaitHealthy would immediately approve it and never judge
+// the NEW binary. Pass the instant just before Restart was requested.
+func (s *Supervisor) WaitHealthy(ctx context.Context, notBefore time.Time, minUptime, timeout time.Duration) bool {
+	s.defaults()
+	deadline := time.Now().Add(timeout)
+	poll := min(max(minUptime/4, 100*time.Millisecond), 2*time.Second)
+	t := time.NewTicker(poll)
+	defer t.Stop()
+	for {
+		if h := s.Health(); h.Running && h.StartedAt.After(notBefore) && h.Uptime >= minUptime {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-t.C:
+		}
+	}
 }
 
 func nextBackoff(cur, max time.Duration) time.Duration {
