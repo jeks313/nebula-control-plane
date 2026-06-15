@@ -135,9 +135,11 @@ func Verify(env Flattened, pub *ecdsa.PublicKey) (Header, []byte, error) {
 // ParseP256PublicPoint turns a 65-byte uncompressed P256 point (Nebula's host
 // public key encoding) into an ecdsa.PublicKey for verification.
 func ParseP256PublicPoint(b []byte) (*ecdsa.PublicKey, error) {
-	x, y := elliptic.Unmarshal(elliptic.P256(), b)
-	if x == nil {
-		return nil, fmt.Errorf("jws: invalid P256 public point")
+	// Parses the same 0x04||X||Y uncompressed encoding the old elliptic.Unmarshal
+	// did, validating the point is on the curve, without the deprecated big.Int API.
+	pub, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), b)
+	if err != nil {
+		return nil, fmt.Errorf("jws: invalid P256 public point: %w", err)
 	}
-	return &ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}, nil
+	return pub, nil
 }

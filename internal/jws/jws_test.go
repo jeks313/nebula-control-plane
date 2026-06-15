@@ -1,6 +1,7 @@
 package jws
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -55,12 +56,17 @@ func TestVerifyWrongKey(t *testing.T) {
 func TestParseP256PublicPoint(t *testing.T) {
 	priv := key(t)
 	ek, _ := priv.PublicKey.ECDH()
-	pub, err := ParseP256PublicPoint(ek.Bytes())
+	want := ek.Bytes() // the 0x04||X||Y uncompressed point
+	pub, err := ParseP256PublicPoint(want)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pub.X.Cmp(priv.X) != 0 || pub.Y.Cmp(priv.Y) != 0 {
-		t.Fatal("parsed point does not match original key")
+	got, err := pub.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatal("parsed point does not round-trip to the original encoding")
 	}
 	if _, err := ParseP256PublicPoint([]byte{0x04, 0x01}); err == nil {
 		t.Fatal("want error on malformed point")

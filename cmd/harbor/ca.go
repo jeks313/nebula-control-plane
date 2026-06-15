@@ -127,8 +127,16 @@ func cmdGenesis(args []string) {
 
 	// Persist software private keys (O_EXCL — never clobber a trust root).
 	if caSoft != nil {
-		writeKeyExcl(*caKeyPath, caSoft.PrivateKeyPEM())
-		writeKeyExcl(*cfgKeyPath, cfgSoft.PrivateKeyPEM())
+		caKeyPEM, err := caSoft.PrivateKeyPEM()
+		if err != nil {
+			fatalf("genesis: export CA key: %v", err)
+		}
+		cfgKeyPEM, err := cfgSoft.PrivateKeyPEM()
+		if err != nil {
+			fatalf("genesis: export config-signing key: %v", err)
+		}
+		writeKeyExcl(*caKeyPath, caKeyPEM)
+		writeKeyExcl(*cfgKeyPath, cfgKeyPEM)
 	}
 	writeOut(filepath.Join(*outDir, "ca.crt"), res.CACertPEM)
 	writeOut(filepath.Join(*outDir, "config-signing.pub"), res.ConfigSigningPubPEM)
@@ -199,7 +207,10 @@ func cmdCAInit(args []string) {
 		if err != nil {
 			fatalf("%v", err)
 		}
-		backend, softKeyPEM = sb, sb.PrivateKeyPEM()
+		if softKeyPEM, err = sb.PrivateKeyPEM(); err != nil {
+			fatalf("ca-init: export CA key: %v", err)
+		}
+		backend = sb
 	case "pkcs11":
 		backend, err = bf.load() // key must already exist in the token
 		if err != nil {

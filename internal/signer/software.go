@@ -42,9 +42,15 @@ func (s *SoftwareBackend) SignDigest(digest []byte) ([]byte, error) {
 // PrivateKeyPEM serializes the CA key in Nebula's signing-key PEM form so local
 // dev can persist a software CA across runs. (Software CA only — HSM/KMS keys
 // are non-exportable by design.)
-func (s *SoftwareBackend) PrivateKeyPEM() []byte {
-	raw := s.key.D.FillBytes(make([]byte, 32))
-	return cert.MarshalSigningPrivateKeyToPEM(cert.Curve_P256, raw)
+func (s *SoftwareBackend) PrivateKeyPEM() ([]byte, error) {
+	// SEC1 raw form: the 32-byte big-endian scalar — byte-identical to the old
+	// s.key.D.FillBytes(make([]byte, 32)), so PEMs written before this change still
+	// load. ParseRawPrivateKey (in LoadSoftwareBackendPEM) is the exact inverse.
+	raw, err := s.key.Bytes()
+	if err != nil {
+		return nil, fmt.Errorf("signer: export software CA key: %w", err)
+	}
+	return cert.MarshalSigningPrivateKeyToPEM(cert.Curve_P256, raw), nil
 }
 
 // LoadSoftwareBackendPEM restores a software CA from PrivateKeyPEM output.
