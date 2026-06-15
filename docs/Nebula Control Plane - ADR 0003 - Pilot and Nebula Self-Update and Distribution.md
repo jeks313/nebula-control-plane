@@ -264,12 +264,17 @@ judged worth the single-process win — neither of which is established today.
       the SAME stand-in — which survived the entire crash-loop + revert. ✅
     - **Recovered/settled:** with the bad version withdrawn (what Harbor's auto-rollback does),
       the pilot rested on the good binary with a stable PID and zero re-attempts. ✅
-    - **Finding (open):** unlike `nebulaupdate` (which quarantines a failed sha so it won't
-      retry), `pilotupdate` has **no quarantine** — so a canary pilot RE-ATTEMPTS a still-advertised
-      bad version every ~confirm-window (update→crash→revert→update…) until Harbor's auto-rollback
-      stops advertising it. The data plane survives every cycle (zero drop, observed), so it is
-      bounded and non-fatal, but it is avoidable thrash and delays the "this host rejected the
-      update" signal. Consider a pilot-side failed-sha quarantine mirroring `nebulaupdate`.
+    - **Finding (FIXED 2026-06-15):** the validation surfaced that — unlike `nebulaupdate`
+      (which quarantines a failed sha) — `pilotupdate` had **no quarantine**, so a canary pilot
+      RE-ATTEMPTED a still-advertised bad version every ~confirm-window (update→crash→revert→update…)
+      until Harbor's auto-rollback withdrew it (data-plane-safe but avoidable thrash). **Fixed:**
+      `pilotupdate` now persists a failed-sha quarantine (`<SelfPath>.quarantine`) — the marker
+      records the applied sha, `CheckRevert` quarantines it on a past-deadline failure, `Sync`
+      skips a quarantined sha, and `Confirm` clears it on a successful update. It must be
+      on-disk (not in-memory like `nebulaupdate`) because the failure is detected and re-attempted
+      by different processes across the re-exec. **Re-validated in situ the same day:** exactly
+      ONE forward update → ONE revert → then the bad sha was skipped and the pilot stayed settled
+      on last-good (vs. the repeated re-attempts observed before the fix), data plane unaffected.
   - ✅ **Operability — Releases console (#39).** The Harbor admin UI gained a **Releases**
     page (`/releases`) listing both registries (gen / version / sha / status / added) and
     triggering a per-lane fleet upgrade to any registered gen, with canary/wave/observe
