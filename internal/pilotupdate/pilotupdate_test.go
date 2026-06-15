@@ -299,3 +299,88 @@ func TestSyncShaMismatchRefused(t *testing.T) {
 		t.Fatal("must not re-exec on a sha mismatch")
 	}
 }
+
+// TestQuarantineSkipsRevertedSHA: a pilot sha that re-exec'd, failed to confirm, and was
+// reverted is quarantined — a Sync still being advertised that sha is a no-op (no fetch,
+// no re-exec), so the pilot stays on last-good instead of thrashing update→crash→revert
+// every tick until Harbor's auto-rollback withdraws the version.
+func TestQuarantineSkipsRevertedSHA(t *testing.T) {
+	good := bytes.Repeat([]byte("GOOD"), 1000)
+	bad := bytes.Repeat([]byte("BAD"), 1000)
+	badSHA := sha256hex(bad)
+	served := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { served = true; _, _ = w.Write(bad) }))
+	defer srv.Close()
+
+	h := newHarness(t, good)
+	h.m = pilotupdate.New(pilotupdate.Config{
+		SelfPath: h.self, NebulaPidPath: h.pidPath, NebulaPID: func() int { return 7 },
+		Args: []string{h.self}, ReExec: func(argv []string) error { h.argv = argv; return nil },
+		Now: func() time.Time { return h.now }, HTTPClient: srv.Client(),
+	})
+
+	// Apply bad (marker records bad's sha); past the deadline -> revert + quarantine.
+	if err := h.m.Apply(bad, "2.0.0"); err != nil {
+		t.Fatal(err)
+	}
+	h.now = h.now.Add(2 * time.Minute)
+	if reverted, err := h.m.CheckRevert(); err != nil || !reverted {
+		t.Fatalf("revert: reverted=%v err=%v", reverted, err)
+	}
+	if got, _ := os.ReadFile(h.self); !bytes.Equal(got, good) {
+		t.Fatal("precondition: self reverted to good")
+	}
+	if _, err := os.Stat(h.self + ".quarantine"); err != nil {
+		t.Fatalf("the bad sha must be quarantined after revert: %v", err)
+	}
+	h.argv = nil // reset the captured re-exec so a new one is detectable
+
+	// Sync still advertising the bad sha must be SKIPPED: no fetch, no re-exec, self unchanged.
+	began, err := h.m.Sync("2.0.0", badSHA, srv.URL+"/pilot")
+	if err != nil {
+		t.Fatalf("Sync(quarantined) unexpected err: %v", err)
+	}
+	if began {
+		t.Fatal("Sync must not begin an update for a quarantined sha")
+	}
+	if served {
+		t.Fatal("Sync must not fetch a quarantined sha")
+	}
+	if h.argv != nil {
+		t.Fatal("Sync must not re-exec a quarantined sha")
+	}
+	if got, _ := os.ReadFile(h.self); !bytes.Equal(got, good) {
+		t.Fatal("self must stay on last-good while the bad sha is quarantined")
+	}
+}
+
+// TestConfirmClearsQuarantine: a confirmed (successful) update wipes the failed-sha
+// memory, so a previously-bad sha gets a fresh attempt if it is ever re-advertised.
+func TestConfirmClearsQuarantine(t *testing.T) {
+	good := bytes.Repeat([]byte("GOOD"), 1000)
+	bad := bytes.Repeat([]byte("BAD"), 1000)
+	h := newHarness(t, good)
+
+	if err := h.m.Apply(bad, "2.0.0"); err != nil {
+		t.Fatal(err)
+	}
+	h.now = h.now.Add(2 * time.Minute)
+	if _, err := h.m.CheckRevert(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(h.self + ".quarantine"); err != nil {
+		t.Fatalf("precondition: quarantine present after revert: %v", err)
+	}
+
+	// A new, different update applies and confirms -> the quarantine is cleared.
+	good2 := bytes.Repeat([]byte("GD2"), 1000)
+	if err := h.m.Apply(good2, "3.0.0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.m.Confirm("3.0.0"); err != nil {
+		t.Fatalf("Confirm: %v", err)
+	}
+	if _, err := os.Stat(h.self + ".quarantine"); !os.IsNotExist(err) {
+		t.Fatalf("Confirm must clear the quarantine; stat err = %v", err)
+	}
+}

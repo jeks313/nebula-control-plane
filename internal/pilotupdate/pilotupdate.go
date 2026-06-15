@@ -34,6 +34,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -90,12 +91,19 @@ func New(cfg Config) *Manager {
 // marker is the pending-revert record, written next to the pilot binary before a
 // re-exec and cleared by Confirm.
 type marker struct {
-	Version  string `json:"version"`
+	Version string `json:"version"`
+	// SHA is the sha256 of the pilot binary being applied. On a failed update (past the
+	// deadline without a Confirm) CheckRevert quarantines it so a still-advertised bad
+	// version isn't re-applied every loop. Reading it from the marker (not by hashing the
+	// on-disk binary) is the only reliable source: in the already-reverted branch the
+	// on-disk binary is the GOOD one, so hashing it would quarantine the wrong sha.
+	SHA      string `json:"sha,omitempty"`
 	Deadline int64  `json:"deadline"` // unix ns; past it without a Confirm => the update failed
 }
 
-func (m *Manager) markerPath() string { return m.cfg.SelfPath + ".pending-update" }
-func (m *Manager) lastGood() string   { return m.cfg.SelfPath + ".last-good" }
+func (m *Manager) markerPath() string     { return m.cfg.SelfPath + ".pending-update" }
+func (m *Manager) lastGood() string       { return m.cfg.SelfPath + ".last-good" }
+func (m *Manager) quarantinePath() string { return m.cfg.SelfPath + ".quarantine" }
 
 // Sync updates the pilot to the desired version when the on-disk pilot's sha differs,
 // returning whether it began an update. On the happy path Apply does NOT return (the
@@ -108,6 +116,14 @@ func (m *Manager) Sync(desiredVersion, desiredSHA, url string) (began bool, err 
 	}
 	if binverify.SHA256(m.cfg.SelfPath, desiredSHA) == nil {
 		return false, nil // already running the desired pilot
+	}
+	if m.isQuarantined(desiredSHA) {
+		// This pilot sha re-exec'd but never confirmed and was reverted; re-applying it
+		// would just crash-loop + revert again. Stay on last-good (which the heartbeat
+		// reports) and wait for the desired sha to change — Harbor's auto-rollback
+		// withdraws the bad version, or a fixed release pins a new one. Mirrors
+		// nebulaupdate's quarantine; cleared on the next successful Confirm.
+		return false, nil
 	}
 	if url == "" {
 		return false, fmt.Errorf("pilotupdate: desired pilot %s (sha %s) but no url to fetch it", desiredVersion, short(desiredSHA))
@@ -147,7 +163,8 @@ func (m *Manager) Apply(data []byte, version string) error {
 			return fmt.Errorf("pilotupdate: write nebula pidfile: %w", err)
 		}
 	}
-	mk := marker{Version: version, Deadline: m.cfg.Now().Add(m.cfg.ConfirmWithin).UnixNano()}
+	sum := sha256.Sum256(data)
+	mk := marker{Version: version, SHA: hex.EncodeToString(sum[:]), Deadline: m.cfg.Now().Add(m.cfg.ConfirmWithin).UnixNano()}
 	if err := m.writeMarker(mk); err != nil {
 		return err
 	}
@@ -184,7 +201,13 @@ func (m *Manager) CheckRevert() (reverted bool, err error) {
 	if m.cfg.Now().UnixNano() < mk.Deadline {
 		return false, nil // update still on trial; Confirm (or a later restart) decides
 	}
-	// Past the deadline without a Confirm: the update failed.
+	// Past the deadline without a Confirm: the update failed. Quarantine the bad sha so the
+	// self-update loop doesn't re-fetch + re-fail a still-advertised bad version every tick
+	// (the pilot stays on last-good and reports it; Harbor's auto-rollback then withdraws
+	// the version). Done before the revert so it also covers the already-reverted branch.
+	if mk.SHA != "" {
+		_ = m.addQuarantine(mk.SHA)
+	}
 	if same, _ := sameContents(m.cfg.SelfPath, m.lastGood()); same {
 		// Already reverted, but a prior clearMarker failed (transient fs error) so the
 		// marker lingered. Do NOT loop (re-exit forever): clear best-effort and run the
@@ -221,7 +244,58 @@ func (m *Manager) Confirm(version string) error {
 	if err := m.clearMarkerRetry(); err != nil {
 		return fmt.Errorf("pilotupdate: confirm could not clear marker (a later restart may false-revert): %w", err)
 	}
+	// A confirmed update means the host is healthy again; reset the failed-sha memory so a
+	// future re-advertisement of a previously-bad sha gets a fresh attempt (best-effort —
+	// a lingering quarantine of a no-longer-desired sha is harmless).
+	_ = m.clearQuarantine()
 	m.cfg.Logger.Info("pilot self-update confirmed", "version", mk.Version)
+	return nil
+}
+
+// isQuarantined reports whether sha is in the persistent quarantine set — pilot binaries
+// that re-exec'd but failed to confirm and were reverted. A read error is treated as "not
+// quarantined" so a transient fs fault doesn't permanently wedge updates.
+func (m *Manager) isQuarantined(sha string) bool {
+	return m.readQuarantine()[sha]
+}
+
+// readQuarantine loads the newline-delimited set of quarantined shas (empty on any read
+// error / absent file). The quarantine must be PERSISTENT (unlike nebulaupdate's in-memory
+// map): the process that records a failure in CheckRevert and the process that would
+// re-apply it in Sync are different — separated by the re-exec/service restart.
+func (m *Manager) readQuarantine() map[string]bool {
+	set := map[string]bool{}
+	b, err := os.ReadFile(m.quarantinePath())
+	if err != nil {
+		return set
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if s := strings.TrimSpace(line); s != "" {
+			set[s] = true
+		}
+	}
+	return set
+}
+
+// addQuarantine adds sha to the persistent set (idempotent).
+func (m *Manager) addQuarantine(sha string) error {
+	set := m.readQuarantine()
+	if set[sha] {
+		return nil
+	}
+	set[sha] = true
+	shas := make([]string, 0, len(set))
+	for s := range set {
+		shas = append(shas, s)
+	}
+	sort.Strings(shas) // stable on-disk order (the map iteration order is not)
+	return os.WriteFile(m.quarantinePath(), []byte(strings.Join(shas, "\n")+"\n"), 0o600)
+}
+
+func (m *Manager) clearQuarantine() error {
+	if err := os.Remove(m.quarantinePath()); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
 	return nil
 }
 
