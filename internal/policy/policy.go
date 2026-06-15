@@ -7,10 +7,12 @@
 package policy
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
 
+	"github.com/jeks313/nebula-control-plane/internal/dualcontrol"
 	"github.com/jeks313/nebula-control-plane/internal/nebulaconfig"
 )
 
@@ -25,6 +27,21 @@ const (
 // The active fleet policy is the latest committed change of this kind. Shared by
 // the CLI and the admin API so both write/read the same records.
 const PublishKind = "policy.publish"
+
+// RegisterCommitter installs the policy.publish commit-time validator on dc. This
+// is the single canonical definition every wiring site (harbor CLI, admin API,
+// demo seeder) uses, so a published policy is committed through the SAME
+// validation and the gate can't drift by call site. Re-validating at commit is
+// defense in depth — invariants are also checked at propose time.
+func RegisterCommitter(dc *dualcontrol.Controller) {
+	dc.Register(PublishKind, func(_ context.Context, ch dualcontrol.Change) error {
+		p, err := Parse(string(ch.Payload))
+		if err != nil {
+			return err
+		}
+		return CheckInvariants(p)
+	})
+}
 
 // Rule is one allow rule: members of FromGroup may reach members of ToGroup on
 // Proto/Port. "any" is allowed for FromGroup (any source) and Port.
