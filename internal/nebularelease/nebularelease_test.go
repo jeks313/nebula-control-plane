@@ -99,6 +99,39 @@ func TestLookupAndGenForVersion(t *testing.T) {
 	if got := s.GenForVersion(ctx, "0.0.0"); got != 0 {
 		t.Fatalf("unknown version must map to gen 0, got %d", got)
 	}
+
+	// GenForSHA is the convergence key: exact, case-insensitive, 0 for unknown.
+	if got := s.GenForSHA(ctx, sha1); got != int(r.Gen) {
+		t.Fatalf("GenForSHA=%d, want %d", got, r.Gen)
+	}
+	if got := s.GenForSHA(ctx, strings.ToUpper(sha1)); got != int(r.Gen) {
+		t.Fatalf("GenForSHA must be case-insensitive, got %d", got)
+	}
+	if got := s.GenForSHA(ctx, sha2); got != 0 {
+		t.Fatalf("unknown sha must map to gen 0, got %d", got)
+	}
+}
+
+// TestGenForSHADisambiguatesSameVersion is the fix for the review's version-string
+// ambiguity: two generations sharing a version string are told apart by their sha,
+// so a host running gen 1's binary maps to gen 1 (not the newest gen with that
+// version) — the convergence key reflects the actual artifact.
+func TestGenForSHADisambiguatesSameVersion(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	g1, _ := s.Add(ctx, "1.10.3", sha1, "https://art/a", "")
+	g2, _ := s.Add(ctx, "1.10.3", sha2, "https://art/b", "rebuild") // same version, different artifact
+	if got := s.GenForSHA(ctx, sha1); got != int(g1.Gen) {
+		t.Fatalf("sha1 must map to gen %d, got %d", g1.Gen, got)
+	}
+	if got := s.GenForSHA(ctx, sha2); got != int(g2.Gen) {
+		t.Fatalf("sha2 must map to gen %d, got %d", g2.Gen, got)
+	}
+	// The version string alone is ambiguous (newest wins) — which is why convergence
+	// keys on the sha, not this.
+	if got := s.GenForVersion(ctx, "1.10.3"); got != int(g2.Gen) {
+		t.Fatalf("GenForVersion ambiguous case = %d, want newest %d", got, g2.Gen)
+	}
 }
 
 // A re-release of the same version string (new gen) is what a host should converge

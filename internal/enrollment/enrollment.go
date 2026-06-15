@@ -132,6 +132,12 @@ type Config struct {
 	NebulaVersion string
 	NebulaSHA256  string
 	NebulaURL     string
+	// NebulaReleaseFor, if set, returns the CURRENT fleet-desired nebula tuple for a
+	// newly enrolling host (ADR 0003 Phase 1c) — the latest settled release from the
+	// registry — overriding the static NebulaVersion fields above. So a new host joins
+	// on the current version rather than a stale flag value; later staged updates
+	// converge via the renew/heartbeat path. nil -> the static fields.
+	NebulaReleaseFor func(context.Context) (version, sha256, url string)
 	// LighthouseSource, if set, is consulted at bundle-build time so registry
 	// changes (6.8) propagate live; overrides Lighthouses, with a fallback to it
 	// on error (a transient registry read must not sever discovery).
@@ -587,6 +593,10 @@ func (c *Consumer) buildBundle(ctx context.Context, deviceName, ip string, group
 	if c.cfg.ConfigBackend == nil {
 		return nil, nil
 	}
+	nebVer, nebSHA, nebURL := c.cfg.NebulaVersion, c.cfg.NebulaSHA256, c.cfg.NebulaURL
+	if c.cfg.NebulaReleaseFor != nil {
+		nebVer, nebSHA, nebURL = c.cfg.NebulaReleaseFor(ctx)
+	}
 	b := bundle.Bundle{
 		BundleVersion: 1,
 		IssuedAt:      c.now().UTC().Format(time.RFC3339),
@@ -598,9 +608,9 @@ func (c *Consumer) buildBundle(ctx context.Context, deviceName, ip string, group
 		Blocklist:     c.blocklist(ctx),
 		TunDev:        c.cfg.TunDev,
 		ListenPort:    c.cfg.ListenPort,
-		NebulaVersion: c.cfg.NebulaVersion,
-		NebulaSHA256:  c.cfg.NebulaSHA256,
-		NebulaURL:     c.cfg.NebulaURL,
+		NebulaVersion: nebVer,
+		NebulaSHA256:  nebSHA,
+		NebulaURL:     nebURL,
 		NotAfter:      notAfter.UTC().Format(time.RFC3339),
 	}
 	return bundle.Sign(c.cfg.ConfigBackend, c.cfg.ConfigKeyID, b)

@@ -154,9 +154,37 @@ judged worth the single-process win — neither of which is established today.
     `pilot supervise` as a loop alongside renew/drift/heartbeat. No-ops when the bundle pins
     no version (back-compat) and on Windows (deferred to Phase 3). Tested: install / idempotent
     no-op / keep-last-good / sha-mismatch-refused.
-  - **1c (remaining)** — stage the desired nebula version through the rollout engine so a fleet
-    update is canary'd + auto-rolled-back (today the updater applies the bundle's version
-    immediately per host).
+  - ✅ **1c** — the desired nebula version is a per-host **rollout target** on a dedicated
+    `nebula` lane (its own track, parallel to policy/blocklist), not applied immediately. A
+    `nebula_versions` **registry** (gen → version/sha256/url) is the catalog (`harbor nebula
+    add`/`list`); `harbor nebula release -gen N` stages gen N over the prior gen across the
+    fleet (canary → widen → auto-rollback). `coreapi.assembleBundle` stamps each host the tuple
+    for **its** staged gen (in-wave → target, else prev; gen 0 → unpinned), so the canary is
+    real; the pilot reports its **running** nebula version each heartbeat (`nebula -version`),
+    The pilot reports its running binary's **sha256** (the convergence key — the artifact's
+    own identity, which the pilot already verifies) plus the version string (fleet display);
+    Harbor maps the sha back to a gen (`applied_nebula_version`) to drive convergence + auto-
+    rollback. Keying on the sha — not the version string — is deliberate: it's unambiguous
+    across rebuilds that share a semver, and it reflects what the host is *actually* running,
+    so a failed swap that reverted to last-good reports the prev gen and the lane correctly
+    rolls back instead of false-converging (which a bundle-carried generation number would
+    do). New hosts enroll on the current settled gen (`NebulaReleaseFor`). Falls back to the
+    static `-nebula-version` config when no release/rollout is configured (1a/1b back-compat).
+    Tested: per-host staging (in/out-of-wave/non-member), unpinned + static fallback, engine
+    stage→converge→revert, sha↔gen mapping, running-binary reporting. **Note:** a host that
+    enrolls *mid-rollout* (not in the wave set) holds on the prev gen and converges to the
+    completed target at its next renewal (same as any host offline during the rollout); it is
+    never permanently stranded (the completed state stamps the target for all hosts).
+  - ✅ **pilot-local rollback (1c safety layer)** — after a swap + `Restart` the pilot verifies
+    the new nebula actually came up and **held** (`supervisor.WaitHealthy`, sustained uptime of
+    a child started *after* the restart — guarding the async-restart race); if not, it reverts
+    to `<path>.last-good` and **quarantines** the bad sha so it can't crash-loop. This recovers
+    a host whose new binary would isolate it from the mesh — the failure Harbor's fleet
+    rollback structurally **can't** reach (Core is mesh-only, so an off-mesh host can't be
+    commanded). `install`/`revert` are crash-safe (copy + atomic swap; `<path>` is never left
+    missing, even on a failed first install). Layered *under* Harbor's fleet rollback, which
+    handles the reachable-but-unhealthy case + stops the rollout widening. Tested incl.
+    first-install failure, ctx-cancel-skips-revert, and the restart-race freshness guard.
 - **Phase 2 — single-binary bootstrap.** `go:embed` a known-good nebula in pilot; first run
   materialises + verifies + supervises it; Phase 1 distributes newer versions thereafter.
 - **Phase 3 — pilot self-update.** Re-exec + nebula-pidfile re-adopt (zero drop) + last-good

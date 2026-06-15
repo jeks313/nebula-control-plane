@@ -61,6 +61,8 @@ func main() {
 		cmdBlocklist(os.Args[2:])
 	case "rollout":
 		cmdRollout(os.Args[2:])
+	case "nebula":
+		cmdNebula(os.Args[2:])
 	case "policy":
 		cmdPolicy(os.Args[2:])
 	case "genesis":

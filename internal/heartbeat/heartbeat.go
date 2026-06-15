@@ -63,12 +63,19 @@ func Process(ctx context.Context, resp wire.HeartbeatResponse, h Handlers) error
 
 // Config builds a Reporter.
 type Config struct {
-	CoreURL       string
-	Layout        paths.Layout
-	Interval      time.Duration
-	Handlers      Handlers
-	PilotVersion  string
-	NebulaVersion string
+	CoreURL      string
+	Layout       paths.Layout
+	Interval     time.Duration
+	Handlers     Handlers
+	PilotVersion string
+	// NebulaVersionFn, if set, returns the RUNNING nebula version string each beat —
+	// for fleet DISPLAY only (version strings aren't unique across rebuilds).
+	NebulaVersionFn func() string
+	// NebulaSHAFn, if set, returns the sha256 of the RUNNING nebula binary each beat
+	// (ADR 0003 Phase 1c). This is the convergence key: Harbor maps it to a release
+	// generation to drive nebula-lane rollout convergence + auto-rollback. Re-evaluated
+	// per beat so it reflects a binary that changed (or reverted) under a self-update.
+	NebulaSHAFn func() string
 	// PinnedConfigPub, if set, lets the reporter read the applied bundle +
 	// blocklist versions from the stored signed bundle (7.1b) so Core can track
 	// rollout convergence. Reporting only — the bundle is verified against the
@@ -112,9 +119,16 @@ func (r *Reporter) Run(ctx context.Context) error {
 }
 
 func (r *Reporter) beat(ctx context.Context) {
+	nebVer, nebSHA := "", ""
+	if r.cfg.NebulaVersionFn != nil {
+		nebVer = r.cfg.NebulaVersionFn()
+	}
+	if r.cfg.NebulaSHAFn != nil {
+		nebSHA = r.cfg.NebulaSHAFn()
+	}
 	req := wire.HeartbeatRequest{
 		ProtocolVersion: wire.ProtocolVersion, Type: "heartbeat",
-		PilotVersion: r.cfg.PilotVersion, NebulaVersion: r.cfg.NebulaVersion, Health: "ok",
+		PilotVersion: r.cfg.PilotVersion, NebulaVersion: nebVer, NebulaSHA256: nebSHA, Health: "ok",
 	}
 	if pem, err := os.ReadFile(r.cfg.Layout.HostCert()); err == nil {
 		if c, _, err := cert.UnmarshalCertificateFromPEM(pem); err == nil {
