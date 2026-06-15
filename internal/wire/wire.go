@@ -115,6 +115,7 @@ type HeartbeatRequest struct {
 	AppliedBlocklistVersion int    `json:"applied_blocklist_version"`
 	CertNotAfter            string `json:"cert_not_after"` // RFC3339
 	PilotVersion            string `json:"pilot_version"`
+	PilotSHA256             string `json:"pilot_sha256"` // sha of the RUNNING pilot binary; maps to a release generation (3c)
 	NebulaVersion           string `json:"nebula_version"`
 	NebulaSHA256            string `json:"nebula_sha256"` // sha of the RUNNING nebula binary; maps to a release generation (1c)
 	ClockOffsetMs           int    `json:"clock_offset_ms"`

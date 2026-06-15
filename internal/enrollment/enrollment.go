@@ -138,6 +138,13 @@ type Config struct {
 	// on the current version rather than a stale flag value; later staged updates
 	// converge via the renew/heartbeat path. nil -> the static fields.
 	NebulaReleaseFor func(context.Context) (version, sha256, url string)
+	// PilotVersion / PilotSHA256 / PilotURL distribute the PILOT binary (ADR 0003 Phase
+	// 3c), stamped into every issued bundle; PilotReleaseFor (if set) overrides them with
+	// the current fleet-desired pilot release for a newly enrolling host.
+	PilotVersion    string
+	PilotSHA256     string
+	PilotURL        string
+	PilotReleaseFor func(context.Context) (version, sha256, url string)
 	// LighthouseSource, if set, is consulted at bundle-build time so registry
 	// changes (6.8) propagate live; overrides Lighthouses, with a fallback to it
 	// on error (a transient registry read must not sever discovery).
@@ -597,6 +604,10 @@ func (c *Consumer) buildBundle(ctx context.Context, deviceName, ip string, group
 	if c.cfg.NebulaReleaseFor != nil {
 		nebVer, nebSHA, nebURL = c.cfg.NebulaReleaseFor(ctx)
 	}
+	pilotVer, pilotSHA, pilotURL := c.cfg.PilotVersion, c.cfg.PilotSHA256, c.cfg.PilotURL
+	if c.cfg.PilotReleaseFor != nil {
+		pilotVer, pilotSHA, pilotURL = c.cfg.PilotReleaseFor(ctx)
+	}
 	b := bundle.Bundle{
 		BundleVersion: 1,
 		IssuedAt:      c.now().UTC().Format(time.RFC3339),
@@ -611,6 +622,9 @@ func (c *Consumer) buildBundle(ctx context.Context, deviceName, ip string, group
 		NebulaVersion: nebVer,
 		NebulaSHA256:  nebSHA,
 		NebulaURL:     nebURL,
+		PilotVersion:  pilotVer,
+		PilotSHA256:   pilotSHA,
+		PilotURL:      pilotURL,
 		NotAfter:      notAfter.UTC().Format(time.RFC3339),
 	}
 	return bundle.Sign(c.cfg.ConfigBackend, c.cfg.ConfigKeyID, b)

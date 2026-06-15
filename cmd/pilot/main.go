@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/jeks313/nebula-control-plane/internal/binverify"
+	"github.com/jeks313/nebula-control-plane/internal/bundle"
 	"github.com/jeks313/nebula-control-plane/internal/clilog"
 	"github.com/jeks313/nebula-control-plane/internal/clock"
 	"github.com/jeks313/nebula-control-plane/internal/drift"
@@ -294,11 +295,12 @@ func nebulaVersion(path string) string {
 	return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(out)), "Version:"))
 }
 
-// cachedNebulaSHA returns a function that reports the sha256 of the on-disk nebula
-// binary (ADR 0003 Phase 1c convergence key), recomputing only when the file changes
-// (by mtime+size) so it tracks a self-update / revert without re-hashing ~20 MB every
-// heartbeat. "" if the binary can't be read.
-func cachedNebulaSHA(path string) func() string {
+// cachedFileSHA returns a function that reports the sha256 of an on-disk binary (ADR
+// 0003 convergence key — used for both the nebula path (1c) and the pilot's own binary
+// (3c)), recomputing only when the file changes (by mtime+size) so it tracks a
+// self-update / revert without re-hashing the whole binary every heartbeat. "" if the
+// binary can't be read.
+func cachedFileSHA(path string) func() string {
 	var (
 		mu      sync.Mutex
 		sha     string
@@ -446,7 +448,8 @@ func cmdSupervise(args []string) {
 				// Harbor maps to a release generation to drive nebula-lane rollout +
 				// auto-rollback, 1c) and its version string (fleet display).
 				NebulaVersionFn: func() string { return nebulaVersion(*nebulaPath) },
-				NebulaSHAFn:     cachedNebulaSHA(*nebulaPath),
+				NebulaSHAFn:     cachedFileSHA(*nebulaPath),
+				PilotSHAFn:      cachedFileSHA(self), // the pilot's OWN binary, for the pilot lane (3c)
 				Handlers: heartbeat.Handlers{
 					Renew:   mgr.RenewNow,
 					Restart: sup.Restart,
@@ -483,7 +486,55 @@ func cmdSupervise(args []string) {
 			})
 			wg.Add(1)
 			go func() { defer wg.Done(); _ = nu.Run(ctx) }()
-			log.Info("pilot background tasks enabled", "renew", true, "heartbeat", true, "drift", true, "nebula_update", true, "core", *core)
+
+			// Pilot self-update (ADR 0003 Phase 3c): converge the pilot binary on the
+			// version the signed bundle pins (or the -pilot-* manual override, Phase 3b
+			// live-test). Once nebula is up (so the re-exec'd pilot has something to
+			// re-adopt), a desired pilot != the running one is fetched + sha-verified +
+			// applied via re-exec/re-adopt (which does not return on success).
+			puLoop := pilotupdate.New(pilotupdate.Config{
+				SelfPath: self, NebulaPidPath: nebulaPidPath, Args: os.Args,
+				NebulaPID: func() int { return sup.Health().Pid },
+			})
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				t := time.NewTicker(60 * time.Second)
+				defer t.Stop()
+				for {
+					if sup.Health().Pid > 0 {
+						var ver, sha2, url string
+						switch {
+						case *pilotVersion != "" && *pilotSHA != "" && *pilotURL != "":
+							// Manual override is all-or-nothing: only honored when complete, so a
+							// partial set of -pilot-* flags can't produce a half-specified tuple.
+							ver, sha2, url = *pilotVersion, *pilotSHA, *pilotURL
+						default:
+							// Bundle-driven (the normal 3c path): the desired pilot tuple comes from
+							// the verified bundle. Surface read/verify failures (a missing bundle
+							// before first enrollment is normal and stays quiet).
+							if raw, rerr := os.ReadFile(layout.Bundle()); rerr != nil {
+								if !os.IsNotExist(rerr) {
+									log.Warn("pilot self-update: read bundle failed", "err", rerr)
+								}
+							} else if b, verr := bundle.Verify(raw, pinned); verr != nil {
+								log.Warn("pilot self-update: bundle verify failed", "err", verr)
+							} else {
+								ver, sha2, url = b.PilotVersion, b.PilotSHA256, b.PilotURL
+							}
+						}
+						if _, err := puLoop.Sync(ver, sha2, url); err != nil {
+							log.Warn("pilot self-update: sync failed; will retry", "err", err)
+						}
+					}
+					select {
+					case <-ctx.Done():
+						return
+					case <-t.C:
+					}
+				}
+			}()
+			log.Info("pilot background tasks enabled", "renew", true, "heartbeat", true, "drift", true, "nebula_update", true, "pilot_update", true, "core", *core)
 		}
 
 		// Pilot self-update (ADR 0003 Phase 3). If THIS pilot is a re-exec on trial,
@@ -503,35 +554,6 @@ func cmdSupervise(args []string) {
 				}
 			}()
 		}
-		// Manual self-update trigger (Phase 3 live-test; Phase 3c will drive this from the
-		// bundle's pilot_version/sha/url). Once nebula is up (so the re-exec'd pilot has
-		// something to re-adopt), a desired pilot version different from the running one is
-		// fetched + sha-verified + applied via re-exec (which does not return).
-		if *pilotURL != "" {
-			puLoop := pilotupdate.New(pilotupdate.Config{
-				SelfPath: self, NebulaPidPath: nebulaPidPath, Args: os.Args,
-				NebulaPID: func() int { return sup.Health().Pid },
-			})
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				t := time.NewTicker(10 * time.Second)
-				defer t.Stop()
-				for {
-					if sup.Health().Pid > 0 { // only swap once there's a nebula to re-adopt
-						if _, err := puLoop.Sync(*pilotVersion, *pilotSHA, *pilotURL); err != nil {
-							log.Warn("pilot self-update: sync failed; will retry", "err", err)
-						}
-					}
-					select {
-					case <-ctx.Done():
-						return
-					case <-t.C:
-					}
-				}
-			}()
-		}
-
 		err := sup.Run(ctx)
 		// On shutdown, give in-flight renew/drift/apply writes a bounded window to
 		// finish so we never exit mid-write (a torn config.yml / identity). The loops

@@ -63,6 +63,8 @@ func main() {
 		cmdRollout(os.Args[2:])
 	case "nebula":
 		cmdNebula(os.Args[2:])
+	case "pilot":
+		cmdPilot(os.Args[2:])
 	case "policy":
 		cmdPolicy(os.Args[2:])
 	case "genesis":

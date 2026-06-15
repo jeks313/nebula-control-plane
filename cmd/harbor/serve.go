@@ -23,6 +23,7 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/httpserve"
 	"github.com/jeks313/nebula-control-plane/internal/lighthouse"
 	"github.com/jeks313/nebula-control-plane/internal/nebularelease"
+	"github.com/jeks313/nebula-control-plane/internal/pilotrelease"
 	"github.com/jeks313/nebula-control-plane/internal/queue"
 	"github.com/jeks313/nebula-control-plane/internal/rollout"
 	"github.com/jeks313/nebula-control-plane/internal/signer"
@@ -89,8 +90,10 @@ func cmdCoreAPI(args []string) {
 		BlocklistSource: cf.blocklistSource(s),
 		Rollout:         rollout.New(s.DB, audit),
 		NebulaReleases:  nebularelease.New(s.DB),
+		PilotReleases:   pilotrelease.New(s.DB),
 		Pool:            pool, TunDev: *cf.tunDev, ListenPort: *cf.listenPort, CertLifetime: *cf.certLifetime,
 		NebulaVersion: *cf.nebulaVersion, NebulaSHA256: *cf.nebulaSHA256, NebulaURL: *cf.nebulaURL,
+		PilotVersion: *cf.pilotVersion, PilotSHA256: *cf.pilotSHA256, PilotURL: *cf.pilotURL,
 	})
 	srv := &http.Server{
 		Addr: *addr, Handler: api.Handler(),
