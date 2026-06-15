@@ -145,6 +145,18 @@ judged worth the single-process win — neither of which is established today.
   bundle; Pilot fetches from a signed-sha-anchored source (CDN; gateway fallback), verifies,
   atomic-swaps, and `Restart`s; staged through the rollout engine (canary + auto-rollback).
   Kills the system-package dependency. Small, additive, reuses canary/rollback.
+  - ✅ **1a** — bundle carries `nebula_version`/`nebula_sha256`/`nebula_url`, threaded through
+    Harbor (coreapi + enrollment + flags); the sha rides inside the signed payload (no new
+    trust root).
+  - ✅ **1b** — `internal/nebulaupdate`: reads the desired version from the current bundle and,
+    when the on-disk binary's sha differs, fetches the url, verifies the sha, atomically
+    installs (keeping `<path>.last-good`), and triggers a supervised `Restart`; wired into
+    `pilot supervise` as a loop alongside renew/drift/heartbeat. No-ops when the bundle pins
+    no version (back-compat) and on Windows (deferred to Phase 3). Tested: install / idempotent
+    no-op / keep-last-good / sha-mismatch-refused.
+  - **1c (remaining)** — stage the desired nebula version through the rollout engine so a fleet
+    update is canary'd + auto-rolled-back (today the updater applies the bundle's version
+    immediately per host).
 - **Phase 2 — single-binary bootstrap.** `go:embed` a known-good nebula in pilot; first run
   materialises + verifies + supervises it; Phase 1 distributes newer versions thereafter.
 - **Phase 3 — pilot self-update.** Re-exec + nebula-pidfile re-adopt (zero drop) + last-good
