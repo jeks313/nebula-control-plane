@@ -175,7 +175,7 @@ func buildAdminAuth(ctx context.Context, af adminAuthFlags, addr string, db *gor
 	if !*af.secure {
 		slog.Warn("admin-api: session cookies are not Secure (-auth-secure off) — local http only")
 	}
-	svc := adminauth.New(adminauth.Config{
+	svc, svcErr := adminauth.New(adminauth.Config{
 		Store:              adminauth.NewSessionStore(db, nil),
 		Authenticators:     auths,
 		FlowAuthenticators: flows,
@@ -183,6 +183,9 @@ func buildAdminAuth(ctx context.Context, af adminAuthFlags, addr string, db *gor
 		SessionTTL:         *af.sessionTTL,
 		Secure:             *af.secure,
 	})
+	if svcErr != nil {
+		fatalf("admin-api: init auth: %v", svcErr)
+	}
 	return svc.Provider(), svc.Handler(), svc.CSRF, func() {
 		for _, c := range cleanups {
 			c()

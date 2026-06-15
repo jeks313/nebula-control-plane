@@ -107,11 +107,14 @@ func TestSAMLLoginEndToEnd(t *testing.T) {
 	}
 	mock.SetSP(samlAuth.SPMetadata()) // the IdP now trusts + targets this SP
 
-	svc := adminauth.New(adminauth.Config{
+	svc, svcErr := adminauth.New(adminauth.Config{
 		Store:              adminauth.NewSessionStore(st.DB, nil),
 		FlowAuthenticators: []adminauth.FlowAuthenticator{samlAuth},
 		RoleMapper:         defaultRoleMapper(),
 	})
+	if svcErr != nil {
+		t.Fatal(svcErr)
+	}
 	api := adminapi.New(adminapi.Config{Store: st, Identity: svc.Provider()})
 	mux := http.NewServeMux()
 	mux.Handle("/admin/v1/auth/", svc.Handler())
