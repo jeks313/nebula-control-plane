@@ -5,12 +5,51 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
+
+// waitFor polls cond until true or the deadline elapses (fails the test).
+func waitFor(t *testing.T, cond func() bool, within time.Duration, what string) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for: %s", what)
+}
+
+// startStub launches a long-lived process that REPARENTS to init (not the test's
+// child) and returns its PID — standing in for a nebula a previous pilot left running
+// across a re-exec. Reparenting matters: a child of the test process would become a
+// zombie when killed, and signal-0 sees a zombie as alive, so death would never be
+// detected; an orphan is reaped by init, so liveness reflects reality. Skips on Windows.
+func startStub(t *testing.T) int {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("unix-only PID-adoption test")
+	}
+	// sh backgrounds sleep (stdout/stderr to /dev/null so it doesn't hold the pipe),
+	// prints its PID, then exits — orphaning the sleep to init.
+	out, err := exec.Command("sh", "-c", "sleep 100 >/dev/null 2>&1 & echo $!").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		t.Fatalf("parse stub pid: %v (out=%q)", err, out)
+	}
+	t.Cleanup(func() { _ = forceKillPID(pid) })
+	return pid
+}
 
 func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -128,6 +167,71 @@ func TestWaitHealthy(t *testing.T) {
 			t.Fatal("cancelled wait must return false")
 		}
 	})
+}
+
+// TestAdoptPIDThenForkOnDeath is the ADR 0003 Phase 3 re-adopt acceptance: a pilot
+// launched with AdoptPID monitors that already-running nebula (Health reports it)
+// instead of forking — and when the adopted process exits, it transitions to forking a
+// fresh nebula (so the data plane is maintained after the adopted one finally dies).
+func TestAdoptPIDThenForkOnDeath(t *testing.T) {
+	pid := startStub(t)
+	forkBin := writeScript(t, "sleep 30") // the fresh nebula forked once adoption ends
+	s := &Supervisor{
+		NebulaPath: forkBin, ConfigPath: "x", AdoptPID: pid,
+		MinBackoff: 10 * time.Millisecond, Logger: quietLogger(),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = s.Run(ctx) }()
+
+	waitFor(t, func() bool { h := s.Health(); return h.Running && h.Pid == pid }, 3*time.Second, "adopt the running PID")
+
+	// The adopted nebula exits -> the supervisor must fork a fresh one (a different PID).
+	_ = terminatePID(pid)
+	waitFor(t, func() bool { h := s.Health(); return h.Running && h.Pid != pid && h.Pid != 0 },
+		4*time.Second, "fork a fresh nebula after the adopted one dies")
+}
+
+// TestAdoptPIDRestartForks: a Restart in adopt mode stops the adopted nebula and forks
+// a fresh one (the supervised-restart path the self-update uses after a re-exec).
+func TestAdoptPIDRestartForks(t *testing.T) {
+	pid := startStub(t)
+	forkBin := writeScript(t, "sleep 30")
+	s := &Supervisor{
+		NebulaPath: forkBin, ConfigPath: "x", AdoptPID: pid,
+		MinBackoff: 10 * time.Millisecond, GracePeriod: time.Second, Logger: quietLogger(),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = s.Run(ctx) }()
+	waitFor(t, func() bool { return s.Health().Pid == pid }, 3*time.Second, "adopt the PID")
+
+	_ = s.Restart()
+	waitFor(t, func() bool { return !processAlive(pid) }, 3*time.Second, "stop the adopted nebula on restart")
+	waitFor(t, func() bool { h := s.Health(); return h.Running && h.Pid != pid && h.Pid != 0 },
+		4*time.Second, "fork a fresh nebula after restart")
+}
+
+// TestAdoptPIDShutdownStops: ctx cancel during adoption stops the adopted nebula (a
+// real shutdown, distinct from a re-exec where the next pilot re-adopts it).
+func TestAdoptPIDShutdownStops(t *testing.T) {
+	pid := startStub(t)
+	s := &Supervisor{
+		NebulaPath: writeScript(t, "sleep 30"), ConfigPath: "x", AdoptPID: pid,
+		GracePeriod: time.Second, Logger: quietLogger(),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.Run(ctx) }()
+	waitFor(t, func() bool { return s.Health().Pid == pid }, 3*time.Second, "adopt the PID")
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(4 * time.Second):
+		t.Fatal("Run did not return after cancel")
+	}
+	waitFor(t, func() bool { return !processAlive(pid) }, 2*time.Second, "stop the adopted nebula on shutdown")
 }
 
 func TestRunRestartsOnExit(t *testing.T) {

@@ -37,6 +37,11 @@ type Supervisor struct {
 	NebulaPath     string // path to the nebula binary
 	ConfigPath     string // path to nebula config.yml
 	ExpectedSHA256 string // optional: verified before every exec (M1.5)
+	// AdoptPID, if >0, is a nebula PID a previous pilot left running across a re-exec
+	// self-update (ADR 0003 Phase 3). Run monitors it (signal-0 poll) instead of
+	// forking a fresh nebula, so the data plane never drops; when it exits or a restart
+	// is requested, Run falls through to normal fork supervision. Unix-only.
+	AdoptPID int
 
 	// Backoff tuning (zero values get sane defaults).
 	MinBackoff  time.Duration // first restart delay
@@ -49,9 +54,10 @@ type Supervisor struct {
 	initOnce  sync.Once
 	restartCh chan struct{}
 
-	mu        sync.Mutex
-	cmd       *exec.Cmd // the currently running child, or nil
-	startedAt time.Time // when cmd was last set (zero when not running)
+	mu         sync.Mutex
+	cmd        *exec.Cmd // the currently running forked child, or nil
+	adoptedPid int       // an adopted (not forked) nebula PID, or 0 (ADR 0003 Phase 3)
+	startedAt  time.Time // when cmd/adoptedPid was last set (zero when not running)
 }
 
 // Health is a point-in-time view of the supervised child, for the self-update
@@ -96,6 +102,15 @@ func (s *Supervisor) defaults() {
 // for unrecoverable conditions (e.g. digest verification failure).
 func (s *Supervisor) Run(ctx context.Context) error {
 	s.defaults()
+	// ADR 0003 Phase 3: if launched to re-adopt a nebula a previous pilot left running
+	// (re-exec self-update), monitor that PID instead of forking — zero data-plane
+	// drop. When it exits or a restart is requested, fall through to the fork loop.
+	if s.AdoptPID > 0 && adoptSupported() {
+		_ = s.adoptOnce(ctx, s.AdoptPID)
+		if ctx.Err() != nil {
+			return nil //nolint:nilerr // ctx cancelled during adoption is a clean shutdown
+		}
+	}
 	backoff := s.MinBackoff
 	for {
 		if ctx.Err() != nil {
@@ -172,6 +187,72 @@ func (s *Supervisor) runOnce(ctx context.Context) error {
 	}
 }
 
+// adoptOnce monitors an already-running nebula (pid) that this pilot did NOT fork —
+// the re-exec self-update path (ADR 0003 Phase 3). It polls liveness (signal-0; it
+// can't Wait() a non-child) and returns when: the adopted process exits (nil → Run
+// forks a fresh nebula), a restart is requested (stop it, errIntentionalRestart → Run
+// forks), or ctx is cancelled (stop it on shutdown, ctx.Err()).
+func (s *Supervisor) adoptOnce(ctx context.Context, pid int) error {
+	if !processAlive(pid) {
+		return nil // already gone — nothing to adopt; Run forks a fresh nebula
+	}
+	s.setAdopted(pid)
+	defer s.setAdopted(0)
+	s.Logger.Info("adopted running nebula (re-exec self-update)", "pid", pid)
+	poll := time.NewTicker(time.Second)
+	defer poll.Stop()
+	for {
+		select {
+		case <-poll.C:
+			if !processAlive(pid) {
+				s.Logger.Warn("adopted nebula exited; starting a fresh one", "pid", pid)
+				return nil
+			}
+		case <-s.restartCh:
+			s.Logger.Info("stopping adopted nebula for restart", "pid", pid)
+			s.stopPID(pid)
+			return errIntentionalRestart
+		case <-ctx.Done():
+			s.Logger.Info("stopping adopted nebula", "pid", pid)
+			s.stopPID(pid)
+			return ctx.Err()
+		}
+	}
+}
+
+// stopPID gracefully stops an adopted nebula by PID (SIGTERM, escalating to SIGKILL
+// after GracePeriod), polling for it to actually exit. The adopt analogue of stop.
+func (s *Supervisor) stopPID(pid int) {
+	_ = terminatePID(pid)
+	deadline := time.After(s.GracePeriod)
+	t := time.NewTicker(50 * time.Millisecond)
+	defer t.Stop()
+	for {
+		select {
+		case <-deadline:
+			s.Logger.Warn("grace period elapsed; killing adopted nebula", "pid", pid)
+			_ = forceKillPID(pid)
+			return
+		case <-t.C:
+			if !processAlive(pid) {
+				return
+			}
+		}
+	}
+}
+
+func (s *Supervisor) setAdopted(pid int) {
+	s.mu.Lock()
+	s.adoptedPid = pid
+	switch {
+	case pid != 0:
+		s.startedAt = time.Now()
+	case s.cmd == nil:
+		s.startedAt = time.Time{}
+	}
+	s.mu.Unlock()
+}
+
 // stop terminates the child's process group gracefully, escalating to SIGKILL
 // after GracePeriod, and waits for it to be reaped.
 func (s *Supervisor) stop(cmd *exec.Cmd, done <-chan error) {
@@ -193,11 +274,16 @@ func (s *Supervisor) stop(cmd *exec.Cmd, done <-chan error) {
 func (s *Supervisor) Reload() error {
 	s.mu.Lock()
 	cmd := s.cmd
+	pid := s.adoptedPid
 	s.mu.Unlock()
-	if cmd == nil || cmd.Process == nil {
+	switch {
+	case cmd != nil && cmd.Process != nil:
+		return signalReload(cmd)
+	case pid != 0:
+		return signalReloadPID(pid) // an adopted nebula reloads by PID (ADR 0003 Phase 3)
+	default:
 		return ErrNotRunning
 	}
-	return signalReload(cmd)
 }
 
 // Restart requests a supervised stop+start of nebula. It returns once the
@@ -229,10 +315,14 @@ func (s *Supervisor) setCmd(cmd *exec.Cmd) {
 func (s *Supervisor) Health() Health {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.cmd == nil || s.cmd.Process == nil {
+	switch {
+	case s.cmd != nil && s.cmd.Process != nil:
+		return Health{Running: true, Pid: s.cmd.Process.Pid, StartedAt: s.startedAt, Uptime: time.Since(s.startedAt)}
+	case s.adoptedPid != 0:
+		return Health{Running: true, Pid: s.adoptedPid, StartedAt: s.startedAt, Uptime: time.Since(s.startedAt)}
+	default:
 		return Health{}
 	}
-	return Health{Running: true, Pid: s.cmd.Process.Pid, StartedAt: s.startedAt, Uptime: time.Since(s.startedAt)}
 }
 
 // WaitHealthy blocks until the child that started AFTER notBefore has stayed up
