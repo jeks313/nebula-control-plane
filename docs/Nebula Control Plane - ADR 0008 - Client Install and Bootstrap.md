@@ -250,9 +250,12 @@ Lifecycle siblings: `pilot status` (installed? enrolled? healthy? per mesh), `pi
   SCM service with `pilot supervise` running as the LocalSystem service —
   `sc qc` shows the quoted argv, and `sc qfailureflag` confirms
   `FAILURE_ACTIONS_ON_NONCRASH_FAILURES: TRUE`. `install -dry-run` previews the resolved
-  paths + service definition on every platform (no enroll/write/root). Remaining:
-  sign/notarize the universal binary per platform (macOS notarization + Windows
-  Authenticode) — for *distributed* installs, not local dev.
+  paths + service definition on every platform (no enroll/write/root).
+  **Binary signing/notarization is PARKED** (decision): test installs run the unsigned
+  binary from the CLI/SSH (the same path used to validate macOS + Windows), which has
+  no Gatekeeper/SmartScreen gate. Revisit macOS notarization + Windows Authenticode
+  only when shipping a *distributed* release (download / MDM-pushed), where the OS
+  blocks unsigned binaries.
 
 ## Consequences
 
