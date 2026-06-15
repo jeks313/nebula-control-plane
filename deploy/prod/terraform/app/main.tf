@@ -290,12 +290,14 @@ locals {
 resource "aws_instance" "node" {
   for_each = local.nodes
 
-  ami                         = data.aws_ssm_parameter.al2023.value
-  instance_type               = var.instance_type
-  subnet_id                   = aws_subnet.tier[local.node_tier[each.key]].id
-  key_name                    = aws_key_pair.personal.key_name
-  vpc_security_group_ids      = [local.sg_for[each.key]]
-  iam_instance_profile        = aws_iam_instance_profile.node.name
+  ami                    = data.aws_ssm_parameter.al2023.value
+  instance_type          = var.instance_type
+  subnet_id              = aws_subnet.tier[local.node_tier[each.key]].id
+  key_name               = aws_key_pair.personal.key_name
+  vpc_security_group_ids = [local.sg_for[each.key]]
+  # Core (harbor) gets the elevated role (KMS sign + DB-secret read, compute.tf); every
+  # other node keeps the minimal permission-less profile.
+  iam_instance_profile        = each.key == "harbor" ? aws_iam_instance_profile.core.name : aws_iam_instance_profile.node.name
   associate_public_ip_address = true
 
   user_data = templatefile("${path.module}/user_data.sh.tftpl", {

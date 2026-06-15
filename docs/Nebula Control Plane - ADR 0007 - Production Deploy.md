@@ -139,8 +139,15 @@ Ordered so each phase de-risks the next; KMS + Aurora are the foundation.
     the data tier so Core can actually reach it. `fmt`/`validate` clean; reviewed (the
     aws_security_group egress-is-Optional+Computed allow-all trap was caught + fixed). Code
     follow-up (not infra): point Core at the DSN + move the durable queue off SQLite.
-  - Remaining `app/` layers: compute (Core/gateway/lighthouse role gets `core_kms_sign` +
-    the DB secret) → edge (ALB + ACM + WAF) → artifacts (S3 + CloudFront) → obs.
+  - ✅ **`app/` compute layer** — `compute.tf`: the Core (harbor) node gets a DEDICATED
+    least-priv instance role — foundation's `core_kms_sign` (kms:Sign/GetPublicKey on the two
+    trust-root keys) + read the Aurora master secret (secretsmanager:GetSecretValue/Describe on
+    exactly that ARN, with kms:Decrypt on the RDS CMK scoped via `kms:ViaService` to Secrets
+    Manager). Every other node keeps the minimal permission-less role; the instance-profile is
+    selected per-node (`harbor` → core, else node). IMDSv2 + encrypted EBS already enforced.
+    `fmt`/`validate` clean; reviewed (0 findings). Operational follow-up: the genesis bootstrap
+    runs Core with `-backend kms … -dsn <from the secret>` (ARNs/endpoints are outputs).
+  - Remaining `app/` layers: edge (ALB + ACM + WAF) → artifacts (S3 + CloudFront) → obs.
 - **Phase 3 — IdP (Entra SAML).** Configure the existing SAML SP per the **runbook**;
   custody a **stable SP keypair**; add OIDC client-secret-from-file (SAML already uses key
   files); schedule `SessionStore.GC`; sessions persist via Aurora (Phase 1). Pin a
