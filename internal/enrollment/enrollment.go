@@ -260,7 +260,9 @@ func (c *Consumer) Process(ctx context.Context, cand queue.Candidate) (Result, e
 
 	// Approval decision: bearer secrets are PENDING by default.
 	if !jk.AutoIssue {
-		c.record(ctx, cand.EnrollmentID, req, pubBytes, jk.ID, groups, StatusPending, nil, "", "", evidence{})
+		if err := c.record(ctx, cand.EnrollmentID, req, pubBytes, jk.ID, groups, StatusPending, nil, "", "", evidence{}); err != nil {
+			return Result{}, fmt.Errorf("enroll: persist pending enrollment: %w", err) // transient -> nack, don't deliver
+		}
 		c.writeResult(ctx, cand.EnrollmentID, cand.RetrievalSecretHash, nil, StatusPending, "")
 		_ = c.audit(ctx, "system", "enroll-pending", deviceName,
 			fmt.Sprintf(`{"join_key":%q,"reason":"manual approval required"}`, jk.Name))
@@ -276,7 +278,9 @@ func (c *Consumer) Process(ctx context.Context, cand queue.Candidate) (Result, e
 	if err != nil {
 		return Result{}, err
 	}
-	c.record(ctx, cand.EnrollmentID, req, pubBytes, jk.ID, groups, StatusIssued, certPEM, ip.String(), fp, evidence{})
+	if err := c.record(ctx, cand.EnrollmentID, req, pubBytes, jk.ID, groups, StatusIssued, certPEM, ip.String(), fp, evidence{}); err != nil {
+		return Result{}, fmt.Errorf("enroll: persist issued enrollment: %w", err) // transient -> nack, don't deliver the bundle
+	}
 	c.writeResult(ctx, cand.EnrollmentID, cand.RetrievalSecretHash, bundleJWS, StatusIssued, "")
 	return Result{EnrollmentID: cand.EnrollmentID, Status: StatusIssued, OverlayIP: ip.String(), CertPEM: certPEM}, nil
 }
@@ -337,7 +341,9 @@ func (c *Consumer) processAttested(ctx context.Context, cand queue.Candidate, re
 	// Attested-but-not-auto-issue still queues for manual approval (an operator-set
 	// posture per account). JoinKeyID stays 0 — there is no join key.
 	if !autoIssue {
-		c.record(ctx, cand.EnrollmentID, req, pubBytes, 0, string(groupsJSON), StatusPending, nil, "", "", ev)
+		if err := c.record(ctx, cand.EnrollmentID, req, pubBytes, 0, string(groupsJSON), StatusPending, nil, "", "", ev); err != nil {
+			return Result{}, fmt.Errorf("enroll: persist pending enrollment: %w", err) // transient -> nack, don't deliver
+		}
 		c.writeResult(ctx, cand.EnrollmentID, cand.RetrievalSecretHash, nil, StatusPending, "")
 		_ = c.audit(ctx, "system", "enroll-pending", deviceName,
 			fmt.Sprintf(`{"method":"aws-sigv4","account":%q,"reason":"manual approval required"}`, id.Account))
@@ -352,7 +358,9 @@ func (c *Consumer) processAttested(ctx context.Context, cand queue.Candidate, re
 	if err != nil {
 		return Result{}, err
 	}
-	c.record(ctx, cand.EnrollmentID, req, pubBytes, 0, string(groupsJSON), StatusIssued, certPEM, ip.String(), fp, ev)
+	if err := c.record(ctx, cand.EnrollmentID, req, pubBytes, 0, string(groupsJSON), StatusIssued, certPEM, ip.String(), fp, ev); err != nil {
+		return Result{}, fmt.Errorf("enroll: persist issued enrollment: %w", err) // transient -> nack, don't deliver the bundle
+	}
 	c.writeResult(ctx, cand.EnrollmentID, cand.RetrievalSecretHash, bundleJWS, StatusIssued, "")
 	_ = c.audit(ctx, "system", "enroll-attested", deviceName,
 		fmt.Sprintf(`{"method":"aws-sigv4","account":%q,"arn":%q}`, id.Account, id.Arn))
@@ -464,7 +472,10 @@ func (c *Consumer) Deny(ctx context.Context, enrollmentID, approver, reason stri
 
 // deny records a denied enrollment + result + audit (the shared rejection path).
 func (c *Consumer) deny(ctx context.Context, cand queue.Candidate, req wire.EnrollRequest, pubBytes []byte, action, reason string) {
-	c.record(ctx, cand.EnrollmentID, req, pubBytes, 0, "[]", StatusDenied, nil, "", "", evidence{})
+	// Best-effort: a denial issues no cert, so a failed record only loses the
+	// history row — the audit append below still records the rejection, and there
+	// is no bundle to withhold. (Contrast the issue/pending paths, which fail closed.)
+	_ = c.record(ctx, cand.EnrollmentID, req, pubBytes, 0, "[]", StatusDenied, nil, "", "", evidence{})
 	c.writeResult(ctx, cand.EnrollmentID, cand.RetrievalSecretHash, nil, StatusDenied, reason)
 	_ = c.audit(ctx, "system", action, req.CSR.RequestedName, reason)
 }
@@ -633,7 +644,14 @@ type evidence struct {
 	verifiedAt                           int64
 }
 
-func (c *Consumer) record(ctx context.Context, enrollmentID string, req wire.EnrollRequest, pubBytes []byte, joinKeyID int64, groups, status string, certPEM []byte, ip, fingerprint string, ev evidence) {
+// record persists the enrollment row (the control plane's authoritative record of
+// an issued/pending/denied decision). Callers MUST check the returned error and,
+// on failure, NOT deliver a result — returning a non-terminal error so the queue
+// redelivers: on redelivery existing() short-circuits a duplicate, or verify()'s
+// consumed nonce yields a terminal ErrReplay. This keeps a cert from ever being
+// handed to a host the control plane has no record of (which would be invisible to
+// blocklist/fleet/audit).
+func (c *Consumer) record(ctx context.Context, enrollmentID string, req wire.EnrollRequest, pubBytes []byte, joinKeyID int64, groups, status string, certPEM []byte, ip, fingerprint string, ev evidence) error {
 	e := Enrollment{
 		EnrollmentID:    enrollmentID,
 		DeviceName:      deviceName(req, wire.PubkeyHash(pubBytes)),
@@ -656,7 +674,7 @@ func (c *Consumer) record(ctx context.Context, enrollmentID string, req wire.Enr
 	if status != StatusPending {
 		e.DecidedAt = c.now().UnixNano()
 	}
-	_ = c.cfg.Store.DB.WithContext(ctx).Create(&e).Error
+	return c.cfg.Store.DB.WithContext(ctx).Create(&e).Error
 }
 
 func (c *Consumer) audit(ctx context.Context, actor, action, target, details string) error {
