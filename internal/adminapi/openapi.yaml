@@ -440,6 +440,58 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
+  /admin/v1/releases:
+    get:
+      summary: The nebula + pilot release registries, each with its current rollout (ADR 0003 1c/3c). Binaries are added via the CLI; this is read + stage only.
+      operationId: listReleases
+      responses:
+        "200":
+          description: Both release lanes (registry rows + current gen + rollout).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReleasesResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /admin/v1/releases/{kind}/rollouts:
+    post:
+      summary: Stage a fleet upgrade to a registered release generation on the kind's canary lane.
+      operationId: startReleaseRollout
+      parameters:
+        - { name: kind, in: path, required: true, schema: { type: string, enum: [nebula, pilot] } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReleaseRolloutStart" }
+      responses:
+        "201":
+          description: The started rollout.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RolloutView" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+  /admin/v1/releases/{kind}/rollouts/current/abort:
+    post:
+      summary: Abort the kind's active release rollout (touched hosts revert to the previous generation).
+      operationId: abortReleaseRollout
+      parameters:
+        - { name: kind, in: path, required: true, schema: { type: string, enum: [nebula, pilot] } }
+      responses:
+        "200":
+          description: Aborted.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [aborted]
+                properties: { aborted: { type: boolean } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
   /admin/v1/joinkeys:
     get:
       summary: List join keys (secrets never returned).
@@ -981,6 +1033,42 @@ components:
       properties:
         changed: { type: boolean }
         status: { $ref: "#/components/schemas/RolloutStatus" }
+    ReleaseView:
+      type: object
+      required: [gen, version, sha256, url, status, created_at]
+      properties:
+        gen: { type: integer, format: int64, description: "the generation the rollout lane stages" }
+        version: { type: string }
+        sha256: { type: string, description: "the integrity anchor the pilot verifies before swap" }
+        url: { type: string, description: "where the pilot fetches the artifact (operator-hosted)" }
+        status: { type: string, description: "candidate | current | superseded" }
+        note: { type: string }
+        created_at: { type: string, format: date-time }
+    ReleaseLane:
+      type: object
+      required: [releases, current_gen]
+      properties:
+        releases: { type: array, items: { $ref: "#/components/schemas/ReleaseView" } }
+        current_gen: { type: integer, description: "the live fleet-desired generation (0 = none)" }
+        rollout:
+          allOf: [{ $ref: "#/components/schemas/RolloutStatus" }]
+          nullable: true
+          description: "the lane's current rollout, or null when none"
+    ReleasesResponse:
+      type: object
+      required: [nebula, pilot]
+      properties:
+        nebula: { $ref: "#/components/schemas/ReleaseLane" }
+        pilot: { $ref: "#/components/schemas/ReleaseLane" }
+    ReleaseRolloutStart:
+      type: object
+      required: [gen]
+      properties:
+        gen: { type: integer, description: "the registered generation to stage" }
+        canary_size: { type: integer }
+        wave_size: { type: integer }
+        observe_seconds: { type: integer }
+        missing_after_seconds: { type: integer }
     JoinKey:
       type: object
       required: [name, groups, max_uses, used_count, auto_issue, ephemeral, quota_per_hour, state, created_at]
