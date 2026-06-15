@@ -6,8 +6,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jeks313/nebula-control-plane/internal/adminapi"
+	"github.com/jeks313/nebula-control-plane/internal/fleet"
 	"github.com/jeks313/nebula-control-plane/internal/nebularelease"
 	"github.com/jeks313/nebula-control-plane/internal/rollout"
 	"github.com/jeks313/nebula-control-plane/internal/store"
@@ -33,8 +35,10 @@ func TestReleasesListAndRolloutOverHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A fresh heartbeat — adminapi.New defaults StaleAfter=5m, so the rollout host read
+	// (liveFleet) only counts recently-seen hosts.
 	if err := s.DB.Exec(`INSERT INTO heartbeats (overlay_ip, device_name, last_seen) VALUES (?,?,?)`,
-		"10.44.0.10", "h1", 1_700_000_000_000_000_000).Error; err != nil {
+		"10.44.0.10", "h1", time.Now().UnixNano()).Error; err != nil {
 		t.Fatal(err)
 	}
 	audit := func(c context.Context, a, ac, tgt, d string) error { _, e := s.AppendAudit(c, a, ac, tgt, d); return e }
@@ -77,6 +81,50 @@ func TestReleasesListAndRolloutOverHTTP(t *testing.T) {
 	code, _ = req(t, ts, "POST", "/admin/v1/releases/nebula/rollouts/current/abort", "alice", nil)
 	if code != http.StatusOK {
 		t.Fatalf("abort status = %d", code)
+	}
+}
+
+// TestReleaseRolloutExcludesStaleHosts: a staged release reads the fleet itself (unlike
+// the policy /rollouts path), so it must drop long-silent ghost hosts. A dead host left
+// in the canary wave would trip the engine's missing-host check and silently roll back.
+func TestReleaseRolloutExcludesStaleHosts(t *testing.T) {
+	s, err := store.Open(store.Config{Driver: "sqlite", DSN: store.DefaultSQLiteDSN(t.TempDir() + "/rs.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	if err := migrate.Up(s.DB); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	rel, err := nebularelease.New(s.DB).Add(ctx, "1.10.3", strings.Repeat("a", 64), "https://cdn/nebula", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// One long-silent ghost (heard from days ago) — the only host on file.
+	if err := s.DB.Exec(`INSERT INTO heartbeats (overlay_ip, device_name, last_seen) VALUES (?,?,?)`,
+		"10.44.0.5", "ghost", time.Now().Add(-72*time.Hour).UnixNano()).Error; err != nil {
+		t.Fatal(err)
+	}
+	audit := func(c context.Context, a, ac, tgt, d string) error { _, e := s.AppendAudit(c, a, ac, tgt, d); return e }
+	srv := adminapi.New(adminapi.Config{
+		Store: s, Identity: adminapi.DevHeaderProvider{Roles: []string{"admin"}}, Rollout: rollout.New(s.DB, audit),
+		Thresholds: fleet.Thresholds{StaleAfter: time.Hour},
+	})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// Only a stale host exists -> staging refuses (no live target), not a silent abort.
+	if c, _ := req(t, ts, "POST", "/admin/v1/releases/nebula/rollouts", "alice", map[string]any{"gen": rel.Gen}); c != http.StatusBadRequest {
+		t.Fatalf("stale-only start = %d, want 400 (no live hosts)", c)
+	}
+	// Add a fresh host -> staging proceeds onto exactly that host.
+	if err := s.DB.Exec(`INSERT INTO heartbeats (overlay_ip, device_name, last_seen) VALUES (?,?,?)`,
+		"10.44.0.20", "live", time.Now().UnixNano()).Error; err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := req(t, ts, "POST", "/admin/v1/releases/nebula/rollouts", "alice", map[string]any{"gen": rel.Gen, "canary_size": 1}); c != http.StatusCreated {
+		t.Fatalf("live-host start = %d, want 201", c)
 	}
 }
 
