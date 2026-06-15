@@ -130,7 +130,13 @@ ExecStart=/usr/local/bin/pilot supervise \
     -log-format json
 # SIGHUP -> pilot hot-reloads nebula in place (firewall/lighthouse/PKI). M1.8.
 ExecReload=/bin/kill -HUP $MAINPID
-KillMode=mixed
+# KillMode=process (NOT control-group/mixed): systemd signals only pilot's main PID,
+# never the cgroup. The pilot owns nebula's lifecycle (ADR 0003) — on a clean SIGTERM
+# stop it stops nebula itself; on a pilot CRASH it leaves nebula running so the
+# auto-restarted pilot RE-ADOPTS it (Phase 3) instead of systemd SIGKILLing the data
+# plane out from under a self-update revert. (Trade-off: a pilot that hangs past
+# TimeoutStopSec is SIGKILLed alone, briefly orphaning nebula until the next start.)
+KillMode=process
 KillSignal=SIGTERM
 TimeoutStopSec=15
 Restart=on-failure
