@@ -108,10 +108,23 @@ Ordered so each phase de-risks the next; KMS + Aurora are the foundation.
   `ca.key`/`config-signing.key` (only `software` does). `signer.New` already fails closed if a
   key id's pubkey ≠ the CA cert. Software + SoftHSM/PKCS#11 paths are unchanged (minimal
   self-hosted / debug). Unit-tested via an injected fake KMS backed by a real P256 key,
-  including the full `SelfSignCA → New → Issue → verify` path. **Still to do:** terraform two
-  `aws_kms_key` (ECC_P256) + least-priv IAM (`kms:Sign`/`GetPublicKey`), populate
-  `store.Key.URI`, and validate against real AWS KMS (no creds in CI; this is the live gate,
-  like the 3b host validation).
+  including the full `SelfSignCA → New → Issue → verify` path. The terraform for the keys is
+  the **foundation** stack below. **Still to do:** apply the foundation stack + validate
+  against real AWS KMS (no creds in CI; the live gate, like the 3b host validation), and
+  populate `store.Key.URI`.
+- ✅ **Terraform structure — hybrid (foundation + app), greenfield.** `deploy/prod/terraform`
+  is split into an isolated **`foundation/`** stack (its own state) and an **`app/`** stack
+  that reads it via `terraform_remote_state` — so a routine app change can never destroy the
+  trust root. **`foundation/` is written** (`deploy/prod/terraform/foundation/`): the
+  versioned/encrypted/TLS-only/`prevent_destroy` S3 **state bucket** (for both stacks), the
+  **two KMS keys** (ECC_NIST_P256 / SIGN_VERIFY — CA + config-signing, distinct,
+  `prevent_destroy` + 30-day deletion window, key policy delegates to account IAM), and the
+  least-priv **`core_kms_sign`** IAM policy (`kms:Sign`/`GetPublicKey` on exactly the two
+  ARNs) the `app/` stack attaches to the Core role. `terraform fmt`/`validate` clean;
+  adversarially reviewed (KMS admin-vs-use separation tightened — no `kms:PutKeyPolicy` for
+  lifecycle admins). Bootstrap is local-state → `init -migrate-state` into the bucket. The
+  remaining `app/` layers (network → data/Aurora → compute → edge → artifacts → obs) build on
+  top, layer by layer.
 - **Phase 3 — IdP (Entra SAML).** Configure the existing SAML SP per the **runbook**;
   custody a **stable SP keypair**; add OIDC client-secret-from-file (SAML already uses key
   files); schedule `SessionStore.GC`; sessions persist via Aurora (Phase 1). Pin a

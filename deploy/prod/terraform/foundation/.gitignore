@@ -1,0 +1,8 @@
+# Local state + provider cache + secrets-bearing vars. The provider lock IS committed.
+.terraform/
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+*.auto.tfvars
+crash.log
+crash.*.log
