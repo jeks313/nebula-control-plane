@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"math/rand"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/jeks313/nebula-control-plane/internal/enrollclient"
@@ -54,6 +55,10 @@ type Config struct {
 	Reload func() error
 	// Renew performs the renewal; defaults to enrollclient.Renew over CoreURL.
 	Renew func(ctx context.Context) (enrollclient.Result, error)
+	// Locker, if set, serializes layout-mutating ops with the other host-state
+	// writers (drift revert, apply_bundle) so concurrent goroutines never tear the
+	// identity/config files. Optional (nil = no locking, e.g. in tests).
+	Locker sync.Locker
 
 	Frac       float64       // 0 -> DefaultFrac
 	JitterFrac float64       // 0 -> DefaultJitterFrac
@@ -145,6 +150,10 @@ func (m *Manager) Run(ctx context.Context) error {
 // RenewNow performs a single renewal + hot-reload immediately (used by the
 // scheduled loop and by a Core-issued `renew` command, 4.6).
 func (m *Manager) RenewNow(ctx context.Context) error {
+	if m.cfg.Locker != nil {
+		m.cfg.Locker.Lock()
+		defer m.cfg.Locker.Unlock()
+	}
 	res, err := m.cfg.Renew(ctx)
 	if err != nil {
 		return err

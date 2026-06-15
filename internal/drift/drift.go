@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/jeks313/nebula-control-plane/internal/bundle"
@@ -24,8 +25,11 @@ type Config struct {
 	PinnedConfigPub *ecdsa.PublicKey
 	Interval        time.Duration // sync cadence (0 -> 1m)
 	Reload          func() error  // hot-reload nebula after a revert (optional)
-	Now             func() time.Time
-	Logger          *slog.Logger
+	// Locker, if set, serializes the revert with the other host-state writers
+	// (renew, apply_bundle) so a revert can't interleave a concurrent write.
+	Locker sync.Locker
+	Now    func() time.Time
+	Logger *slog.Logger
 }
 
 // Monitor re-asserts the signed config on a cadence.
@@ -62,6 +66,10 @@ func (m *Monitor) Run(ctx context.Context) error {
 // Sync compares the on-disk config to the signed bundle's rendering and reverts
 // if they differ. Returns whether a revert happened.
 func (m *Monitor) Sync(ctx context.Context) (reverted bool, err error) {
+	if m.cfg.Locker != nil {
+		m.cfg.Locker.Lock()
+		defer m.cfg.Locker.Unlock()
+	}
 	raw, err := os.ReadFile(m.cfg.Layout.Bundle())
 	if err != nil {
 		// No bundle yet (not enrolled) — nothing to enforce.
