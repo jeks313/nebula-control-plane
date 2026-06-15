@@ -157,7 +157,7 @@ func (cf *coreFlags) buildConsumer(s *store.Store, results enrollment.ResultSink
 	audit := func(c context.Context, a, ac, t, d string) error { _, e := s.AppendAudit(c, a, ac, t, d); return e }
 	sg, err := signer.New(signer.Config{
 		CACertPEM: caPEM, Backend: caB,
-		Policy:          signer.Policy{AllowedNetwork: pool, MaxLifetime: *cf.certLifetime},
+		Policy:          signer.IssuePolicy{AllowedNetwork: pool, MaxLifetime: *cf.certLifetime},
 		MaxCertsPerHour: *cf.maxPerHour, Audit: audit,
 	})
 	if err != nil {

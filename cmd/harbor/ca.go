@@ -312,7 +312,7 @@ func cmdIssueCert(args []string) {
 	sg, err := signer.New(signer.Config{
 		CACertPEM:       caPEM,
 		Backend:         backend,
-		Policy:          signer.Policy{AllowedNetwork: pool, MaxLifetime: *lifetime},
+		Policy:          signer.IssuePolicy{AllowedNetwork: pool, MaxLifetime: *lifetime},
 		MaxCertsPerHour: *maxPerHour,
 		Audit:           audit,
 	})

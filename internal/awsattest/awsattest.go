@@ -195,7 +195,10 @@ func FetchInstanceCredentials(ctx context.Context, cfg IMDSConfig) (Credentials,
 	}
 
 	// IMDSv2: get a session token first (PUT), then use it on every GET.
-	tokReq, _ := http.NewRequestWithContext(ctx, "PUT", base+"/latest/api/token", http.NoBody)
+	tokReq, err := http.NewRequestWithContext(ctx, "PUT", base+"/latest/api/token", http.NoBody)
+	if err != nil {
+		return Credentials{}, "", fmt.Errorf("awsattest: imds token request: %w", err)
+	}
 	tokReq.Header.Set("X-aws-ec2-metadata-token-ttl-seconds", "60")
 	tokResp, err := client.Do(tokReq)
 	if err != nil {
@@ -206,7 +209,10 @@ func FetchInstanceCredentials(ctx context.Context, cfg IMDSConfig) (Credentials,
 	token := strings.TrimSpace(string(tokB))
 
 	get := func(path string) (string, error) {
-		r, _ := http.NewRequestWithContext(ctx, "GET", base+path, http.NoBody)
+		r, err := http.NewRequestWithContext(ctx, "GET", base+path, http.NoBody)
+		if err != nil {
+			return "", fmt.Errorf("awsattest: imds request %s: %w", path, err)
+		}
 		if token != "" {
 			r.Header.Set("X-aws-ec2-metadata-token", token)
 		}

@@ -71,7 +71,7 @@ func setupEnroll(t *testing.T) enrollEnv {
 	audit := func(c context.Context, a, ac, tg, d string) error { _, e := s.AppendAudit(c, a, ac, tg, d); return e }
 	sg, err := signer.New(signer.Config{
 		CACertPEM: caPEM, Backend: caB,
-		Policy: signer.Policy{AllowedNetwork: pool, MaxLifetime: 48 * time.Hour}, Audit: audit,
+		Policy: signer.IssuePolicy{AllowedNetwork: pool, MaxLifetime: 48 * time.Hour}, Audit: audit,
 	})
 	if err != nil {
 		t.Fatal(err)

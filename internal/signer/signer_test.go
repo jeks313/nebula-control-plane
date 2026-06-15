@@ -74,7 +74,7 @@ func newSigner(t *testing.T, max int, audit *recordingAudit) *Signer {
 	s, err := New(Config{
 		CACertPEM: testCA(t, b),
 		Backend:   b,
-		Policy: Policy{
+		Policy: IssuePolicy{
 			AllowedNetwork: netip.MustParsePrefix("100.64.0.0/16"),
 			AllowedGroups:  map[string]bool{"web": true, "db": true},
 			MaxLifetime:    90 * 24 * time.Hour,

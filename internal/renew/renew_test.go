@@ -60,7 +60,7 @@ func writeCert(t *testing.T, layout paths.Layout, nb, na time.Time) {
 	}
 	sg, err := signer.New(signer.Config{
 		CACertPEM: caPEM, Backend: caB,
-		Policy: signer.Policy{AllowedNetwork: pool, MaxLifetime: 100 * 365 * 24 * time.Hour},
+		Policy: signer.IssuePolicy{AllowedNetwork: pool, MaxLifetime: 100 * 365 * 24 * time.Hour},
 		Audit:  func(context.Context, string, string, string, string) error { return nil },
 	})
 	if err != nil {
