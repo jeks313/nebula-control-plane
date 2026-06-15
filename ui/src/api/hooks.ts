@@ -151,6 +151,52 @@ export function useCloudTrust() {
   })
 }
 
+// --- #39 binary releases (nebula + pilot registries + per-lane fleet upgrades) ---
+
+export type ReleasesResponse = components['schemas']['ReleasesResponse']
+export type ReleaseLane = components['schemas']['ReleaseLane']
+export type ReleaseView = components['schemas']['ReleaseView']
+export type ReleaseRolloutStart = components['schemas']['ReleaseRolloutStart']
+export type ReleaseKind = 'nebula' | 'pilot'
+
+// The console lists both registries + each lane's live rollout in one call. Poll so a
+// staged upgrade's wave progress / auto-rollback shows without a manual refresh (same
+// cadence as useCurrentRollout, until SSE lands).
+export function useReleases() {
+  return useQuery({
+    queryKey: ['releases'],
+    queryFn: () => unwrap(api.GET('/admin/v1/releases')),
+    refetchInterval: 10_000,
+  })
+}
+
+// Stage a fleet upgrade to a registered generation on the kind's canary lane. Binaries
+// are added out-of-band via the CLI (harbor nebula/pilot add) — this only triggers the
+// rollout. onSettled refetches the registry+lane (a 409 "lane busy" still means re-read).
+export function useStartReleaseRollout() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ kind, body }: { kind: ReleaseKind; body: ReleaseRolloutStart }) =>
+      unwrap(api.POST('/admin/v1/releases/{kind}/rollouts', { params: { path: { kind } }, body })),
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: ['releases'] })
+      void qc.invalidateQueries({ queryKey: ['rollout-current'] })
+    },
+  })
+}
+
+export function useAbortReleaseRollout() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (kind: ReleaseKind) =>
+      unwrap(api.POST('/admin/v1/releases/{kind}/rollouts/current/abort', { params: { path: { kind } } })),
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: ['releases'] })
+      void qc.invalidateQueries({ queryKey: ['rollout-current'] })
+    },
+  })
+}
+
 // --- UI-4 dual-control publish pipeline ---
 
 export function useApproval(id: number) {

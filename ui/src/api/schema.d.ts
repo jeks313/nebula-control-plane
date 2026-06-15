@@ -423,6 +423,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/v1/releases": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The nebula + pilot release registries, each with its current rollout (ADR 0003 1c/3c). Binaries are added via the CLI; this is read + stage only. */
+        get: operations["listReleases"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/releases/{kind}/rollouts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Stage a fleet upgrade to a registered release generation on the kind's canary lane. */
+        post: operations["startReleaseRollout"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/releases/{kind}/rollouts/current/abort": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Abort the kind's active release rollout (touched hosts revert to the previous generation). */
+        post: operations["abortReleaseRollout"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/admin/v1/joinkeys": {
         parameters: {
             query?: never;
@@ -877,6 +928,42 @@ export interface components {
         RolloutStepResult: {
             changed: boolean;
             status: components["schemas"]["RolloutStatus"];
+        };
+        ReleaseView: {
+            /**
+             * Format: int64
+             * @description the generation the rollout lane stages
+             */
+            gen: number;
+            version: string;
+            /** @description the integrity anchor the pilot verifies before swap */
+            sha256: string;
+            /** @description where the pilot fetches the artifact (operator-hosted) */
+            url: string;
+            /** @description candidate | current | superseded */
+            status: string;
+            note?: string;
+            /** Format: date-time */
+            created_at: string;
+        };
+        ReleaseLane: {
+            releases: components["schemas"]["ReleaseView"][];
+            /** @description the live fleet-desired generation (0 = none) */
+            current_gen: number;
+            /** @description the lane's current rollout, or null when none */
+            rollout?: components["schemas"]["RolloutStatus"] | null;
+        };
+        ReleasesResponse: {
+            nebula: components["schemas"]["ReleaseLane"];
+            pilot: components["schemas"]["ReleaseLane"];
+        };
+        ReleaseRolloutStart: {
+            /** @description the registered generation to stage */
+            gen: number;
+            canary_size?: number;
+            wave_size?: number;
+            observe_seconds?: number;
+            missing_after_seconds?: number;
         };
         JoinKey: {
             name: string;
@@ -1652,6 +1739,86 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Problem"];
+            409: components["responses"]["Problem"];
+        };
+    };
+    listReleases: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Both release lanes (registry rows + current gen + rollout). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReleasesResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    startReleaseRollout: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                kind: "nebula" | "pilot";
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReleaseRolloutStart"];
+            };
+        };
+        responses: {
+            /** @description The started rollout. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RolloutView"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Problem"];
+            404: components["responses"]["Problem"];
+            409: components["responses"]["Problem"];
+        };
+    };
+    abortReleaseRollout: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                kind: "nebula" | "pilot";
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Aborted. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        aborted: boolean;
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Problem"];
+            404: components["responses"]["Problem"];
             409: components["responses"]["Problem"];
         };
     };
