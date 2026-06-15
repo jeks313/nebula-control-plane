@@ -10,6 +10,10 @@ coverage*
 /pilot.exe
 /gateway
 
+# ADR 0003 Phase 2: the embedded nebula asset is fetched at build time
+# (`make embed-nebula`), platform-specific, ~8 MB gzipped — never committed.
+internal/nebulaboot/assets/
+
 # M0 spike runtime artifacts (generated certs, keys, configs, logs, pids)
 spike/m0/run/
 # locally built tools (e.g. pkcs11-enabled nebula-cert)
