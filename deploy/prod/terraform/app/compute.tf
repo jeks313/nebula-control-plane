@@ -55,3 +55,24 @@ resource "aws_iam_role_policy" "core_db_secret" {
   role        = aws_iam_role.core.id
   policy      = data.aws_iam_policy_document.core_db_secret.json
 }
+
+# ── EBS root-volume encryption (all nodes) ───────────────────────────────────
+# The instances already set root_block_device.encrypted=true (main.tf); pin a customer-
+# managed CMK so the at-rest key is controlled/rotated/audited like the Aurora + trust-root
+# keys, not the shared aws/ebs default. The node root volumes hold each host's nebula
+# private key + cached signed config. EC2 creates a grant on this key at launch (the
+# default key policy delegates to account IAM, so no explicit key-policy statement needed).
+resource "aws_kms_key" "ebs" {
+  description             = "${var.name_prefix} EBS root-volume encryption (mesh/control-plane nodes)"
+  enable_key_rotation     = true
+  deletion_window_in_days = 30
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+resource "aws_kms_alias" "ebs" {
+  name          = "alias/${var.name_prefix}-ebs"
+  target_key_id = aws_kms_key.ebs.key_id
+}

@@ -315,6 +315,7 @@ resource "aws_instance" "node" {
   root_block_device {
     volume_size = 16
     encrypted   = true
+    kms_key_id  = aws_kms_key.ebs.arn # customer-managed CMK (compute.tf), not the aws/ebs default
   }
 
   tags = {
