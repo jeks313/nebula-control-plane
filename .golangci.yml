@@ -37,6 +37,9 @@ linters:
         - builtinShadow
         # Conflicts with the common "prefer unnamed returns for short funcs" idiom.
         - unnamedResult
+        # False-positives on reassigning a NAMED return (err = ...); the suggested
+        # err := would shadow the named return. This codebase uses named returns.
+        - sloppyReassign
     revive:
       rules:
         - name: exported            # exported identifiers want doc comments

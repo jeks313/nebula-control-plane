@@ -242,7 +242,7 @@ func cmdClockCheck(args []string) {
 	r, err := clock.Query(ctx, *server, *timeout)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "pilot clock-check: %v\n", err)
-		os.Exit(2) // time could not be determined
+		os.Exit(2) //nolint:gocritic // CLI fatal exit; deferred stop() best-effort (time undeterminable)
 	}
 
 	dir := "ahead of"

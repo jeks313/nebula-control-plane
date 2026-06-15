@@ -162,6 +162,7 @@ func (r Report) HasAlerts() bool {
 // degraded and critical do.
 type Severity string
 
+// Alert severity levels.
 const (
 	SevInfo     Severity = "info"
 	SevDegraded Severity = "degraded"
@@ -171,6 +172,7 @@ const (
 // Status is the fleet's single top-line health verdict.
 type Status string
 
+// Host health statuses.
 const (
 	StatusHealthy  Status = "healthy"
 	StatusDegraded Status = "degraded"
@@ -202,6 +204,7 @@ type Health struct {
 // tampering.
 type AuditState string
 
+// Audit-chain verification outcomes.
 const (
 	AuditOK          AuditState = "ok"
 	AuditTampered    AuditState = "tampered"

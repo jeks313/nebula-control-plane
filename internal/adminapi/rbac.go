@@ -10,16 +10,17 @@ import (
 // check without admitting an arbitrarily future-dated MFA instant.
 const mfaClockSkew = 2 * time.Minute
 
-// RBAC (implementation-plan 2.11). The admin API authorizes by PERMISSION, not by
-// a single hard-coded role, so the role set can grow without touching handlers.
-// Roles arrive on the authenticated Identity (mapped from IdP groups by
-// internal/adminauth); the client gets no say — every check is here, server-side
-// (P-UI-1). admin is a superuser; operator does day-2 fleet ops but never policy /
-// CA / dual-control; viewer is read-only (the default); break-glass is a
-// dual-control capability (a valid second sign-off when the IdP/mesh is down),
-// handled in the approval flow, and intentionally grants no standalone permission.
+// Permission is one server-side RBAC capability (implementation-plan 2.11). The
+// admin API authorizes by PERMISSION, not by a single hard-coded role, so the role
+// set can grow without touching handlers. Roles arrive on the authenticated Identity
+// (mapped from IdP groups by internal/adminauth); the client gets no say — every
+// check is here, server-side (P-UI-1). admin is a superuser; operator does day-2
+// fleet ops but never policy / CA / dual-control; viewer is read-only (the default);
+// break-glass is a dual-control capability (a valid second sign-off when the IdP/mesh
+// is down), handled in the approval flow, and grants no standalone permission.
 type Permission string
 
+// Permission constants — the capabilities the admin API authorizes against.
 const (
 	PermLighthouseManage  Permission = "lighthouse:manage"  // add/replace/remove lighthouses
 	PermRolloutControl    Permission = "rollout:control"    // start/step/abort rollouts

@@ -27,6 +27,7 @@ import (
 // State is a change's lifecycle position. pending and the three terminals.
 type State string
 
+// Dual-control change lifecycle states.
 const (
 	StatePending    State = "pending"
 	StateCommitting State = "committing" // transient: an approver won the commit claim and is running the committer
