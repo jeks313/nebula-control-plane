@@ -71,8 +71,8 @@ func cmdCoreAPI(args []string) {
 	if err != nil {
 		fatalf("core-api: read -ca-cert: %v", err)
 	}
-	caB := cf.loadBackend(*cf.caKey, *cf.caLbl, "CA")
-	cfgB := cf.loadBackend(*cf.configKey, *cf.configLbl, "config-signing")
+	caB := cf.loadBackend(*cf.caKey, *cf.caLbl, *cf.caKmsKeyID, "CA")
+	cfgB := cf.loadBackend(*cf.configKey, *cf.configLbl, *cf.cfgKmsKeyID, "config-signing")
 	s := openStore(*cf.driver, *cf.dsn)
 	defer s.Close()
 	audit := func(c context.Context, a, ac, t, d string) error { _, e := s.AppendAudit(c, a, ac, t, d); return e }
