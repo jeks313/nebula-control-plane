@@ -136,7 +136,7 @@ Plus a persistent **global search** (device, overlay IP, cert fingerprint, insta
 ### 4.13 System & operations
 - **Harbor health**: replicas, Postgres (lag, failover state), queue depth, KMS, gateway status.
 - **Version landscape**: Harbor version; **Pilot/nebula version distribution across the fleet** (drives 4.8 skew awareness) — highlight N-2 or older.
-- **Self-update channel** (impl 9.6): available releases, rollout waves, rollback controls.
+- **Self-update channel** (impl 9.6): available releases, rollout waves, rollback controls. ✅ **Built — Releases page (#39, ADR 0003).** `/releases` lists the nebula + pilot registries and stages a per-lane fleet upgrade (canary/wave/observe overrides, live convergence + auto-rollback, abort), `rollout:control`-gated. Binaries are registered via the `harbor nebula/pilot add` CLI (no browser upload yet); Harbor stays a pointer registry.
 - **Deploy/upgrade status** (impl 9.9) and **backup/DR status + last restore drill** (impl 9.10).
 
 ## 5. Cross-cutting UX

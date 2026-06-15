@@ -250,6 +250,15 @@ judged worth the single-process win — neither of which is established today.
     all-or-nothing live-test override. Reviewed (no nebula-lane regression; the loop's flag
     precedence + bundle read/verify visibility hardened). ⚠️ Still gated on the 3b re-exec
     mechanism's live validation before a real fleet rollout.
+  - ✅ **Operability — Releases console (#39).** The Harbor admin UI gained a **Releases**
+    page (`/releases`) listing both registries (gen / version / sha / status / added) and
+    triggering a per-lane fleet upgrade to any registered gen, with canary/wave/observe
+    overrides, live wave-convergence + auto-rollback state, and an abort. Backed by
+    `GET /admin/v1/releases` + `POST /admin/v1/releases/{kind}/rollouts[/current/abort]`
+    (`rollout:control`, read-only for viewers). **No upload UI** — binaries are still
+    registered out-of-band via `harbor nebula/pilot add`; Harbor stays a pointer registry.
+    The rollout host set is filtered to **live** hosts (stale ghosts can't become the
+    canary and silently trip auto-rollback).
 - **Phase 4 — evaluate in-process nebula.** Only after 1–3 are proven; weigh the isolation
   loss against the single-process simplification (the fork above).
 
