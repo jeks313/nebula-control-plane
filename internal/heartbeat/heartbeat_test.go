@@ -93,6 +93,29 @@ func TestReporterReportsRunningNebula(t *testing.T) {
 	}
 }
 
+func TestReporterReportsHealth(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req wire.HeartbeatRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		got = req.Health
+		_ = json.NewEncoder(w).Encode(wire.HeartbeatResponse{ProtocolVersion: wire.ProtocolVersion})
+	}))
+	defer srv.Close()
+
+	// HealthFn's value is reported verbatim.
+	rep := New(Config{CoreURL: srv.URL, Layout: paths.New(t.TempDir()), HealthFn: func() string { return "unhealthy" }})
+	rep.beat(context.Background())
+	if got != "unhealthy" {
+		t.Fatalf("reported health=%q, want unhealthy", got)
+	}
+	// No HealthFn -> defaults to "ok" (backward-compatible).
+	New(Config{CoreURL: srv.URL, Layout: paths.New(t.TempDir())}).beat(context.Background())
+	if got != "ok" {
+		t.Fatalf("reported health=%q with no HealthFn, want ok", got)
+	}
+}
+
 func TestProcessStopsAtUnknown(t *testing.T) {
 	var renews int
 	h := Handlers{Renew: func(context.Context) error { renews++; return nil }}

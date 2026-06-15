@@ -253,3 +253,22 @@ func TestRunRestartsOnExit(t *testing.T) {
 		t.Fatalf("expected nebula to be restarted (>=2 runs), got %d", runs)
 	}
 }
+
+func TestHealthHealthy(t *testing.T) {
+	const min = 30 * time.Second
+	cases := []struct {
+		name string
+		h    Health
+		want bool
+	}{
+		{"down", Health{Running: false, Uptime: time.Hour}, false},
+		{"up-but-young (crash-loop)", Health{Running: true, Uptime: 5 * time.Second}, false},
+		{"up-at-floor", Health{Running: true, Uptime: 30 * time.Second}, true},
+		{"up-and-held", Health{Running: true, Uptime: time.Hour}, true},
+	}
+	for _, c := range cases {
+		if got := c.h.Healthy(min); got != c.want {
+			t.Errorf("%s: Healthy(%s) = %v, want %v", c.name, min, got, c.want)
+		}
+	}
+}

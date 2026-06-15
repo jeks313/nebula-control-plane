@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"flag"
 	"fmt"
 	"net/netip"
@@ -326,6 +327,64 @@ func cachedFileSHA(path string) func() string {
 	}
 }
 
+// nebulaHealthFn derives the heartbeat health string from the supervised nebula. It
+// reports "unhealthy" only once the data plane has been continuously unhealthy — down, or
+// up but younger than minUptime (a crash-loop look-alike) — for unhealthyAfter of
+// WALL-CLOCK time. A wall-clock window (rather than a count of beats) keeps the verdict
+// independent of the heartbeat interval: a single legitimate restart (nebula is briefly
+// down, then young) recovers well inside unhealthyAfter and never escalates, so it can't
+// trip a spurious auto-rollback — one "unhealthy" beat fails a host's rollout wave
+// immediately (rollout.healthBad). unhealthyAfter matches the nebula-update health-gate
+// timeout: "unhealthy" means nebula hasn't held minUptime within the window we'd already
+// grant a new binary to come up.
+//
+// Limitation: this is an uptime heuristic. It catches a FAST crash-loop (cycles shorter
+// than minUptime) but not a SLOW one that holds past minUptime each cycle — such a host
+// reports "ok". Catching that degraded steady state would need restart-frequency tracking
+// in the supervisor and is out of scope here.
+func nebulaHealthFn(health func() supervisor.Health, now func() time.Time) func() string {
+	const minUptime = 30 * time.Second      // matches the nebula-update health gate's min uptime
+	const unhealthyAfter = 90 * time.Second // matches the nebula-update health gate's timeout
+	var badSince time.Time
+	return func() string {
+		if health().Healthy(minUptime) {
+			badSince = time.Time{}
+			return "ok"
+		}
+		if badSince.IsZero() {
+			badSince = now()
+		}
+		if now().Sub(badSince) >= unhealthyAfter {
+			return "unhealthy"
+		}
+		return "ok"
+	}
+}
+
+// desiredPilot resolves the pilot binary to converge on (ADR 0003 Phase 3c): the
+// all-or-nothing manual override (-pilot-version/-sha/-url, the 3b live-test trigger)
+// when fully set, else the signed bundle's pilot_* fields verified against the pinned
+// config-signing key. Empty strings mean no target (Sync no-ops). A missing bundle
+// (normal before first enrollment) returns nil; a bundle that can't be read or verified
+// returns a warn error for the caller to log (don't act on an unverified tuple).
+func desiredPilot(bundlePath string, pinned *ecdsa.PublicKey, ovVer, ovSHA, ovURL string) (ver, sha, url string, warn error) {
+	if ovVer != "" && ovSHA != "" && ovURL != "" {
+		return ovVer, ovSHA, ovURL, nil
+	}
+	raw, err := os.ReadFile(bundlePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", "", "", nil
+		}
+		return "", "", "", fmt.Errorf("read bundle: %w", err)
+	}
+	b, err := bundle.Verify(raw, pinned)
+	if err != nil {
+		return "", "", "", fmt.Errorf("verify bundle: %w", err)
+	}
+	return b.PilotVersion, b.PilotSHA256, b.PilotURL, nil
+}
+
 func cmdSupervise(args []string) {
 	fs := flag.NewFlagSet("supervise", flag.ExitOnError)
 	nebulaPath := fs.String("nebula", "nebula", "path to the nebula binary")
@@ -450,6 +509,10 @@ func cmdSupervise(args []string) {
 				NebulaVersionFn: func() string { return nebulaVersion(*nebulaPath) },
 				NebulaSHAFn:     cachedFileSHA(*nebulaPath),
 				PilotSHAFn:      cachedFileSHA(self), // the pilot's OWN binary, for the pilot lane (3c)
+				// Report real data-plane health so Harbor auto-rollback can fail a wave on a
+				// host reporting unhealth, not only on silence. Debounced (below) so an
+				// in-flight restart can't trip a spurious rollback.
+				HealthFn: nebulaHealthFn(sup.Health, time.Now),
 				Handlers: heartbeat.Handlers{
 					Renew:   mgr.RenewNow,
 					Restart: sup.Restart,
@@ -503,25 +566,11 @@ func cmdSupervise(args []string) {
 				defer t.Stop()
 				for {
 					if sup.Health().Pid > 0 {
-						var ver, sha2, url string
-						switch {
-						case *pilotVersion != "" && *pilotSHA != "" && *pilotURL != "":
-							// Manual override is all-or-nothing: only honored when complete, so a
-							// partial set of -pilot-* flags can't produce a half-specified tuple.
-							ver, sha2, url = *pilotVersion, *pilotSHA, *pilotURL
-						default:
-							// Bundle-driven (the normal 3c path): the desired pilot tuple comes from
-							// the verified bundle. Surface read/verify failures (a missing bundle
-							// before first enrollment is normal and stays quiet).
-							if raw, rerr := os.ReadFile(layout.Bundle()); rerr != nil {
-								if !os.IsNotExist(rerr) {
-									log.Warn("pilot self-update: read bundle failed", "err", rerr)
-								}
-							} else if b, verr := bundle.Verify(raw, pinned); verr != nil {
-								log.Warn("pilot self-update: bundle verify failed", "err", verr)
-							} else {
-								ver, sha2, url = b.PilotVersion, b.PilotSHA256, b.PilotURL
-							}
+						// Desired pilot: the all-or-nothing -pilot-* override (3b live-test
+						// trigger) else the verified bundle's pilot_* fields (the normal 3c path).
+						ver, sha2, url, warn := desiredPilot(layout.Bundle(), pinned, *pilotVersion, *pilotSHA, *pilotURL)
+						if warn != nil {
+							log.Warn("pilot self-update: bundle read/verify failed", "err", warn)
 						}
 						if _, err := puLoop.Sync(ver, sha2, url); err != nil {
 							log.Warn("pilot self-update: sync failed; will retry", "err", err)

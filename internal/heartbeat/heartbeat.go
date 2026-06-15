@@ -79,6 +79,11 @@ type Config struct {
 	// PilotSHAFn is NebulaSHAFn for the PILOT binary (ADR 0003 Phase 3c): the sha256 of
 	// the running pilot, the convergence key for the pilot lane.
 	PilotSHAFn func() string
+	// HealthFn, if set, returns this host's data-plane health each beat (e.g. "ok" /
+	// "unhealthy"); nil reports "ok". A value in the rollout's healthBad set fails the
+	// host's wave immediately, so the deriver MUST debounce transients (an in-flight
+	// nebula restart) to avoid a spurious auto-rollback.
+	HealthFn func() string
 	// PinnedConfigPub, if set, lets the reporter read the applied bundle +
 	// blocklist versions from the stored signed bundle (7.1b) so Core can track
 	// rollout convergence. Reporting only — the bundle is verified against the
@@ -132,10 +137,14 @@ func (r *Reporter) beat(ctx context.Context) {
 	if r.cfg.PilotSHAFn != nil {
 		pilotSHA = r.cfg.PilotSHAFn()
 	}
+	health := "ok"
+	if r.cfg.HealthFn != nil {
+		health = r.cfg.HealthFn()
+	}
 	req := wire.HeartbeatRequest{
 		ProtocolVersion: wire.ProtocolVersion, Type: "heartbeat",
 		PilotVersion: r.cfg.PilotVersion, PilotSHA256: pilotSHA,
-		NebulaVersion: nebVer, NebulaSHA256: nebSHA, Health: "ok",
+		NebulaVersion: nebVer, NebulaSHA256: nebSHA, Health: health,
 	}
 	if pem, err := os.ReadFile(r.cfg.Layout.HostCert()); err == nil {
 		if c, _, err := cert.UnmarshalCertificateFromPEM(pem); err == nil {
