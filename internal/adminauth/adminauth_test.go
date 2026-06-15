@@ -88,11 +88,14 @@ func TestOIDCLoginEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new oidc: %v", err)
 	}
-	svc := adminauth.New(adminauth.Config{
+	svc, svcErr := adminauth.New(adminauth.Config{
 		Store:          adminauth.NewSessionStore(st.DB, nil),
 		Authenticators: []adminauth.Authenticator{oidc},
 		RoleMapper:     defaultRoleMapper(),
 	})
+	if svcErr != nil {
+		t.Fatal(svcErr)
+	}
 	api := adminapi.New(adminapi.Config{Store: st, Identity: svc.Provider()})
 	mux := http.NewServeMux()
 	mux.Handle("/admin/v1/auth/", svc.Handler())
@@ -297,7 +300,10 @@ func TestGitHubExchange(t *testing.T) {
 func TestCSRF(t *testing.T) {
 	st := newStore(t)
 	ss := adminauth.NewSessionStore(st.DB, nil)
-	svc := adminauth.New(adminauth.Config{Store: ss, RoleMapper: defaultRoleMapper()})
+	svc, svcErr := adminauth.New(adminauth.Config{Store: ss, RoleMapper: defaultRoleMapper()})
+	if svcErr != nil {
+		t.Fatal(svcErr)
+	}
 	token, csrf, err := ss.Mint(context.Background(), adminauth.Subject{ID: "u1", Email: "u1@x.test"}, "mock", []string{"admin"}, time.Hour)
 	if err != nil {
 		t.Fatal(err)

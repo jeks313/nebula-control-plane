@@ -3,6 +3,7 @@ package adminauth
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -98,8 +99,10 @@ type Service struct {
 	signer    cookieSigner // signs the login-state cookie (tamper-evident)
 }
 
-// New builds the auth Service.
-func New(cfg Config) *Service {
+// New builds the auth Service. Returns an error (rather than panicking) if the
+// cookie signer can't be initialized, matching the NewOIDC/NewSAML siblings and
+// letting the caller decide how to fail.
+func New(cfg Config) (*Service, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
@@ -114,7 +117,7 @@ func New(cfg Config) *Service {
 	}
 	signer, err := newCookieSigner()
 	if err != nil {
-		panic(err) // crypto/rand failure at startup is unrecoverable
+		return nil, fmt.Errorf("adminauth: init cookie signer: %w", err)
 	}
 	s := &Service{
 		cfg:    cfg,
@@ -130,7 +133,7 @@ func New(cfg Config) *Service {
 		s.flows[f.Name()] = f
 		s.providers = append(s.providers, f.Name())
 	}
-	return s
+	return s, nil
 }
 
 // Provider returns the per-request IdentityProvider the admin API plugs in.
