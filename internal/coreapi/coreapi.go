@@ -348,9 +348,15 @@ func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
 	}
 	fp, _ := crt.Fingerprint()
 	// Track the host's CURRENT fingerprint: it rotates with the key on every
-	// renewal, so a blocklist must target the live fingerprint (M7.1/7.3).
-	_ = s.cfg.Store.DB.WithContext(ctx).Model(&enrollment.Enrollment{}).
-		Where("id = ?", dev.ID).Update("fingerprint", fp).Error
+	// renewal, so a blocklist must target the live fingerprint (M7.1/7.3). Fail
+	// closed if we can't persist it — delivering a renewed bundle whose fingerprint
+	// Core never recorded would leave a blocklist blind spot (the device could not
+	// be revoked by fingerprint).
+	if err := s.cfg.Store.DB.WithContext(ctx).Model(&enrollment.Enrollment{}).
+		Where("id = ?", dev.ID).Update("fingerprint", fp).Error; err != nil {
+		wire.WriteError(w, wire.CodeInternal, "renew bookkeeping failed")
+		return
+	}
 	_, _ = s.cfg.Store.AppendAudit(ctx, "renew:"+dev.DeviceName, "cert-renewed", dev.DeviceName,
 		fmt.Sprintf(`{"overlay_ip":%q,"fingerprint":%q}`, dev.OverlayIP, fp))
 
