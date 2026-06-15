@@ -144,7 +144,10 @@ Ordered so each phase de-risks the next; KMS + Aurora are the foundation.
     trust-root keys) + read the Aurora master secret (secretsmanager:GetSecretValue/Describe on
     exactly that ARN, with kms:Decrypt on the RDS CMK scoped via `kms:ViaService` to Secrets
     Manager). Every other node keeps the minimal permission-less role; the instance-profile is
-    selected per-node (`harbor` → core, else node). IMDSv2 + encrypted EBS already enforced.
+    selected per-node (`harbor` → core, else node). IMDSv2 enforced; the node root volumes
+    (the only EBS — Core uses Aurora, no data volumes) are encrypted with a customer-managed
+    CMK (not the aws/ebs default), matching the Aurora + trust-root key posture; Fargate
+    ephemeral storage is encrypted by default.
     `fmt`/`validate` clean; reviewed (0 findings). Operational follow-up: the genesis bootstrap
     runs Core with `-backend kms … -dsn <from the secret>` (ARNs/endpoints are outputs).
   - Remaining `app/` layers: edge (ALB + ACM + WAF) → artifacts (S3 + CloudFront) → obs.
