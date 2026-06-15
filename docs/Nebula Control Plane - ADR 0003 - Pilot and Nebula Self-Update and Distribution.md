@@ -208,17 +208,23 @@ judged worth the single-process win — neither of which is established today.
     `Health`/`Reload` are dual-mode. Tested: adopt→fork-on-death, restart-stops-adopted-
     then-forks, shutdown-stops-adopted (reparented-orphan stub so signal-0 reflects real
     death). Cross-compiles for windows.
-  - **3b (remaining) — the re-exec + last-good revert mechanism.** A `pilotupdate` package:
-    swap the pilot binary (keep `<path>.last-good`), write nebula's PID to a pidfile, write a
-    pending-revert marker (deadline = now + confirm window), then `syscall.Exec` the new pilot
-    with `-adopt-nebula-pid <pid>`; the new pilot re-adopts nebula (3a) and, once healthy,
-    *confirms* (clears the marker). On startup, if a marker is past its deadline (the prior
-    new-pilot crashed/hung and the service restarted us), revert the binary to last-good. The
-    `syscall.Exec` seam is injectable so the swap/marker/revert/pidfile logic is unit-testable;
-    the re-exec itself and the service-restart-revert path are **not** — they MUST be
-    live-validated on a real host (Mac/AWS box) before production, as a bad pilot can brick a
-    mesh-only host. The "binary won't even start" case needs the optional `pilot launch`
-    watchdog (Option B) as the immutable anchor.
+  - ✅ **3b — the re-exec + last-good revert mechanism** (⚠️ pending live validation). The
+    `pilotupdate` package: `Apply` re-reads the running nebula PID (defers if it's gone — no
+    fork-fresh drop), **arms** the pidfile + a pending-revert marker (deadline = now + confirm
+    window) *before* swapping the binary (so a pre-swap failure never leaves an unprotected
+    swapped binary), keeps `<path>.last-good`, then `syscall.Exec`s the new pilot with
+    `-adopt-nebula-pid <pid>`; the new pilot re-adopts nebula (3a) and `Confirm(version)`s
+    after a 30s stable window (clearing only ITS marker). `CheckRevert` at startup reverts to
+    last-good if a marker is past its deadline, with a loop-breaker (already-reverted → don't
+    re-exit) and a corrupt-marker guard; an *impossible* revert runs the current binary + alerts
+    loudly rather than crash-looping. Wired in `pilot supervise` (`-adopt-nebula-pid` flag +
+    `-pilot-version/-sha/-url` manual trigger). The `syscall.Exec` seam is injectable so the
+    swap/marker/revert/pidfile/PID-lifecycle logic is unit-tested; **the re-exec itself and the
+    service-restart revert are NOT unit-testable and MUST be live-validated on a real host
+    before production** (a bad pilot can brick a mesh-only host). Hardened against an adversarial
+    review (13 findings: arm-before-swap, defer-if-no-nebula, validate-pidfile-before-delete,
+    revert loop-breaker, corrupt-marker, version-matched Confirm). The "binary won't even start"
+    case still needs the optional `pilot launch` watchdog (Option B) as the immutable anchor.
   - **3c (remaining) — pilot-version distribution.** The trigger: bundle carries
     `pilot_version`/`pilot_sha256`/`pilot_url`; the pilot reads its desired version and the
     rollout engine stages it on a `pilot` lane — the mechanical mirror of the nebula
