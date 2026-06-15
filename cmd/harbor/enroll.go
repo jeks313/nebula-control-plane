@@ -1,0 +1,416 @@
+package main
+
+import (
+	"context"
+	"crypto/tls"
+	"flag"
+	"fmt"
+	"net/netip"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/jeks313/nebula-control-plane/internal/bundle"
+	"github.com/jeks313/nebula-control-plane/internal/cloudtrust"
+	"github.com/jeks313/nebula-control-plane/internal/collect"
+	"github.com/jeks313/nebula-control-plane/internal/enrollment"
+	"github.com/jeks313/nebula-control-plane/internal/gatewayreg"
+	"github.com/jeks313/nebula-control-plane/internal/ipam"
+	"github.com/jeks313/nebula-control-plane/internal/lighthouse"
+	"github.com/jeks313/nebula-control-plane/internal/nonce"
+	"github.com/jeks313/nebula-control-plane/internal/policy"
+	"github.com/jeks313/nebula-control-plane/internal/queue"
+	"github.com/jeks313/nebula-control-plane/internal/replay"
+	"github.com/jeks313/nebula-control-plane/internal/revocation"
+	"github.com/jeks313/nebula-control-plane/internal/signer"
+	"github.com/jeks313/nebula-control-plane/internal/store"
+	"github.com/jeks313/nebula-control-plane/internal/wire"
+)
+
+// Harbor enrollment consumer wiring (coreFlags) + the enroll worker/collect/pending/approve commands (split from main.go).
+
+// coreFlags wires Core's enrollment consumer (worker/approve).
+type coreFlags struct {
+	driver, dsn                          *string
+	backend                              *string
+	caCert, caKey, configKey             *string
+	module, token, pin, caLbl, configLbl *string
+	hmacKey, queueDSN, queueKey          *string
+	pool                                 *string
+	tunDev                               *string
+	listenPort                           *int
+	certLifetime                         *time.Duration
+	maxPerHour                           *int
+	lighthouse                           *string
+	lighthouseDB                         *bool
+	blocklistDB                          *bool
+	policyFile                           *string
+	policyDB                             *bool
+	cloudTrustDB                         *bool
+}
+
+func addCoreFlags(fs *flag.FlagSet) *coreFlags {
+	cf := &coreFlags{}
+	cf.driver, cf.dsn = dbFlags(fs)
+	cf.backend = fs.String("backend", "software", "CA/config backend: software|pkcs11")
+	cf.caCert = fs.String("ca-cert", "", "CA certificate PEM (required)")
+	cf.caKey = fs.String("ca-key", "", "software CA key (software backend)")
+	cf.configKey = fs.String("config-key", "", "software config-signing key (software backend)")
+	cf.module = fs.String("pkcs11-module", "/usr/lib/softhsm/libsofthsm2.so", "PKCS#11 module")
+	cf.token = fs.String("pkcs11-token", "", "PKCS#11 token label")
+	cf.pin = fs.String("pkcs11-pin", "", "PKCS#11 PIN")
+	cf.caLbl = fs.String("pkcs11-ca-key-label", "", "PKCS#11 CA key label")
+	cf.configLbl = fs.String("pkcs11-config-key-label", "", "PKCS#11 config-signing key label")
+	cf.hmacKey = fs.String("hmac-key", "", "nonce HMAC key (base64url, shared with gateway) (required)")
+	cf.queueDSN = fs.String("queue-dsn", "", "durable queue DSN (required)")
+	cf.queueKey = fs.String("queue-key", "", "queue HMAC key (base64url, shared with gateway) (required)")
+	cf.pool = fs.String("pool", "100.64.0.0/16", "overlay pool CIDR")
+	cf.tunDev = fs.String("tun-dev", "nebula1", "nebula TUN device name stamped into this mesh's bundles (use a DISTINCT name per mesh on multi-mesh hosts)")
+	cf.listenPort = fs.Int("listen-port", 4242, "nebula UDP listen port stamped into this mesh's bundles (use a DISTINCT port per mesh on multi-mesh hosts)")
+	cf.certLifetime = fs.Duration("cert-lifetime", 30*24*time.Hour, "issued cert validity")
+	cf.maxPerHour = fs.Int("max-certs-per-hour", 0, "signing circuit-breaker ceiling (0=unlimited)")
+	cf.lighthouse = fs.String("lighthouse", "", "lighthouses for the bundle: overlayIP=host:port[,...]")
+	cf.lighthouseDB = fs.Bool("lighthouse-db", false, "source lighthouses from the DB registry (6.8) instead of -lighthouse")
+	cf.blocklistDB = fs.Bool("blocklist-db", false, "source the cert blocklist (pki.blocklist) from the DB revocations registry (7.1)")
+	cf.policyFile = fs.String("policy", "", "central firewall policy file (M6); omit for Pilot's local default")
+	cf.policyDB = fs.Bool("policy-db", false, "use the dual-control published policy from the DB (6.5) instead of -policy")
+	cf.cloudTrustDB = fs.Bool("cloudtrust-db", false, "enable AWS SigV4 attestation using the dual-control published cloud-trust config from the DB (M5)")
+	return cf
+}
+
+// policy resolves the central firewall policy Core serves into bundles. With
+// -policy-db it reads the active, dual-control-published policy from the store
+// (6.5 — the active policy is the latest committed policy.publish change);
+// otherwise it reads the -policy file (or nil for Pilot's local default).
+func (cf *coreFlags) policy(s *store.Store) *policy.Policy {
+	if *cf.policyDB {
+		p, ok := activePolicy(context.Background(), s)
+		if !ok {
+			fmt.Fprintln(os.Stderr, "harbor: -policy-db set but no policy has been published yet; serving default-deny")
+			return nil
+		}
+		return &p
+	}
+	if *cf.policyFile == "" {
+		return nil
+	}
+	p := loadPolicy(*cf.policyFile)
+	return &p
+}
+
+// cloudTrust resolves the active cloud-attestation trust config (M5). With
+// -cloudtrust-db it reads the latest committed cloudtrust.publish change; nil means
+// aws-sigv4 attestation stays disabled (fail closed). Read once at startup, like policy.
+func (cf *coreFlags) cloudTrust(s *store.Store) *cloudtrust.Config {
+	if !*cf.cloudTrustDB {
+		return nil
+	}
+	c, ok := activeCloudTrust(context.Background(), s)
+	if !ok {
+		fmt.Fprintln(os.Stderr, "harbor: -cloudtrust-db set but no cloud-trust config has been published yet; aws-sigv4 attestation disabled")
+		return nil
+	}
+	return &c
+}
+
+// lighthouseSource returns the live registry source when -lighthouse-db is set,
+// else nil (Core then uses the static -lighthouse list).
+func (cf *coreFlags) lighthouseSource(s *store.Store) func(context.Context) ([]bundle.Lighthouse, error) {
+	if !*cf.lighthouseDB {
+		return nil
+	}
+	reg := lighthouse.New(s.DB, nil)
+	return reg.Active
+}
+
+// blocklistSource returns the live revocations source (pki.blocklist) when
+// -blocklist-db is set, else nil. Consulted at bundle-build time so a revocation
+// propagates to the healthy fleet via the next signed bundle (7.1).
+func (cf *coreFlags) blocklistSource(s *store.Store) func(context.Context) ([]string, error) {
+	if !*cf.blocklistDB {
+		return nil
+	}
+	reg := revocation.New(s.DB, nil)
+	return reg.ActiveFingerprints
+}
+
+// buildConsumer assembles the enrollment Consumer (signer, IPAM, nonce verify,
+// policy/blocklist/lighthouse sources, cloud-trust) over store s, delivering poll
+// results to `results`. Shared by the queue worker (results = the durable queue)
+// and the ADR-0005 collector (results = a ship-back CaptureSink). Needs -ca-cert
+// + -hmac-key; the queue is the caller's concern.
+func (cf *coreFlags) buildConsumer(s *store.Store, results enrollment.ResultSink) *enrollment.Consumer {
+	if *cf.caCert == "" || *cf.hmacKey == "" {
+		fatalf("-ca-cert and -hmac-key are required")
+	}
+	pool, err := netip.ParsePrefix(*cf.pool)
+	if err != nil {
+		fatalf("bad -pool: %v", err)
+	}
+	caPEM, err := os.ReadFile(*cf.caCert)
+	if err != nil {
+		fatalf("read -ca-cert: %v", err)
+	}
+	caB := cf.loadBackend(*cf.caKey, *cf.caLbl, "CA")
+	cfgB := cf.loadBackend(*cf.configKey, *cf.configLbl, "config-signing")
+	audit := func(c context.Context, a, ac, t, d string) error { _, e := s.AppendAudit(c, a, ac, t, d); return e }
+	sg, err := signer.New(signer.Config{
+		CACertPEM: caPEM, Backend: caB,
+		Policy:          signer.Policy{AllowedNetwork: pool, MaxLifetime: *cf.certLifetime},
+		MaxCertsPerHour: *cf.maxPerHour, Audit: audit,
+	})
+	if err != nil {
+		fatalf("signer: %v", err)
+	}
+	alloc, err := ipam.NewAllocator(s, ipam.Pool{Prefix: pool})
+	if err != nil {
+		fatalf("ipam: %v", err)
+	}
+	ring, err := nonce.NewKeyring([][]byte{readB64Key(*cf.hmacKey)}, 0, 0)
+	if err != nil {
+		fatalf("nonce key: %v", err)
+	}
+	cfgPub, _ := cfgB.PublicKey()
+	ct := cf.cloudTrust(s) // nil unless -cloudtrust-db && a config is published
+	return enrollment.New(enrollment.Config{
+		Store: s, Nonces: ring, Replay: replay.New(2 * time.Minute),
+		Signer: sg, Allocator: alloc, Pool: pool, CertLifetime: *cf.certLifetime,
+		TunDev: *cf.tunDev, ListenPort: *cf.listenPort,
+		ConfigBackend: cfgB, ConfigKeyID: wire.PubkeyHash(cfgPub),
+		CABundlePEM: caPEM, Lighthouses: parseLighthouses(*cf.lighthouse), LighthouseSource: cf.lighthouseSource(s), Policy: cf.policy(s),
+		BlocklistSource: cf.blocklistSource(s),
+		Results:         results, ResultTTL: time.Hour,
+		CloudTrust: ct, AWSSigV4Enabled: ct != nil,
+	})
+}
+
+func (cf *coreFlags) build() (*enrollment.Consumer, *queue.Durable, *store.Store) {
+	if *cf.queueDSN == "" || *cf.queueKey == "" {
+		fatalf("enroll: -queue-dsn and -queue-key are required")
+	}
+	s := openStore(*cf.driver, *cf.dsn)
+	q, err := queue.OpenDurable(queue.DurableConfig{DSN: *cf.queueDSN, Key: readB64Key(*cf.queueKey)})
+	if err != nil {
+		fatalf("enroll: queue: %v", err)
+	}
+	cons := cf.buildConsumer(s, q)
+	return cons, q, s
+}
+
+func (cf *coreFlags) loadBackend(softKey, label, what string) signer.Backend {
+	switch *cf.backend {
+	case "software":
+		if softKey == "" {
+			fatalf("enroll: software backend requires the %s key path", what)
+		}
+		pem, err := os.ReadFile(softKey)
+		if err != nil {
+			fatalf("enroll: read %s key: %v", what, err)
+		}
+		b, err := signer.LoadSoftwareBackendPEM(pem)
+		if err != nil {
+			fatalf("enroll: load %s key: %v", what, err)
+		}
+		return b
+	case "pkcs11":
+		b, err := signer.NewPKCS11Backend(signer.PKCS11Config{ModulePath: *cf.module, TokenLabel: *cf.token, Pin: *cf.pin, KeyLabel: label})
+		if err != nil {
+			fatalf("enroll: %s pkcs11: %v", what, err)
+		}
+		return b
+	default:
+		fatalf("enroll: unknown backend %q", *cf.backend)
+		return nil
+	}
+}
+
+func cmdEnrollCore(args []string) {
+	if len(args) < 1 {
+		fatalf("enroll: want 'worker', 'pending', or 'approve'")
+	}
+	switch args[0] {
+	case "worker":
+		enrollWorker(args[1:])
+	case "pending":
+		enrollPending(args[1:])
+	case "approve":
+		enrollApprove(args[1:])
+	default:
+		fatalf("enroll: unknown subcommand %q", args[0])
+	}
+}
+
+func enrollWorker(args []string) {
+	fs := flag.NewFlagSet("enroll worker", flag.ExitOnError)
+	cf := addCoreFlags(fs)
+	batch := fs.Int("batch", 16, "max messages claimed per cycle")
+	interval := fs.Duration("interval", 500*time.Millisecond, "idle poll interval")
+	lease := fs.Duration("lease", time.Minute, "claim lease duration")
+	lf := addLogFlags(fs)
+	_ = fs.Parse(args)
+	log := lf.setup()
+
+	cons, q, s := cf.build()
+	defer s.Close()
+	defer q.Close()
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	log.Info("enroll worker started", "batch", *batch, "interval", interval.String(), "lease", lease.String())
+	var total int
+	for ctx.Err() == nil {
+		n, err := cons.Drain(ctx, q, *batch, *lease)
+		if err != nil {
+			log.Error("enroll worker: drain failed", "err", err)
+		}
+		if n == 0 {
+			select {
+			case <-ctx.Done():
+			case <-time.After(*interval):
+			}
+		} else {
+			total += n
+			log.Info("enroll worker: processed batch", "count", n, "total", total)
+		}
+	}
+	log.Info("enroll worker stopped", "total_processed", total)
+}
+
+// cmdCollect runs the ADR-0005 pull collector: it PULLS pending candidates from a
+// gateway over leaf-pinned mTLS, verifies + issues them (reusing the enrollment
+// Consumer), pushes results back, and acks — replacing the shared-queue `enroll
+// worker` for the off-mesh / split-gateway topology. Phase 1 polls one gateway
+// from flags; the gateway registry (`harbor gateway …`) is Phase 2.
+func cmdCollect(args []string) {
+	fs := flag.NewFlagSet("collect", flag.ExitOnError)
+	cf := addCoreFlags(fs)
+	gwURL := fs.String("gateway-url", "", "gateway collect URL (https://host:port) to pull from")
+	gwCertPath := fs.String("gateway-cert", "", "gateway's pinned server cert PEM (leaf-pinned)")
+	clientCertPath := fs.String("client-cert", "", "Harbor's collect client cert PEM")
+	clientKeyPath := fs.String("client-key", "", "Harbor's collect client key PEM")
+	interval := fs.Duration("interval", 5*time.Second, "gateway poll interval")
+	batch := fs.Int("batch", 64, "candidates claimed per poll")
+	once := fs.Bool("once", false, "collect a single batch and exit (cron/test)")
+	lf := addLogFlags(fs)
+	_ = fs.Parse(args)
+	log := lf.setup()
+
+	if *clientCertPath == "" || *clientKeyPath == "" {
+		fatalf("collect: -client-cert and -client-key are required")
+	}
+	clientCert, err := tls.LoadX509KeyPair(*clientCertPath, *clientKeyPath)
+	if err != nil {
+		fatalf("collect: client cert: %v", err)
+	}
+
+	s := openStore(*cf.driver, *cf.dsn)
+	defer s.Close()
+	sink := collect.NewCaptureSink()
+	cons := cf.buildConsumer(s, sink)
+	coll := collect.New(collect.Config{Processor: cons, Sink: sink, ClientCert: clientCert, Batch: *batch, Logger: log})
+
+	// Gateways to poll: a single ad-hoc gateway from flags (Phase-1 override), or —
+	// the default — every ACTIVE gateway in the registry (Phase 2), re-read each
+	// cycle so `harbor gateway add/remove` takes effect live.
+	mode := "registry"
+	var gateways func() []collect.Gateway
+	if *gwURL != "" {
+		mode = "single-flag"
+		if *gwCertPath == "" {
+			fatalf("collect: -gateway-url requires -gateway-cert")
+		}
+		gwPEM, err := os.ReadFile(*gwCertPath)
+		if err != nil {
+			fatalf("collect: read -gateway-cert: %v", err)
+		}
+		gwPin, err := collect.PinFromCertPEM(gwPEM)
+		if err != nil {
+			fatalf("collect: -gateway-cert: %v", err)
+		}
+		gw := collect.Gateway{Name: "gateway", URL: *gwURL, ServerCertPin: gwPin}
+		gateways = func() []collect.Gateway { return []collect.Gateway{gw} }
+	} else {
+		reg := gatewayreg.New(s.DB, nil)
+		gateways = func() []collect.Gateway {
+			rows, err := reg.Active(context.Background())
+			if err != nil {
+				log.Warn("collect: read gateway registry", "err", err)
+				return nil
+			}
+			out := make([]collect.Gateway, 0, len(rows))
+			for _, row := range rows {
+				pin, err := collect.PinFromCertPEM([]byte(row.CertPEM))
+				if err != nil {
+					log.Warn("collect: skipping gateway with an unparseable pinned cert", "name", row.Name, "err", err)
+					continue
+				}
+				out = append(out, collect.Gateway{Name: row.Name, URL: row.URL, ServerCertPin: pin})
+			}
+			return out
+		}
+	}
+
+	if *once {
+		total := 0
+		for _, gw := range gateways() {
+			n, err := coll.CollectOnce(context.Background(), gw)
+			if err != nil {
+				fatalf("collect %s: %v", gw.Name, err)
+			}
+			total += n
+		}
+		fmt.Printf("collected %d candidate(s)\n", total)
+		return
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	log.Info("harbor collect running", "mode", mode, "interval", interval.String())
+	_ = coll.Run(ctx, gateways, *interval)
+	log.Info("harbor collect stopped")
+}
+
+func enrollPending(args []string) {
+	fs := flag.NewFlagSet("enroll pending", flag.ExitOnError)
+	driver, dsn := dbFlags(fs)
+	_ = fs.Parse(args)
+	s := openStore(*driver, *dsn)
+	defer s.Close()
+	cons := enrollment.New(enrollment.Config{Store: s}) // Pending() needs only the store
+	pend, err := cons.Pending(context.Background())
+	if err != nil {
+		fatalf("%v", err)
+	}
+	if len(pend) == 0 {
+		fmt.Println("no enrollments awaiting approval")
+		return
+	}
+	fmt.Printf("%-28s %-16s %-22s %s\n", "ENROLLMENT_ID", "DEVICE", "PUBKEY_HASH", "GROUPS")
+	for _, e := range pend {
+		fmt.Printf("%-28s %-16s %-22s %s\n", e.EnrollmentID, e.DeviceName, e.PubkeyHash[:20]+"…", e.Groups)
+	}
+}
+
+func enrollApprove(args []string) {
+	if len(args) < 1 {
+		fatalf("enroll approve: want an <enrollment_id>")
+	}
+	// The enrollment id is positional and comes first; flags follow.
+	id := args[0]
+	fs := flag.NewFlagSet("enroll approve", flag.ExitOnError)
+	cf := addCoreFlags(fs)
+	approver := fs.String("approver", "", "approving admin identity (required)")
+	_ = fs.Parse(args[1:])
+	if *approver == "" {
+		fatalf("enroll approve: -approver is required")
+	}
+	cons, q, s := cf.build()
+	defer s.Close()
+	defer q.Close()
+	res, err := cons.Approve(context.Background(), id, *approver)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	fmt.Printf("approved %s by %s — issued, overlay IP %s\n", id, *approver, res.OverlayIP)
+}
