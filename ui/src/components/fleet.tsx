@@ -79,7 +79,9 @@ export function ActiveOps() {
       {rolledBack && r?.rollout && (
         <div className="flex items-center gap-2 text-[13px] text-danger">
           <span className="inline-block h-1.5 w-1.5 rounded-full bg-danger" aria-hidden />
-          Rollout auto-rolled-back — fleet frozen on bundle v{r.rollout.prev_version}.
+          {r.rollout.prev_version > 0
+            ? `Rollout auto-rolled-back — fleet frozen on bundle v${r.rollout.prev_version}.`
+            : 'Rollout auto-rolled-back — no prior version; fleet frozen on its baseline.'}
         </div>
       )}
       {active && r?.rollout && (

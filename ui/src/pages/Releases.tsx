@@ -131,7 +131,9 @@ function LaneRollout({ kind, rollout }: { kind: ReleaseKind; rollout: RolloutSta
           <>
             <span className="inline-block h-1.5 w-1.5 rounded-full bg-danger" aria-hidden />
             <span className="text-danger">
-              Rollout auto-rolled-back — fleet held on gen {rv.prev_version}.
+              {rv.prev_version > 0
+                ? `Rollout auto-rolled-back — fleet held on gen ${rv.prev_version}.`
+                : 'Rollout auto-rolled-back — no prior generation; fleet left on its baseline binary.'}
             </span>
           </>
         ) : (
@@ -186,7 +188,9 @@ function ReleaseRow({
         <td className="px-4 py-2">
           <div className="flex justify-end">
             {isCurrent ? (
-              <span className="text-[12px] text-ink-faint">running</span>
+              // matches the row's "current" chip — the settled, fleet-desired gen (not an
+              // in-flight op; active rollouts show in the LaneRollout banner)
+              <span className="text-[12px] text-ink-faint">current</span>
             ) : mayStage ? (
               <RolloutButton kind={kind} kindTitle={kindTitle} r={r} />
             ) : (
@@ -235,8 +239,10 @@ function RolloutDialog({
           gen: r.gen,
           canary_size: numOrZero(f.canary),
           wave_size: numOrZero(f.wave),
-          observe_seconds: f.observe ? Math.round(Number(f.observe) * 60) : 0,
-          missing_after_seconds: f.missing ? Math.round(Number(f.missing) * 60) : 0,
+          // minutes -> seconds; numOrZero guards non-numeric input (-> 0 = server default),
+          // so all four numeric fields coerce identically.
+          observe_seconds: numOrZero(f.observe) * 60,
+          missing_after_seconds: numOrZero(f.missing) * 60,
         },
       },
       {
