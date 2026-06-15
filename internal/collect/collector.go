@@ -72,6 +72,9 @@ type Collector struct {
 	leaseTTL   time.Duration
 	httpClient func(gw Gateway) *http.Client
 	log        *slog.Logger
+
+	mu      sync.Mutex
+	clients map[string]*http.Client // cached per gateway (name|pin) so connections pool across cycles
 }
 
 // Config parameterizes a Collector.
@@ -98,6 +101,7 @@ func New(cfg Config) *Collector {
 	c := &Collector{
 		proc: cfg.Processor, sink: cfg.Sink, clientCert: cfg.ClientCert,
 		batch: cfg.Batch, leaseTTL: cfg.LeaseTTL, log: cfg.Logger,
+		clients: map[string]*http.Client{},
 	}
 	c.httpClient = func(gw Gateway) *http.Client {
 		return &http.Client{
@@ -108,12 +112,27 @@ func New(cfg Config) *Collector {
 	return c
 }
 
+// clientFor returns a cached http.Client per gateway (keyed by name + cert pin) so
+// connections pool across collect cycles, instead of a fresh Transport + TLS
+// handshake on every CollectOnce. A changed pin yields a fresh client.
+func (c *Collector) clientFor(gw Gateway) *http.Client {
+	key := gw.Name + "|" + string(gw.ServerCertPin[:])
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if cl := c.clients[key]; cl != nil {
+		return cl
+	}
+	cl := c.httpClient(gw)
+	c.clients[key] = cl
+	return cl
+}
+
 // CollectOnce pulls + processes one batch from gw: claim → process → ship results
 // back → ack/nack. Results are shipped BEFORE acking (at-least-once: a failed ship
 // leaves the candidates leased for redelivery, and PutResult is an idempotent
 // upsert). Returns the number of candidates claimed.
 func (c *Collector) CollectOnce(ctx context.Context, gw Gateway) (int, error) {
-	client := c.httpClient(gw)
+	client := c.clientFor(gw)
 
 	var cr ClaimResponse
 	if err := c.post(ctx, client, gw, "/collect/v1/claim", ClaimRequest{Limit: c.batch, LeaseMs: c.leaseTTL.Milliseconds()}, &cr); err != nil {
