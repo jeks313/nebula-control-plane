@@ -25,8 +25,8 @@ func signalReload(cmd *exec.Cmd) error { return ErrReloadUnsupported }
 // SCM-driven restart. These stubs keep the shared supervisor code compiling.
 var errAdoptUnsupported = errors.New("supervisor: PID adoption unsupported on windows")
 
-func processAlive(int) bool      { return false }
-func terminatePID(int) error     { return errAdoptUnsupported }
-func forceKillPID(int) error     { return errAdoptUnsupported }
-func signalReloadPID(int) error  { return errAdoptUnsupported }
-func adoptSupported() bool       { return false }
+func processAlive(int) bool     { return false }
+func terminatePID(int) error    { return errAdoptUnsupported }
+func forceKillPID(int) error    { return errAdoptUnsupported }
+func signalReloadPID(int) error { return errAdoptUnsupported }
+func adoptSupported() bool      { return false }
