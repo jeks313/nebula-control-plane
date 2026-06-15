@@ -8,6 +8,10 @@ help:
 	@echo "  ui           build the web console SPA (ui/ -> internal/adminui/dist)"
 	@echo "  harbor-ui    build harbor with the web console embedded (bin/harbor, -tags ui)"
 	@echo "  test         go test ./..."
+	@echo "  fmt          gofmt + goimports (golangci-lint formatters) — writes fixes"
+	@echo "  vet          go vet ./cmd/... ./internal/..."
+	@echo "  lint         golangci-lint run (pinned $(GOLANGCI_VERSION); spike/ excluded)"
+	@echo "  check        vet + lint + test (the full pre-push gate)"
 	@echo "  demo         full walkthrough: enrollment spine (m3) + control plane (M5/M6)"
 	@echo "  m1-smoke     run the M1 acceptance (needs nebula + nebula-cert)"
 	@echo "  m3-demo      run the M3 end-to-end enrollment harness (genesis->join)"
@@ -26,6 +30,14 @@ help:
 
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -X main.version=$(VERSION)
+
+# Lint/format. Pinned so devs + CI run the SAME version; override
+# GOLANGCI_LINT=golangci-lint to use a PATH-installed binary instead of go run.
+GOLANGCI_VERSION ?= v2.12.2
+GOLANGCI_LINT ?= go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_VERSION)
+# Quality gates run over our code only; spike/ is experimental + holds a vendored
+# nebula source copy (lint/format/vet would be noise there).
+GO_PKGS := ./cmd/... ./internal/...
 
 .PHONY: build
 build:
@@ -47,6 +59,23 @@ harbor-ui: ui
 .PHONY: test
 test:
 	go test ./...
+
+.PHONY: fmt
+fmt:
+	$(GOLANGCI_LINT) fmt $(GO_PKGS)
+
+.PHONY: vet
+vet:
+	go vet $(GO_PKGS)
+
+.PHONY: lint
+lint:
+	$(GOLANGCI_LINT) run $(GO_PKGS)
+
+# The pre-push gate: format check (via lint's formatters) + vet + lint + tests.
+.PHONY: check
+check: vet lint test
+	@echo "check: vet + lint + tests all clean"
 
 .PHONY: m1-smoke
 m1-smoke:
