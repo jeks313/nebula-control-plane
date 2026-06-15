@@ -28,7 +28,8 @@ func cmdPilot(args []string) {
 	driver, dsn := dbFlags(fs)
 	version := fs.String("version", "", "pilot version, e.g. 1.4.0 (add)")
 	sha := fs.String("sha256", "", "hex sha256 of the artifact — the integrity anchor (add)")
-	url := fs.String("url", "", "artifact download URL the pilot fetches (add)")
+	file := fs.String("file", "", "local binary to hash for the sha256, instead of -sha256 (add); Harbor still does not host it")
+	url := fs.String("url", "", "artifact download URL the pilot fetches; a {version} token is substituted (add)")
 	note := fs.String("note", "", "optional note recorded with the release (add)")
 	gen := fs.Int("gen", 0, "generation to release (release)")
 	canary := fs.Int("canary", 1, "canary wave size (release)")
@@ -47,7 +48,11 @@ func cmdPilot(args []string) {
 
 	switch sub {
 	case "add":
-		r, err := reg.Add(ctx, *version, *sha, *url, *note)
+		rsha, rurl, err := resolveReleaseArgs(*file, *version, *sha, *url)
+		if err != nil {
+			fatalf("pilot add: %v", err)
+		}
+		r, err := reg.Add(ctx, *version, rsha, rurl, *note)
 		if err != nil {
 			fatalf("pilot add: %v", err)
 		}
