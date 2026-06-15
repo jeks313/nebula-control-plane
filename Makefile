@@ -46,6 +46,27 @@ build:
 	go build -trimpath -ldflags "$(LDFLAGS)" -o bin/harbor ./cmd/harbor
 	go build -trimpath -ldflags "$(LDFLAGS)" -o bin/gateway ./cmd/gateway
 
+# ADR 0003 Phase 2: embed a known-good nebula in the pilot for offline first-boot.
+# embed-nebula fetches the pinned nebula for the target GOOS/GOARCH and gzips it into
+# the (gitignored) embed asset; pilot-embedded then builds with -tags embed_nebula.
+# Default `make build` embeds nothing and needs no asset.
+NEBULA_VERSION ?= 1.10.3
+NEBULA_OS      ?= $(shell go env GOOS)
+NEBULA_ARCH    ?= $(shell go env GOARCH)
+
+.PHONY: embed-nebula
+embed-nebula:
+	@mkdir -p internal/nebulaboot/assets
+	@echo "fetching nebula $(NEBULA_VERSION) for $(NEBULA_OS)/$(NEBULA_ARCH)..."
+	curl -fsSL "https://github.com/slackhq/nebula/releases/download/v$(NEBULA_VERSION)/nebula-$(NEBULA_OS)-$(NEBULA_ARCH).tar.gz" \
+	  | tar -xzO nebula | gzip -9 > internal/nebulaboot/assets/nebula.gz
+	@ls -lh internal/nebulaboot/assets/nebula.gz
+
+.PHONY: pilot-embedded
+pilot-embedded: embed-nebula
+	@mkdir -p bin
+	go build -trimpath -tags embed_nebula -ldflags "$(LDFLAGS)" -o bin/pilot ./cmd/pilot
+
 .PHONY: ui
 ui:
 	npm --prefix ui install

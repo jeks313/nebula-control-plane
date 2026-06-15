@@ -24,6 +24,7 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/drift"
 	"github.com/jeks313/nebula-control-plane/internal/enrollclient"
 	"github.com/jeks313/nebula-control-plane/internal/heartbeat"
+	"github.com/jeks313/nebula-control-plane/internal/nebulaboot"
 	"github.com/jeks313/nebula-control-plane/internal/nebulaupdate"
 	"github.com/jeks313/nebula-control-plane/internal/paths"
 	"github.com/jeks313/nebula-control-plane/internal/pilotservice"
@@ -357,6 +358,14 @@ func cmdSupervise(args []string) {
 			NebulaPath:     *nebulaPath,
 			ConfigPath:     *configPath,
 			ExpectedSHA256: *sha,
+		}
+		// ADR 0003 Phase 2: on a fresh host with no nebula binary yet, materialize the
+		// one embedded in this pilot (offline first-boot). No-op once a binary exists
+		// (Phase 1 owns updates from then on) or in a build that embedded nothing.
+		if wrote, err := nebulaboot.MaterializeEmbedded(*nebulaPath, log); err != nil {
+			log.Warn("nebula bootstrap: could not materialize embedded binary", "err", err)
+		} else if wrote {
+			log.Info("nebula bootstrap: wrote embedded binary for offline first-boot", "path", *nebulaPath)
 		}
 		installReload(ctx, sup, log) // SIGHUP -> hot reload nebula (Unix); no-op on Windows
 		log.Info("pilot supervise starting", "config", *configPath, "nebula", *nebulaPath, "version", version)

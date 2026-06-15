@@ -185,8 +185,17 @@ judged worth the single-process win — neither of which is established today.
     missing, even on a failed first install). Layered *under* Harbor's fleet rollback, which
     handles the reachable-but-unhealthy case + stops the rollout widening. Tested incl.
     first-install failure, ctx-cancel-skips-revert, and the restart-race freshness guard.
-- **Phase 2 — single-binary bootstrap.** `go:embed` a known-good nebula in pilot; first run
-  materialises + verifies + supervises it; Phase 1 distributes newer versions thereafter.
+- ✅ **Phase 2 — single-binary bootstrap.** `go:embed` a known-good nebula in pilot; first
+  run materialises + verifies + supervises it; Phase 1 distributes newer versions thereafter.
+  **Implemented:** `internal/nebulaboot` materialises the embedded binary on `pilot supervise`
+  start when no nebula exists at the path (atomic write + sha-verify; no-op once a binary is
+  present, so Phase 1 owns updates from then on). The binary is gated behind the `embed_nebula`
+  build tag (`embed_on.go`/`embed_off.go`) and fetched per-GOOS/GOARCH at build time (`make
+  embed-nebula` → gzipped, gitignored asset; `make pilot-embedded` builds with the tag) — the
+  default `go build ./...` embeds nothing and needs no asset. Offline first-boot, and it gives
+  the Phase 1c local revert a guaranteed last-good (a host can never be left with no nebula).
+  Tested: materialise-when-missing / no-op-when-present / no-embed-no-op; both build modes
+  compile.
 - **Phase 3 — pilot self-update.** Re-exec + nebula-pidfile re-adopt (zero drop) + last-good
   auto-revert, with the desired-pilot-version generation driven by the rollout engine.
   Optionally add the `pilot launch` watchdog as a recovery anchor.
