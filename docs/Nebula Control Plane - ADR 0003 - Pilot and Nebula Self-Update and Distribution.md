@@ -208,7 +208,7 @@ judged worth the single-process win — neither of which is established today.
     `Health`/`Reload` are dual-mode. Tested: adopt→fork-on-death, restart-stops-adopted-
     then-forks, shutdown-stops-adopted (reparented-orphan stub so signal-0 reflects real
     death). Cross-compiles for windows.
-  - ✅ **3b — the re-exec + last-good revert mechanism** (⚠️ pending live validation). The
+  - ✅ **3b — the re-exec + last-good revert mechanism** (✅ **live-validated 2026-06-15** on a real macOS/launchd host — see the validation note below). The
     `pilotupdate` package: `Apply` re-reads the running nebula PID (defers if it's gone — no
     fork-fresh drop), **arms** the pidfile + a pending-revert marker (deadline = now + confirm
     window) *before* swapping the binary (so a pre-swap failure never leaves an unprotected
@@ -248,8 +248,28 @@ judged worth the single-process win — neither of which is established today.
     rollback, and `harbor pilot add/list/release/status/abort` drives it. New hosts enroll on
     the current settled gen. The manual `-pilot-version/-sha/-url` flags remain as an
     all-or-nothing live-test override. Reviewed (no nebula-lane regression; the loop's flag
-    precedence + bundle read/verify visibility hardened). ⚠️ Still gated on the 3b re-exec
-    mechanism's live validation before a real fleet rollout.
+    precedence + bundle read/verify visibility hardened). ✅ The 3b re-exec gate is now
+    cleared (live-validated 2026-06-15), so a real fleet pilot rollout is unblocked.
+  - ✅ **3b live validation (2026-06-15, macOS 26 / arm64 / launchd).** Drove the real
+    `syscall.Exec` path standalone (no Harbor/mesh) via the `-pilot-*` override + a local HTTP
+    server, adopting a stand-in process as the "nebula" (the supervisor's adopt-PID is signal-0
+    liveness only, so any long-running PID proves zero-drop). Results:
+    - **Happy path A→B:** the re-exec was fully transparent to launchd — same pilot PID, the job
+      stayed `running` with `runs=1` / `never exited` (launchd saw no restart), the on-disk binary
+      flipped to B, the adopted PID was unchanged (zero data-plane drop), and `Confirm` cleared
+      the marker exactly 30s after the swap. ✅
+    - **Failure path →bad:** a real-pilot binary that runs `CheckRevert` then exits non-zero
+      before confirming (a test sentinel) crash-looped under launchd `KeepAlive`; at the 90s
+      deadline `CheckRevert` restored `last-good`, relaunched the good binary, and it re-adopted
+      the SAME stand-in — which survived the entire crash-loop + revert. ✅
+    - **Recovered/settled:** with the bad version withdrawn (what Harbor's auto-rollback does),
+      the pilot rested on the good binary with a stable PID and zero re-attempts. ✅
+    - **Finding (open):** unlike `nebulaupdate` (which quarantines a failed sha so it won't
+      retry), `pilotupdate` has **no quarantine** — so a canary pilot RE-ATTEMPTS a still-advertised
+      bad version every ~confirm-window (update→crash→revert→update…) until Harbor's auto-rollback
+      stops advertising it. The data plane survives every cycle (zero drop, observed), so it is
+      bounded and non-fatal, but it is avoidable thrash and delays the "this host rejected the
+      update" signal. Consider a pilot-side failed-sha quarantine mirroring `nebulaupdate`.
   - ✅ **Operability — Releases console (#39).** The Harbor admin UI gained a **Releases**
     page (`/releases`) listing both registries (gen / version / sha / status / added) and
     triggering a per-lane fleet upgrade to any registered gen, with canary/wave/observe
