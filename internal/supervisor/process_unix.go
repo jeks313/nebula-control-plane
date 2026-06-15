@@ -28,3 +28,26 @@ func forceKill(cmd *exec.Cmd) error {
 func signalReload(cmd *exec.Cmd) error {
 	return syscall.Kill(cmd.Process.Pid, syscall.SIGHUP)
 }
+
+// processAlive reports whether pid names a live process. Signal 0 probes liveness
+// without delivering a signal: nil => alive, ESRCH => gone, EPERM => alive but not
+// ours (still "alive"). Used by ADOPT mode (ADR 0003 Phase 3) to monitor a nebula the
+// supervisor did NOT fork and therefore cannot Wait() on — it polls instead.
+func processAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	err := syscall.Kill(pid, 0)
+	return err == nil || err == syscall.EPERM
+}
+
+// terminatePID / forceKillPID / signalReloadPID act on a single ADOPTED pid (not a
+// process group, since we didn't create its group). Signal-specific helpers so no
+// syscall.Signal type has to cross the platform boundary (Windows lacks SIGHUP).
+func terminatePID(pid int) error    { return syscall.Kill(pid, syscall.SIGTERM) }
+func forceKillPID(pid int) error    { return syscall.Kill(pid, syscall.SIGKILL) }
+func signalReloadPID(pid int) error { return syscall.Kill(pid, syscall.SIGHUP) }
+
+// adoptSupported reports whether PID adoption (re-exec self-update, ADR 0003 Phase 3)
+// works on this platform. Unix: yes (signal-0 liveness + kill-by-PID + syscall.Exec).
+func adoptSupported() bool { return true }
