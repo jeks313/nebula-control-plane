@@ -51,7 +51,7 @@ func TestIssueCertEndToEnd(t *testing.T) {
 	}
 	sg, err := signer.New(signer.Config{
 		CACertPEM: caPEM, Backend: backend,
-		Policy:          signer.Policy{AllowedNetwork: pool, MaxLifetime: 30 * 24 * time.Hour},
+		Policy:          signer.IssuePolicy{AllowedNetwork: pool, MaxLifetime: 30 * 24 * time.Hour},
 		MaxCertsPerHour: 100, Audit: audit,
 	})
 	if err != nil {

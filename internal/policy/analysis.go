@@ -94,7 +94,7 @@ type MatrixResult struct {
 // distinct non-"any" groups named in the policy.
 func Matrix(p Policy, groups []string) MatrixResult {
 	if len(groups) == 0 {
-		groups = PolicyGroups(p)
+		groups = Groups(p)
 	}
 	cells := make([]MatrixCell, 0, len(groups)*len(groups))
 	for _, from := range groups {
@@ -105,8 +105,8 @@ func Matrix(p Policy, groups []string) MatrixResult {
 	return MatrixResult{Groups: groups, Cells: cells}
 }
 
-// PolicyGroups returns the sorted distinct non-wildcard groups named in the policy.
-func PolicyGroups(p Policy) []string {
+// Groups returns the sorted distinct non-wildcard groups named in the policy.
+func Groups(p Policy) []string {
 	set := map[string]bool{}
 	for _, r := range p.Rules {
 		for _, g := range []string{r.FromGroup, r.ToGroup} {

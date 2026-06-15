@@ -76,7 +76,7 @@ func cmdCoreAPI(args []string) {
 	audit := func(c context.Context, a, ac, t, d string) error { _, e := s.AppendAudit(c, a, ac, t, d); return e }
 	sg, err := signer.New(signer.Config{
 		CACertPEM: caPEM, Backend: caB,
-		Policy: signer.Policy{AllowedNetwork: pool, MaxLifetime: *cf.certLifetime}, Audit: audit,
+		Policy: signer.IssuePolicy{AllowedNetwork: pool, MaxLifetime: *cf.certLifetime}, Audit: audit,
 	})
 	if err != nil {
 		fatalf("core-api: signer: %v", err)

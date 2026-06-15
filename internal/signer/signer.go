@@ -30,7 +30,7 @@ type Backend interface {
 }
 
 // Template is the requested leaf certificate. PKI-policy-relevant fields are
-// validated against Policy before signing.
+// validated against IssuePolicy before signing.
 type Template struct {
 	Name      string
 	Networks  []netip.Prefix // overlay address(es); host IP within the allocation
@@ -40,9 +40,10 @@ type Template struct {
 	PublicKey []byte // the host's P256 key-agreement public key (65 bytes)
 }
 
-// Policy is the validation envelope (design §4.3): nothing outside the overlay
-// allocation, only sanctioned groups, no insane lifetimes.
-type Policy struct {
+// IssuePolicy is the cert-issuance validation envelope (design §4.3): nothing
+// outside the overlay allocation, only sanctioned groups, no insane lifetimes.
+// Named IssuePolicy to avoid clashing with policy.Policy (the firewall policy).
+type IssuePolicy struct {
 	AllowedNetwork netip.Prefix    // host IPs must fall inside this
 	AllowedGroups  map[string]bool // if non-empty, groups must be a subset
 	MaxLifetime    time.Duration   // NotAfter-NotBefore must not exceed this
@@ -67,7 +68,7 @@ var ErrCircuitOpen = errors.New("signer: signing halted by circuit breaker")
 type Config struct {
 	CACertPEM       []byte
 	Backend         Backend
-	Policy          Policy
+	Policy          IssuePolicy
 	MaxCertsPerHour int
 	// Audit records every outcome. Required.
 	Audit func(ctx context.Context, actor, action, target, details string) error
@@ -81,7 +82,7 @@ type Config struct {
 type Signer struct {
 	caCert  cert.Certificate
 	backend Backend
-	policy  Policy
+	policy  IssuePolicy
 	breaker *breaker
 	audit   func(ctx context.Context, actor, action, target, details string) error
 	onAlarm func(count int)

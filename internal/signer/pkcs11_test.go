@@ -85,7 +85,7 @@ func TestPKCS11SoftHSMEndToEnd(t *testing.T) {
 	s, err := New(Config{
 		CACertPEM: caPEM,
 		Backend:   backend,
-		Policy: Policy{
+		Policy: IssuePolicy{
 			AllowedNetwork: netip.MustParsePrefix("100.64.0.0/16"),
 			MaxLifetime:    90 * 24 * time.Hour,
 		},

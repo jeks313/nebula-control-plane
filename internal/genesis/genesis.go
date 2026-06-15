@@ -155,7 +155,7 @@ func Run(ctx context.Context, s *store.Store, caBackend, configBackend signer.Ba
 	}
 	sg, err := signer.New(signer.Config{
 		CACertPEM: caPEM, Backend: caBackend,
-		Policy: signer.Policy{AllowedNetwork: p.Pool, MaxLifetime: p.CertLifetime},
+		Policy: signer.IssuePolicy{AllowedNetwork: p.Pool, MaxLifetime: p.CertLifetime},
 		Audit:  func(c context.Context, a, ac, t, d string) error { _, e := s.AppendAudit(c, a, ac, t, d); return e },
 	})
 	if err != nil {
