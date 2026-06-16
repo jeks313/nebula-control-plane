@@ -76,7 +76,7 @@ resource "aws_iam_role_policy" "core_acme_token" {
     Statement = [{
       Effect   = "Allow"
       Action   = ["secretsmanager:GetSecretValue"]
-      Resource = [aws_secretsmanager_secret.cloudflare_token[0].arn]
+      Resource = [data.aws_secretsmanager_secret.cloudflare_token[0].arn]
     }]
   })
 }

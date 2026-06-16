@@ -438,7 +438,7 @@ if [[ -n "$HARBOR_DOMAIN" ]]; then
   echo "==> [harbor] deliver the Cloudflare DNS token + prep the ACME cert cache (~/ncp/acme)"
   CF_TOKEN="$(aws secretsmanager get-secret-value --region "$TF_REGION" --secret-id "$CF_SECRET_ARN" --query SecretString --output text)"
   [[ -n "$CF_TOKEN" && "$CF_TOKEN" != "REPLACE_WITH_SCOPED_CLOUDFLARE_DNS_TOKEN" ]] \
-    || { echo "FATAL: Cloudflare token secret is empty/placeholder — populate it first: aws secretsmanager put-secret-value --region $TF_REGION --secret-id $CF_SECRET_ARN --secret-string <scoped-Zone.DNS:Edit-token>" >&2; exit 1; }
+    || { echo "FATAL: Cloudflare token secret is empty/placeholder — run deploy/prod/init-secrets.sh (with NCP_CF_GPG set) before 'terraform apply' so the secret is created with your scoped Zone.DNS:Edit token." >&2; exit 1; }
   # Write to the SAME literal path the -acme-cloudflare-token-file flag uses (so they can't
   # diverge), and chmod 600 explicitly — `cat >` truncates but does not re-permission an
   # existing file, so a re-run must not leave a looser mode on this credential.

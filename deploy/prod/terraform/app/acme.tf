@@ -32,30 +32,21 @@ locals {
 }
 
 # ── Scoped Cloudflare DNS token (Zone.DNS:Edit only) ─────────────────────────────
-# Created empty and populated out-of-band (operator / genesis bootstrap), exactly like
-# the gateway config secret. Stored as the RAW token (not JSON) so ECS injects the whole
-# secret value as $NCP_ACME_CLOUDFLARE_TOKEN — the env var internal/autotls reads first,
-# so the token never lands on a command line / in `ps`.
+# Created OUTSIDE Terraform — by deploy/prod/init-secrets.sh, BEFORE `terraform apply` —
+# and only LOOKED UP here. Inverting ownership this way removes the chicken-and-egg: there
+# is no Terraform-owned placeholder to populate after apply, and the token value never
+# enters Terraform state (a data.aws_secretsmanager_secret reads metadata/ARN only, not the
+# secret string). The init script owns the value (idempotent create/update); Terraform owns
+# only the IAM grants + the Fargate injection that REFERENCE this ARN. ECS injects the raw
+# token as $NCP_ACME_CLOUDFLARE_TOKEN (the env var internal/autotls reads first), so it
+# never lands on a command line / in `ps`. The secret uses the AWS-managed aws/secretsmanager
+# key (init sets no CMK), matching the other secrets in this stack.
 #
-# Encrypted with the AWS-managed aws/secretsmanager key (no kms_key_id), matching every
-# other secret in this stack (gateway-config, lighthouse) — a deliberate, consistent
-# tradeoff: the token is short-lived/rotatable (the operator can re-scope + put-secret-value
-# any time), and the GetSecretValue grants below are pinned to this one ARN, so a dedicated
-# CMK would add key-policy surface without a meaningful authz gain here.
-resource "aws_secretsmanager_secret" "cloudflare_token" {
-  count                   = local.acme_token
-  name                    = "${var.name_prefix}-cloudflare-dns-token"
-  description             = "Scoped Cloudflare API token (Zone.DNS:Edit) for ACME DNS-01. Populated out-of-band; injected as $NCP_ACME_CLOUDFLARE_TOKEN."
-  recovery_window_in_days = var.secret_recovery_window_days # 0 = immediate (lab); 7-30 = prod accidental-delete window
-}
-
-resource "aws_secretsmanager_secret_version" "cloudflare_token" {
-  count         = local.acme_token
-  secret_id     = aws_secretsmanager_secret.cloudflare_token[0].id
-  secret_string = "REPLACE_WITH_SCOPED_CLOUDFLARE_DNS_TOKEN" # placeholder; the bootstrap sets the real token
-  lifecycle {
-    ignore_changes = [secret_string] # the operator/bootstrap owns the real value
-  }
+# NOTE: when a domain is set (local.acme_token == 1) this lookup REQUIRES the secret to
+# already exist — run init-secrets.sh first, or `terraform plan` fails with "secret not found".
+data "aws_secretsmanager_secret" "cloudflare_token" {
+  count = local.acme_token
+  name  = "${var.name_prefix}-cloudflare-dns-token"
 }
 
 # ── Gateway ACME cert cache (EFS) ────────────────────────────────────────────────
@@ -162,7 +153,7 @@ resource "aws_iam_role_policy" "gateway_acme_token" {
     Statement = [{
       Effect   = "Allow"
       Action   = ["secretsmanager:GetSecretValue"]
-      Resource = [aws_secretsmanager_secret.cloudflare_token[0].arn]
+      Resource = [data.aws_secretsmanager_secret.cloudflare_token[0].arn]
     }]
   })
 }

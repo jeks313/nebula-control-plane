@@ -150,8 +150,8 @@ output "rds_kms_key_arn" {
 
 # ── Edge TLS (ACME) — consumed by the bootstrap to wire harbor's auto-TLS ──
 output "cloudflare_token_secret_arn" {
-  description = "Secrets Manager ARN of the scoped Cloudflare DNS token (empty unless gateway_domain or harbor_domain is set). Populate it out-of-band: `aws secretsmanager put-secret-value --secret-id <arn> --secret-string <token>`. Created with a placeholder; ignore_changes keeps TF from clobbering the real value."
-  value       = one(aws_secretsmanager_secret.cloudflare_token[*].arn)
+  description = "Secrets Manager ARN of the scoped Cloudflare DNS token (empty unless gateway_domain or harbor_domain is set). Created OUTSIDE Terraform by init-secrets.sh (run before apply) and only looked up here via a data source, so the token value never enters TF state."
+  value       = one(data.aws_secretsmanager_secret.cloudflare_token[*].arn)
 }
 
 output "harbor_domain" {

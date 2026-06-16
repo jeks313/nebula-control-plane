@@ -346,7 +346,7 @@ resource "aws_ecs_task_definition" "gateway" {
         { name = "NCP_GW_HARBOR_CLIENT_PEM", valueFrom = "${aws_secretsmanager_secret.gateway[0].arn}:harbor_client_pem::" },
       ],
       local.gateway_acme == 1 ? [
-        { name = "NCP_ACME_CLOUDFLARE_TOKEN", valueFrom = aws_secretsmanager_secret.cloudflare_token[0].arn },
+        { name = "NCP_ACME_CLOUDFLARE_TOKEN", valueFrom = data.aws_secretsmanager_secret.cloudflare_token[0].arn },
       ] : []
     )
     # The auto-renewing cert cache (durable across task restarts) — the EFS volume below.
