@@ -131,9 +131,9 @@ usage:
   harbor policy deny       <change-id> -actor A [-reason R]
   harbor policy list       [-pending] [db flags]
   harbor policy active     [db flags]                 show the published policy
-  harbor genesis           -out DIR -operator-a A -operator-b B -lighthouse-pub PEM [...]
-  harbor ca-init           -ca-cert OUT [-backend software|pkcs11|kms] [-ca-key OUT] [...]
-  harbor issue-cert        -name DEVICE -in-pub HOST.pub -ca-cert CA [-groups a,b] [...]
+  harbor genesis           -out DIR -operator-a A -operator-b B -lighthouse-pub PEM [... db flags]
+  harbor ca-init           -ca-cert OUT [-backend software|pkcs11|kms] [-ca-key OUT] [... db flags]
+  harbor issue-cert        -name DEVICE -in-pub HOST.pub -ca-cert CA [-groups a,b] [... db flags]
   harbor version
 
 core flags (enroll worker/approve): -ca-cert, -ca-key/-config-key (software) or
@@ -150,15 +150,34 @@ backend flags (ca-init, issue-cert):
   -kms-key-id ID [-kms-region REGION]
 
 db flags default to a local SQLite file (./harbor.db). Set -driver postgres
--dsn "postgres://user:pass@host/db?sslmode=require" for production.
+-dsn "postgres://user:pass@host/db?sslmode=require" for production. Tune the
+Postgres pool with -db-max-open-conns / -db-max-idle-conns / -db-conn-max-lifetime
+(each 0 = built-in default).
 `)
 }
 
-// dbFlags adds -driver/-dsn to a flagset and returns accessors. Default is local
-// SQLite so dev needs zero setup; the same flags slot in Postgres for prod.
+// dbPool holds the Postgres connection-pool flag pointers registered by dbFlags.
+// openStore reads them, so every store open (serve, migrate, ops) honors the same
+// tuning; they are ignored on SQLite, and a zero value falls back to store.Open's
+// built-in default. (Package-level so openStore — the single store.Config chokepoint,
+// shared by ~30 subcommands — can read them without threading params through each one.
+// Named dbPool, not pool, to avoid shadowing the overlay-prefix `pool` locals in serve.)
+var dbPool struct {
+	maxOpen         *int
+	maxIdle         *int
+	connMaxLifetime *time.Duration
+}
+
+// dbFlags adds -driver/-dsn (and the Postgres pool-tuning flags) to a flagset and
+// returns the driver/dsn accessors. Default is local SQLite so dev needs zero setup;
+// the same flags slot in Postgres for prod.
 func dbFlags(fs *flag.FlagSet) (*string, *string) {
 	driver := fs.String("driver", "sqlite", "sqlite|postgres")
 	dsn := fs.String("dsn", "", "data source name (default: ./harbor.db for sqlite)")
+	// Postgres connection pool (ignored on SQLite; 0 => store.Open's built-in default).
+	dbPool.maxOpen = fs.Int("db-max-open-conns", 0, "postgres: max open connections (0 = default 20)")
+	dbPool.maxIdle = fs.Int("db-max-idle-conns", 0, "postgres: max idle connections (0 = default 5)")
+	dbPool.connMaxLifetime = fs.Duration("db-conn-max-lifetime", 0, "postgres: max connection lifetime, e.g. 30m (0 = default 30m)")
 	return driver, dsn
 }
 
@@ -488,7 +507,13 @@ func parsePrefixes(s string) ([]netip.Prefix, error) {
 }
 
 func openStore(driver, dsn string) *store.Store {
-	s, err := store.Open(store.Config{Driver: driver, DSN: resolveDSN(driver, dsn)})
+	cfg := store.Config{Driver: driver, DSN: resolveDSN(driver, dsn)}
+	if dbPool.maxOpen != nil { // set once dbFlags has registered the pool flags (every CLI path)
+		cfg.MaxOpenConns = *dbPool.maxOpen
+		cfg.MaxIdleConns = *dbPool.maxIdle
+		cfg.ConnMaxLifetime = *dbPool.connMaxLifetime
+	}
+	s, err := store.Open(cfg)
 	if err != nil {
 		fatalf("%v", err)
 	}
