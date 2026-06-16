@@ -9,12 +9,14 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/jeks313/nebula-control-plane/internal/adminapi"
 	"github.com/jeks313/nebula-control-plane/internal/adminauth"
 	"github.com/jeks313/nebula-control-plane/internal/adminui"
+	"github.com/jeks313/nebula-control-plane/internal/auditverify"
 	"github.com/jeks313/nebula-control-plane/internal/autotls"
 	"github.com/jeks313/nebula-control-plane/internal/bundle"
 	"github.com/jeks313/nebula-control-plane/internal/coreapi"
@@ -24,6 +26,7 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/httpserve"
 	"github.com/jeks313/nebula-control-plane/internal/lighthouse"
 	"github.com/jeks313/nebula-control-plane/internal/nebularelease"
+	"github.com/jeks313/nebula-control-plane/internal/obs"
 	"github.com/jeks313/nebula-control-plane/internal/pilotrelease"
 	"github.com/jeks313/nebula-control-plane/internal/queue"
 	"github.com/jeks313/nebula-control-plane/internal/rollout"
@@ -42,6 +45,7 @@ func cmdCoreAPI(args []string) {
 	tlsKey := fs.String("tls-key", "", "TLS private key PEM (with -tls-cert)")
 	acme := autotls.RegisterFlags(fs, "/var/lib/harbor/acme") // auto-TLS via Let's Encrypt (DNS-01)
 	hostCert := fs.String("host-cert", "", "Core's own Nebula host cert PEM; verified at boot to carry group:control-plane (recommended)")
+	auditInterval := fs.Duration("audit-verify-interval", time.Hour, "how often to re-verify the audit chain into metrics (0 disables); a tamper raises ncp_audit_verify_tampered_total")
 	lf := addLogFlags(fs)
 	_ = fs.Parse(args)
 	log := lf.setup()
@@ -100,8 +104,14 @@ func cmdCoreAPI(args []string) {
 		NebulaVersion: *cf.nebulaVersion, NebulaSHA256: *cf.nebulaSHA256, NebulaURL: *cf.nebulaURL,
 		PilotVersion: *cf.pilotVersion, PilotSHA256: *cf.pilotSHA256, PilotURL: *cf.pilotURL,
 	})
+	// Mesh-only observability: /metrics + /healthz + /readyz alongside the v1 API. The DB
+	// readiness probe is cached (1s) so an unauthenticated /readyz flood can't starve the
+	// scarce single SQLite connection or contend with real renew/heartbeat traffic.
+	mux := http.NewServeMux()
+	obs.Mount(mux, obs.Cache(time.Second, obs.Check{Name: "database", Probe: s.Ping}))
+	mux.Handle("/", api.Handler())
 	srv := &http.Server{
-		Addr: *addr, Handler: api.Handler(),
+		Addr: *addr, Handler: mux,
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second,
 		WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 8 << 10,
 	}
@@ -114,6 +124,17 @@ func cmdCoreAPI(args []string) {
 		defer cancel()
 		_ = srv.Shutdown(sc)
 	}()
+	// Background metric maintainers, joined on shutdown so an in-flight scan finishes before
+	// the DB pool closes (deferred s.Close above): the periodic audit-chain verifier (a tamper
+	// raises ncp_audit_verify_tampered_total) and the breaker-gauge reconciler (keeps
+	// ncp_signer_breaker_open fleet-truthful on an idle Core).
+	var wg sync.WaitGroup
+	if *auditInterval > 0 {
+		wg.Add(1)
+		go func() { defer wg.Done(); auditverify.New(s, *auditInterval, log).Run(ctx) }()
+	}
+	wg.Add(1)
+	go func() { defer wg.Done(); sg.RunBreakerMetric(ctx, 15*time.Second) }()
 	if err := acme.Apply(ctx, srv); err != nil {
 		fatalf("core-api: auto-TLS: %v", err)
 	}
@@ -121,6 +142,7 @@ func cmdCoreAPI(args []string) {
 	if err := httpserve.Serve(srv, *tlsCert, *tlsKey); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		fatalf("core-api: %v", err)
 	}
+	wg.Wait() // let the verifier/reconciler finish before the deferred s.Close() drops the pool
 	log.Info("core-api stopped")
 }
 
@@ -235,8 +257,9 @@ func cmdAdminAPI(args []string) {
 	if authHandler != nil {
 		top.Handle("/admin/v1/auth/", authHandler) // unauthenticated login/callback/logout
 	}
-	top.Handle("/admin/v1/", apiHandler)                                        // the JSON API
-	top.Handle("/", adminui.Handler(adminui.Config{Environment: *environment})) // the React console (or a "not built" stub)
+	obs.Mount(top, obs.Cache(time.Second, obs.Check{Name: "database", Probe: s.Ping})) // /metrics + /healthz + /readyz (unauthenticated)
+	top.Handle("/admin/v1/", apiHandler)                                               // the JSON API
+	top.Handle("/", adminui.Handler(adminui.Config{Environment: *environment}))        // the React console (or a "not built" stub)
 	handler := http.Handler(top)
 	if adminui.Embedded() {
 		log.Info("admin-api: web console enabled (embedded SPA at /)")

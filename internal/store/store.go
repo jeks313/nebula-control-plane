@@ -8,6 +8,7 @@
 package store
 
 import (
+	"context"
 	"fmt"
 	"sync"
 
@@ -79,6 +80,15 @@ func Open(cfg Config) (*Store, error) {
 // serializes all writers, so those primitives are unnecessary — and FOR UPDATE
 // isn't valid SQLite syntax, so they must not be emitted there.
 func IsPostgres(db *gorm.DB) bool { return db.Name() == "postgres" }
+
+// Ping verifies the DB connection is alive — the readiness (/readyz) probe.
+func (s *Store) Ping(ctx context.Context) error {
+	sqlDB, err := s.DB.DB()
+	if err != nil {
+		return err
+	}
+	return sqlDB.PingContext(ctx)
+}
 
 // Close releases the underlying connection pool.
 func (s *Store) Close() error {

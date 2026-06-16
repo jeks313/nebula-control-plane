@@ -211,11 +211,22 @@ Ordered so each phase de-risks the next; KMS + Aurora are the foundation.
   static `cmd/nebula-boot` shim (renders config + exec's nebula). The demo tree stays alpine.
   **Remaining:** ADR 0006 Phase 3 supply-chain hardening (digest-pin the base, `IMMUTABLE` ECR
   tags + lifecycle policy, pin `platform_version`).
-- **Phase 7 — Obs/DR.** `/metrics`+`/healthz`+`/readyz` on core-api/admin/gateway; ship
-  EC2-harbor logs to CloudWatch; SNS alarms (wire `signer.OnAlarm`, breaker trips,
-  audit-verify failures); Aurora PITR + final-snapshot + deletion-protection; KMS
-  multi-Region replica keys; export the hash-chained audit to S3 Object-Lock; raise log
-  retention + customer-managed CMKs + non-zero secret recovery windows.
+- **Phase 7 — Obs/DR.** Done incrementally; Aurora PITR + final-snapshot + deletion-protection
+  and customer-managed CMKs already landed (Phases 1–2).
+  - **7a — Observability endpoints ✅ DONE.** `/metrics` (Prometheus) + `/healthz` + `/readyz`
+    on core-api + admin-api (their mesh-only muxes) and the gateway (a SEPARATE internal
+    `-obs-addr` listener — never the public enroll port; smoke-confirmed enroll:`/metrics`→404).
+    `internal/obs` (cached readiness probe → no `/readyz` connection-storm), `store.Ping`.
+    Alarm-source metrics: `ncp_signer_breaker_open` (reconciled from the shared latch on a
+    cadence so an idle Core stays fleet-truthful) + `ncp_signer_breaker_trips_total`; a periodic
+    audit verifier (`internal/auditverify`) exporting `ncp_audit_verify_{runs,failures,tampered}_total`
+    + `_rows`/`_last_success_seconds`, joined on shutdown.
+  - **7b — Alarms (terraform): TODO.** SNS topic + CloudWatch alarms on those metrics
+    (breaker open/trips, audit tampered/failures); wire `signer.OnAlarm`.
+  - **7c — EC2 harbor log shipping: TODO.** CloudWatch agent on the Core node (journald →
+    CloudWatch); the Fargate gateway/lighthouse already ship via the awslogs driver.
+  - **7d — DR terraform: TODO.** KMS multi-Region replica keys; export the hash-chained audit
+    to an S3 Object-Lock bucket; raise log retention + non-zero secret recovery windows.
 
 ## Consequences
 

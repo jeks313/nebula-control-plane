@@ -26,6 +26,7 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/gateway"
 	"github.com/jeks313/nebula-control-plane/internal/httpserve"
 	"github.com/jeks313/nebula-control-plane/internal/nonce"
+	"github.com/jeks313/nebula-control-plane/internal/obs"
 	"github.com/jeks313/nebula-control-plane/internal/queue"
 	"github.com/jeks313/nebula-control-plane/internal/ratelimit"
 )
@@ -79,6 +80,7 @@ func main() {
 	collectCert := fs.String("collect-cert", "", "gateway's collect server cert PEM (self-signed; its leaf is pinned in Harbor's gateway registry); or set $"+envCollectCert)
 	collectKey := fs.String("collect-key", "", "gateway's collect server key PEM; or set $"+envCollectKey)
 	harborClientCert := fs.String("harbor-client-cert", "", "Harbor's pinned client cert PEM — the only client allowed to drain this gateway; or set $"+envHarborClient)
+	obsAddr := fs.String("obs-addr", "", "internal listener for /metrics + /healthz + /readyz (e.g. :9091); served plaintext, NEVER the public enroll port. Empty disables.")
 	_ = fs.Parse(os.Args[1:])
 	log := clilog.Setup(clilog.Options{Format: *logFormat, Level: *logLevel})
 	// The enroll endpoint is public, so demand an explicit transport posture (P8: fail
@@ -184,6 +186,11 @@ func main() {
 		}
 		startCollect(ctx, &wg, log, q, *collectAddr, []byte(collectCertPEM), []byte(collectKeyPEM), []byte(harborPEM))
 	}
+	// Observability on a SEPARATE internal listener — never the public enroll port (which
+	// would leak runtime/throughput metrics to the internet).
+	if *obsAddr != "" {
+		startObs(ctx, &wg, log, *obsAddr)
+	}
 
 	log.Info("gateway listening", "addr", *addr, "scheme", httpserve.SchemeFor(srv, *tlsCert, *tlsKey), "version", version, "access", "public/credential-less")
 	if err := httpserve.Serve(srv, *tlsCert, *tlsKey); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -191,6 +198,37 @@ func main() {
 	}
 	wg.Wait() // let the collect server finish its in-flight drain before we exit
 	log.Info("gateway stopped")
+}
+
+// startObs serves the observability endpoints (/metrics + /healthz + /readyz) on a SEPARATE
+// internal listener — never the public enroll port, so runtime/throughput metrics aren't
+// exposed to the internet. Plaintext; the scraper reaches it inside the VPC.
+func startObs(ctx context.Context, wg *sync.WaitGroup, log *slog.Logger, addr string) {
+	mux := http.NewServeMux()
+	obs.Mount(mux) // no readiness checks: the gateway's only dependency (its local queue) is fatal at boot
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    8 << 10,
+	}
+	go func() {
+		<-ctx.Done()
+		sc, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(sc)
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		log.Info("gateway observability listening", "addr", addr, "endpoints", "/metrics /healthz /readyz", "access", "internal")
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error("gateway obs server failed", "err", err)
+		}
+	}()
 }
 
 // startCollect launches the Harbor-facing mTLS collect API (ADR 0005): Harbor

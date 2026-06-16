@@ -15,7 +15,22 @@ import (
 	"net/netip"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/slackhq/nebula/cert"
+)
+
+// Signing circuit-breaker metrics (Phase 7 observability). Registered to the default
+// Prometheus registry at init; shared across the process's signers (one fleet-wide lane).
+var (
+	metricBreakerOpen = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "ncp_signer_breaker_open",
+		Help: "1 when this Core observes the signing circuit breaker open (issuance halted), else 0.",
+	})
+	metricBreakerTrips = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ncp_signer_breaker_trips_total",
+		Help: "Signing circuit breaker trips observed by this Core (the cert/hour ceiling was breached).",
+	})
 )
 
 // Backend signs on behalf of the CA key. The private key never leaves the
@@ -83,6 +98,9 @@ type Breaker interface {
 	reset(ctx context.Context) error
 	// limit returns the configured ceiling (for the alarm/audit detail).
 	limit() int
+	// isOpen reports the authoritative open state (the shared latch for the SQL breaker),
+	// so an idle Core can reflect a fleet-wide trip in its metric without issuing a cert.
+	isOpen(ctx context.Context) (bool, error)
 }
 
 // Config builds a Signer.
@@ -177,7 +195,9 @@ func (s *Signer) Issue(ctx context.Context, actor string, t Template) (cert.Cert
 		return nil, nil, fmt.Errorf("signer: circuit breaker: %w", berr)
 	}
 	if !allowed {
+		metricBreakerOpen.Set(1)
 		if justTripped {
+			metricBreakerTrips.Inc()
 			if s.onAlarm != nil {
 				s.onAlarm(s.breaker.limit())
 			}
@@ -187,6 +207,7 @@ func (s *Signer) Issue(ctx context.Context, actor string, t Template) (cert.Cert
 		_ = s.audit(ctx, actor, "issue-cert-rejected", t.Name, ErrCircuitOpen.Error())
 		return nil, nil, ErrCircuitOpen
 	}
+	metricBreakerOpen.Set(0)
 
 	// 3. Assemble + sign (2.3).
 	tbs := &cert.TBSCertificate{
@@ -225,7 +246,49 @@ func (s *Signer) Issue(ctx context.Context, actor string, t Template) (cert.Cert
 
 // ResetBreaker clears a tripped circuit breaker (an admin action; should itself
 // be dual-controlled when wired into the API, M2.11).
-func (s *Signer) ResetBreaker(ctx context.Context) error { return s.breaker.reset(ctx) }
+func (s *Signer) ResetBreaker(ctx context.Context) error {
+	if err := s.breaker.reset(ctx); err != nil {
+		return err
+	}
+	metricBreakerOpen.Set(0)
+	return nil
+}
+
+// RefreshBreakerMetric syncs ncp_signer_breaker_open with the authoritative breaker state.
+// For the shared SQL breaker this reads the fleet-wide latch, so an idle Core's gauge
+// reflects a trip raised by another Core (Issue only updates it on this process's own path).
+func (s *Signer) RefreshBreakerMetric(ctx context.Context) error {
+	open, err := s.breaker.isOpen(ctx)
+	if err != nil {
+		return err
+	}
+	if open {
+		metricBreakerOpen.Set(1)
+	} else {
+		metricBreakerOpen.Set(0)
+	}
+	return nil
+}
+
+// RunBreakerMetric refreshes the breaker gauge from the authoritative state every interval
+// until ctx is done — so an idle Core still reports a fleet-wide trip. Best-effort: a
+// transient read error leaves the last value (the next tick reconciles).
+func (s *Signer) RunBreakerMetric(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 15 * time.Second
+	}
+	_ = s.RefreshBreakerMetric(ctx)
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			_ = s.RefreshBreakerMetric(ctx)
+		}
+	}
+}
 
 func (s *Signer) validate(t Template) error {
 	if t.Name == "" {
