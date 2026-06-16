@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"runtime"
 	"time"
 
 	"github.com/jeks313/nebula-control-plane/internal/bundle"
@@ -145,6 +146,7 @@ func (r *Reporter) beat(ctx context.Context) {
 		ProtocolVersion: wire.ProtocolVersion, Type: "heartbeat",
 		PilotVersion: r.cfg.PilotVersion, PilotSHA256: pilotSHA,
 		NebulaVersion: nebVer, NebulaSHA256: nebSHA, Health: health,
+		GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, // per-arch release selection
 	}
 	if pem, err := os.ReadFile(r.cfg.Layout.HostCert()); err == nil {
 		if c, _, err := cert.UnmarshalCertificateFromPEM(pem); err == nil {

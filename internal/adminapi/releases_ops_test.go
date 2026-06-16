@@ -31,7 +31,7 @@ func TestReleasesListAndRolloutOverHTTP(t *testing.T) {
 	ctx := context.Background()
 	// Seed a nebula release (added via the CLI in real life) + a fleet heartbeat so a
 	// rollout has a host to stage onto.
-	rel, err := nebularelease.New(s.DB).Add(ctx, "1.10.3", strings.Repeat("a", 64), "https://cdn/nebula", "")
+	rel, err := nebularelease.New(s.DB).Add(ctx, "1.10.3", "", "", strings.Repeat("a", 64), "https://cdn/nebula", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestReleaseRolloutExcludesStaleHosts(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	rel, err := nebularelease.New(s.DB).Add(ctx, "1.10.3", strings.Repeat("a", 64), "https://cdn/nebula", "")
+	rel, err := nebularelease.New(s.DB).Add(ctx, "1.10.3", "", "", strings.Repeat("a", 64), "https://cdn/nebula", "")
 	if err != nil {
 		t.Fatal(err)
 	}

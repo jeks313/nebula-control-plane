@@ -2,6 +2,7 @@ package nebularelease_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -25,16 +26,17 @@ func newStore(t *testing.T) *nebularelease.Store {
 
 const sha1 = "99ac335caeb69d02a6b6b00a3d4b5d0a36ec3971df480a1cc50e6db378342955"
 const sha2 = "1111111111111111111111111111111111111111111111111111111111111111"
+const sha3 = "2222222222222222222222222222222222222222222222222222222222222222"
 
 func TestAddAssignsMonotonicGenAndListsNewestFirst(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()
 
-	r1, err := s.Add(ctx, "1.10.0", sha1, "https://art/1.10.0", "")
+	r1, err := s.Add(ctx, "1.10.0", "", "", sha1, "https://art/1.10.0", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	r2, err := s.Add(ctx, "1.10.3", sha2, "https://art/1.10.3", "security fix")
+	r2, err := s.Add(ctx, "1.10.3", "", "", sha2, "https://art/1.10.3", "security fix")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,13 +60,17 @@ func TestAddNormalizesAndValidates(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()
 
-	// Uppercase sha + surrounding whitespace are normalized.
-	r, err := s.Add(ctx, "  1.10.3 ", "  "+strings.ToUpper(sha1)+"  ", " https://art/x ", "")
+	// Uppercase sha + surrounding whitespace are normalized; empty arch normalizes
+	// to the default platform (the row IS the default artifact).
+	r, err := s.Add(ctx, "  1.10.3 ", "", "", "  "+strings.ToUpper(sha1)+"  ", " https://art/x ", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if r.SHA256 != sha1 || r.Version != "1.10.3" || r.URL != "https://art/x" {
 		t.Fatalf("not normalized: %+v", r)
+	}
+	if r.GOOS != nebularelease.DefaultGOOS || r.GOARCH != nebularelease.DefaultGOARCH {
+		t.Fatalf("empty arch must normalize to %s/%s, got %s/%s", nebularelease.DefaultGOOS, nebularelease.DefaultGOARCH, r.GOOS, r.GOARCH)
 	}
 
 	for _, bad := range []struct{ v, sha, url string }{
@@ -74,7 +80,7 @@ func TestAddNormalizesAndValidates(t *testing.T) {
 		{"1", "deadbeef", "u"},              // sha too short
 		{"1", strings.Repeat("z", 64), "u"}, // non-hex sha
 	} {
-		if _, err := s.Add(ctx, bad.v, bad.sha, bad.url, ""); err == nil {
+		if _, err := s.Add(ctx, bad.v, "", "", bad.sha, bad.url, ""); err == nil {
 			t.Fatalf("expected ErrInvalid for %+v", bad)
 		}
 	}
@@ -83,13 +89,13 @@ func TestAddNormalizesAndValidates(t *testing.T) {
 func TestLookupAndGenForVersion(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()
-	r, _ := s.Add(ctx, "1.10.3", sha1, "https://art/1.10.3", "")
+	r, _ := s.Add(ctx, "1.10.3", "", "", sha1, "https://art/1.10.3", "")
 
-	ver, sha, url, ok := s.Lookup(ctx, int(r.Gen))
+	ver, sha, url, ok := s.Lookup(ctx, int(r.Gen), "", "")
 	if !ok || ver != "1.10.3" || sha != sha1 || url != "https://art/1.10.3" {
 		t.Fatalf("Lookup mismatch: %s %s %s %v", ver, sha, url, ok)
 	}
-	if _, _, _, ok := s.Lookup(ctx, 9999); ok {
+	if _, _, _, ok := s.Lookup(ctx, 9999, "", ""); ok {
 		t.Fatal("Lookup of an unknown gen must be ok=false")
 	}
 
@@ -119,8 +125,8 @@ func TestLookupAndGenForVersion(t *testing.T) {
 func TestGenForSHADisambiguatesSameVersion(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()
-	g1, _ := s.Add(ctx, "1.10.3", sha1, "https://art/a", "")
-	g2, _ := s.Add(ctx, "1.10.3", sha2, "https://art/b", "rebuild") // same version, different artifact
+	g1, _ := s.Add(ctx, "1.10.3", "", "", sha1, "https://art/a", "")
+	g2, _ := s.Add(ctx, "1.10.3", "", "", sha2, "https://art/b", "rebuild") // same version, different artifact
 	if got := s.GenForSHA(ctx, sha1); got != int(g1.Gen) {
 		t.Fatalf("sha1 must map to gen %d, got %d", g1.Gen, got)
 	}
@@ -139,8 +145,8 @@ func TestGenForSHADisambiguatesSameVersion(t *testing.T) {
 func TestGenForVersionNewestWins(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()
-	_, _ = s.Add(ctx, "1.10.3", sha1, "https://art/a", "")
-	r2, _ := s.Add(ctx, "1.10.3", sha2, "https://art/b", "rebuild")
+	_, _ = s.Add(ctx, "1.10.3", "", "", sha1, "https://art/a", "")
+	r2, _ := s.Add(ctx, "1.10.3", "", "", sha2, "https://art/b", "rebuild")
 	if got := s.GenForVersion(ctx, "1.10.3"); got != int(r2.Gen) {
 		t.Fatalf("GenForVersion must return newest gen %d, got %d", r2.Gen, got)
 	}
@@ -149,8 +155,8 @@ func TestGenForVersionNewestWins(t *testing.T) {
 func TestMarkCurrentSupersedes(t *testing.T) {
 	s := newStore(t)
 	ctx := context.Background()
-	r1, _ := s.Add(ctx, "1.10.0", sha1, "https://art/0", "")
-	r2, _ := s.Add(ctx, "1.10.3", sha2, "https://art/3", "")
+	r1, _ := s.Add(ctx, "1.10.0", "", "", sha1, "https://art/0", "")
+	r2, _ := s.Add(ctx, "1.10.3", "", "", sha2, "https://art/3", "")
 
 	if err := s.MarkCurrent(ctx, int(r1.Gen)); err != nil {
 		t.Fatal(err)
@@ -166,5 +172,96 @@ func TestMarkCurrentSupersedes(t *testing.T) {
 	got2, _ := s.Get(ctx, int(r2.Gen))
 	if got2.Status != nebularelease.StatusCurrent || got1.Status != nebularelease.StatusSuperseded {
 		t.Fatalf("after promote r2: r1=%q r2=%q", got1.Status, got2.Status)
+	}
+}
+
+// TestAddArtifactAndPerArchLookup covers the per-arch override path (ADR 0003): a
+// generation's parent Release is its default (linux/amd64) artifact, and AddArtifact
+// registers additional binaries for other platforms. Lookup resolves a host's reported
+// (goos, goarch) to the right artifact — the child's sha/url but the PARENT's version,
+// since a per-arch binary is the same generation/version built for another platform.
+func TestAddArtifactAndPerArchLookup(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+
+	// Parent row is the default linux/amd64 artifact for this generation.
+	r, err := s.Add(ctx, "1.10.3", "", "", sha1, "https://art/linux-amd64", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gen := int(r.Gen)
+
+	// (1) AddArtifact happy path, then Lookup for that arch returns the child's
+	// sha/url with the parent's version.
+	a, err := s.AddArtifact(ctx, gen, "darwin", "arm64", sha2, "https://art/darwin-arm64")
+	if err != nil {
+		t.Fatalf("AddArtifact darwin/arm64: %v", err)
+	}
+	if a.VersionID != int64(gen) || a.GOOS != "darwin" || a.GOARCH != "arm64" || a.SHA256 != sha2 {
+		t.Fatalf("unexpected artifact: %+v", a)
+	}
+	ver, sha, url, ok := s.Lookup(ctx, gen, "darwin", "arm64")
+	if !ok || ver != "1.10.3" || sha != sha2 || url != "https://art/darwin-arm64" {
+		t.Fatalf("per-arch Lookup mismatch: ver=%q sha=%q url=%q ok=%v (want parent version + child sha/url)", ver, sha, url, ok)
+	}
+
+	// Artifacts lists the override rows (not the parent default).
+	as, err := s.Artifacts(ctx, gen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(as) != 1 || as[0].GOOS != "darwin" || as[0].GOARCH != "arm64" {
+		t.Fatalf("Artifacts must list only the override row: %+v", as)
+	}
+
+	// (2) Lookup with the default platform — both explicit linux/amd64 and empty
+	// strings — returns the parent row.
+	for _, c := range []struct{ goos, goarch string }{
+		{nebularelease.DefaultGOOS, nebularelease.DefaultGOARCH},
+		{"", ""},
+	} {
+		ver, sha, url, ok := s.Lookup(ctx, gen, c.goos, c.goarch)
+		if !ok || ver != "1.10.3" || sha != sha1 || url != "https://art/linux-amd64" {
+			t.Fatalf("default-platform Lookup(%q,%q) mismatch: ver=%q sha=%q url=%q ok=%v", c.goos, c.goarch, ver, sha, url, ok)
+		}
+	}
+
+	// (3) Lookup for an arch with no registered artifact returns ok=false, so the
+	// caller leaves the host alone rather than serving a wrong-arch binary.
+	if _, _, _, ok := s.Lookup(ctx, gen, "windows", "amd64"); ok {
+		t.Fatal("Lookup of an arch with no artifact must be ok=false")
+	}
+
+	// (4) AddArtifact rejects (goos, goarch) equal to the generation's default
+	// platform — that artifact is the parent Release row.
+	if _, err := s.AddArtifact(ctx, gen, nebularelease.DefaultGOOS, nebularelease.DefaultGOARCH, sha3, "https://art/dup-default"); !errors.Is(err, nebularelease.ErrInvalid) {
+		t.Fatalf("AddArtifact of the default platform must be ErrInvalid, got %v", err)
+	}
+	// Empty strings normalize to the default platform too — same rejection.
+	if _, err := s.AddArtifact(ctx, gen, "", "", sha3, "https://art/dup-default"); !errors.Is(err, nebularelease.ErrInvalid) {
+		t.Fatalf("AddArtifact of empty (=> default) platform must be ErrInvalid, got %v", err)
+	}
+
+	// (5) AddArtifact rejects a duplicate (gen, goos, goarch) — enforced by the
+	// unique index, so this surfaces as a (wrapped) store error rather than ErrInvalid.
+	if _, err := s.AddArtifact(ctx, gen, "darwin", "arm64", sha3, "https://art/darwin-arm64-dup"); err == nil {
+		t.Fatal("duplicate (gen,goos,goarch) AddArtifact must error")
+	}
+
+	// AddArtifact for a non-existent generation is rejected.
+	if _, err := s.AddArtifact(ctx, 9999, "darwin", "arm64", sha3, "https://art/x"); !errors.Is(err, nebularelease.ErrInvalid) {
+		t.Fatalf("AddArtifact for unknown gen must be ErrInvalid, got %v", err)
+	}
+
+	// (6) GenForSHA resolves both the parent sha and the child-artifact sha to this gen.
+	if got := s.GenForSHA(ctx, sha1); got != gen {
+		t.Fatalf("GenForSHA(parent sha)=%d, want %d", got, gen)
+	}
+	if got := s.GenForSHA(ctx, sha2); got != gen {
+		t.Fatalf("GenForSHA(child artifact sha)=%d, want %d", got, gen)
+	}
+	// Case-insensitive for the child sha too.
+	if got := s.GenForSHA(ctx, strings.ToUpper(sha2)); got != gen {
+		t.Fatalf("GenForSHA must be case-insensitive for child sha, got %d", got)
 	}
 }

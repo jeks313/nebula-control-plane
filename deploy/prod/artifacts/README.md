@@ -46,17 +46,36 @@ s3://<bucket>/nebula/<version>/nebula-<os>-<arch>   # raw binary extracted from 
 The `{version}`-token URL templates are also exposed as `terraform output artifacts_pilot_url` /
 `artifacts_nebula_url` for scripting (Harbor substitutes `{version}` at `add` time).
 
-## Other architectures (e.g. the iMac)
+## Mixed-arch fleets (per-arch releases)
+
+A release **generation** can carry a different binary per `(goos, goarch)`, so **one** staged
+generation serves a mixed-arch fleet (linux/amd64 cloud + darwin/arm64 iMac). The pilot reports
+its `runtime.GOOS/GOARCH` (at enrollment and each heartbeat); Core stamps each host the artifact
+matching its own platform, and leaves a host alone (no update) if its arch isn't registered for
+the staged generation — it never serves a wrong-arch binary.
 
 `publish.sh` defaults to **linux/amd64** (the cloud fleet the rollout drives). Publish another
 platform with `GOOS=… GOARCH=… publish.sh …` (the iMac is `GOOS=darwin GOARCH=arm64`; nebula's
 darwin asset is the **universal `nebula-darwin.zip`** — a zip, not a tarball — which `publish.sh`
 unzips to the raw `nebula` binary, so `unzip` is required for the darwin lane).
 
-**Caveat:** the registry stores **one URL per release generation**, so a mixed-arch fleet can't be
-served by a single gen. Publish each arch and `release` the matching generation to the hosts of
-that arch (or run a per-arch lane). Per-arch URL selection within one generation is a Harbor
-follow-up.
+Register the platforms of one version against a **single generation**: the first `add` creates the
+generation (it is the *default* artifact, defaulting to linux/amd64); each other platform attaches
+to it with `add-artifact -gen <gen>`. Then `release -gen <gen>` stages the whole generation:
+
+```bash
+# build + upload both platforms (run publish.sh once per platform)
+GOOS=linux  GOARCH=amd64 deploy/prod/artifacts/publish.sh nebula 1.10.3
+GOOS=darwin GOARCH=arm64 deploy/prod/artifacts/publish.sh nebula 1.10.3
+# register them against ONE generation (publish.sh prints these with the right sha/url):
+harbor nebula add          -version 1.10.3 -os linux  -arch amd64 -sha256 <amd64sha> -url <amd64url>   # -> gen N
+harbor nebula add-artifact -gen N          -os darwin -arch arm64 -sha256 <arm64sha> -url <arm64url>
+harbor nebula list          # shows gen N with its per-arch artifacts indented
+harbor nebula release -gen N # stages gen N fleet-wide; each host fetches its own arch
+```
+
+A single-arch fleet ignores all of this: plain `harbor nebula add` (no `-os/-arch`) registers a
+linux/amd64 default and behaves exactly as before.
 
 ## What this is *not*
 

@@ -196,22 +196,26 @@ func (cf *coreFlags) buildConsumer(s *store.Store, results enrollment.ResultSink
 	// when no release has settled. Staged updates after enrollment converge via renew.
 	eng := rollout.New(s.DB, audit)
 	reg := nebularelease.New(s.DB)
-	nebulaReleaseFor := func(ctx context.Context) (version, sha256, url string) {
+	nebulaReleaseFor := func(ctx context.Context, goos, goarch string) (version, sha256, url string) {
 		if gen := eng.CurrentNebulaGen(ctx); gen != 0 {
-			if v, sh, u, ok := reg.Lookup(ctx, gen); ok {
+			if v, sh, u, ok := reg.Lookup(ctx, gen, goos, goarch); ok {
 				return v, sh, u
 			}
+			// A settled release exists but not for this host's arch: leave nebula unset rather
+			// than fall back to a wrong-arch static flag — the host converges once its arch is registered.
+			return "", "", ""
 		}
 		return *cf.nebulaVersion, *cf.nebulaSHA256, *cf.nebulaURL
 	}
 	// A new host also joins on the current fleet-desired PILOT release (3c), falling
 	// back to the static flags.
 	pilotReg := pilotrelease.New(s.DB)
-	pilotReleaseFor := func(ctx context.Context) (version, sha256, url string) {
+	pilotReleaseFor := func(ctx context.Context, goos, goarch string) (version, sha256, url string) {
 		if gen := eng.CurrentPilotGen(ctx); gen != 0 {
-			if v, sh, u, ok := pilotReg.Lookup(ctx, gen); ok {
+			if v, sh, u, ok := pilotReg.Lookup(ctx, gen, goos, goarch); ok {
 				return v, sh, u
 			}
+			return "", "", "" // settled release exists but not for this arch — leave pilot unset
 		}
 		return *cf.pilotVersion, *cf.pilotSHA256, *cf.pilotURL
 	}

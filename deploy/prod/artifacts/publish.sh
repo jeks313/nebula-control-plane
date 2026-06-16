@@ -15,9 +15,11 @@
 #
 # Platform: defaults to linux/amd64 (the cloud fleet the rollout drives). Override with
 # GOOS=… GOARCH=… to publish another platform (e.g. the off-cloud iMac: GOOS=darwin GOARCH=arm64).
-# CAVEAT: the registry stores ONE url per release generation, so a mixed-arch fleet needs a
-# separate generation/lane per arch — publish each arch, then `release` the matching gen to the
-# hosts of that arch. (Per-arch URL selection in one gen is a harbor follow-up.)
+# A release GENERATION carries a binary PER (goos, goarch): publish each platform, register the
+# first with `harbor <c> add -os/-arch …` (it becomes the generation's default artifact) and each
+# additional platform with `harbor <c> add-artifact -gen <gen> -os/-arch …`, then `release -gen
+# <gen>` stages the whole generation — Core serves each host the artifact matching its reported
+# arch. (This script prints the exact add/add-artifact commands below.)
 #
 # Requires: aws, terraform; go (pilot); curl, tar, sha256sum|shasum (nebula). The printed
 # `harbor …` commands run where Harbor + its DB are reachable (the control-plane host), NOT here.
@@ -64,8 +66,11 @@ publish_pilot() {
   upload "$bin" "$key"
   echo
   echo "register it (run where Harbor + its DB are reachable):"
-  echo "  harbor pilot add -version ${ver} -sha256 ${sha} -url ${BASE_URL}/${key}"
-  echo "  harbor pilot release -gen <gen>   # then stage that gen as a canary on the pilot lane"
+  echo "  # FIRST platform of ${ver} — creates the generation:"
+  echo "  harbor pilot add          -version ${ver} -os ${GOOS} -arch ${GOARCH} -sha256 ${sha} -url ${BASE_URL}/${key}"
+  echo "  # ADDITIONAL platform of an existing generation (use the gen from the first add):"
+  echo "  harbor pilot add-artifact -gen <gen>      -os ${GOOS} -arch ${GOARCH} -sha256 ${sha} -url ${BASE_URL}/${key}"
+  echo "  # once every arch is registered: harbor pilot release -gen <gen>   (stages the whole gen as a canary)"
   echo
 }
 
@@ -95,8 +100,11 @@ publish_nebula() {
   upload "$bin" "$key"
   echo
   echo "register it (run where Harbor + its DB are reachable):"
-  echo "  harbor nebula add -version ${ver} -sha256 ${sha} -url ${BASE_URL}/${key}"
-  echo "  harbor nebula release -gen <gen>  # then stage that gen as a canary on the nebula lane"
+  echo "  # FIRST platform of ${ver} — creates the generation:"
+  echo "  harbor nebula add          -version ${ver} -os ${GOOS} -arch ${GOARCH} -sha256 ${sha} -url ${BASE_URL}/${key}"
+  echo "  # ADDITIONAL platform of an existing generation (use the gen from the first add):"
+  echo "  harbor nebula add-artifact -gen <gen>      -os ${GOOS} -arch ${GOARCH} -sha256 ${sha} -url ${BASE_URL}/${key}"
+  echo "  # once every arch is registered: harbor nebula release -gen <gen>   (stages the whole gen as a canary)"
   echo
 }
 

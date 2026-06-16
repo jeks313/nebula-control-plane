@@ -117,7 +117,9 @@ type HeartbeatRequest struct {
 	PilotVersion            string `json:"pilot_version"`
 	PilotSHA256             string `json:"pilot_sha256"` // sha of the RUNNING pilot binary; maps to a release generation (3c)
 	NebulaVersion           string `json:"nebula_version"`
-	NebulaSHA256            string `json:"nebula_sha256"` // sha of the RUNNING nebula binary; maps to a release generation (1c)
+	NebulaSHA256            string `json:"nebula_sha256"`    // sha of the RUNNING nebula binary; maps to a release generation (1c)
+	GOOS                    string `json:"goos,omitempty"`   // runtime.GOOS — per-arch release selection (omitempty: pre-arch pilots omit it)
+	GOARCH                  string `json:"goarch,omitempty"` // runtime.GOARCH
 	ClockOffsetMs           int    `json:"clock_offset_ms"`
 	Health                  string `json:"health"`
 }
@@ -179,6 +181,8 @@ type EnrollRequest struct {
 	Client          struct {
 		PilotVersion              string `json:"pilot_version"`
 		SupportedProtocolVersions []int  `json:"supported_protocol_versions"`
+		OS                        string `json:"os,omitempty"`   // runtime.GOOS — recorded for per-arch release selection
+		Arch                      string `json:"arch,omitempty"` // runtime.GOARCH
 	} `json:"client"`
 }
 

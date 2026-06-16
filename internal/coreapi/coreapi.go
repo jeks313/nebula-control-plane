@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
@@ -53,8 +54,11 @@ type Heartbeat struct {
 // convergence — the nebula registry (1c) and the pilot registry (3c) both satisfy it.
 // nil -> Core falls back to its static config for that binary.
 type ReleaseSource interface {
-	// Lookup returns the (version, sha256, url) for a generation.
-	Lookup(ctx context.Context, gen int) (version, sha256, url string, ok bool)
+	// Lookup returns the (version, sha256, url) for a generation AND the host's (goos, goarch)
+	// — the artifact matching that platform (ADR 0003 per-arch URL support). ok=false when the
+	// generation has no artifact for that arch, so Core leaves the host on its current binary
+	// rather than serving a wrong-arch one. An empty (goos, goarch) resolves to the default.
+	Lookup(ctx context.Context, gen int, goos, goarch string) (version, sha256, url string, ok bool)
 	// GenForSHA maps the RUNNING binary's sha256 to a generation (0 if unknown). The
 	// sha is the artifact's identity, so this is unambiguous across rebuilds sharing a
 	// version string — and it reflects what the host is ACTUALLY running (the pilot
@@ -283,6 +287,18 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Per-arch release support: the pilot reports its runtime.GOOS/GOARCH each beat. Record it
+	// on the enrollment row (where assembleBundle reads it) when it changed — this BACKFILLS the
+	// arch for hosts enrolled before the feature (whose enrollment.goos/goarch is empty) on their
+	// first heartbeat under an arch-reporting pilot. Best-effort: a failure here must not fail the
+	// heartbeat (the host keeps its prior/empty arch, which resolves to the linux/amd64 default).
+	if req.GOOS != "" && (req.GOOS != dev.GOOS || req.GOARCH != dev.GOARCH) {
+		if err := s.cfg.Store.DB.WithContext(ctx).Model(&enrollment.Enrollment{}).Where("id = ?", dev.ID).
+			Updates(map[string]any{"goos": req.GOOS, "goarch": req.GOARCH}).Error; err != nil {
+			_, _ = s.cfg.Store.AppendAudit(ctx, "system", "host-arch-update-error", dev.OverlayIP, err.Error())
+		}
+	}
+
 	// 6.6: each heartbeat drives the rollout state machine — convergence widens,
 	// a failed/silent canary auto-rolls-back. A rollout error never fails the
 	// heartbeat (the data plane must keep reporting).
@@ -426,8 +442,8 @@ func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
 // caller supplies the leaf cert (a fresh one on renew; the stored one on a config
 // refresh) and its expiry.
 func (s *Server) assembleBundle(ctx context.Context, dev enrollment.Enrollment, groups []string, certPEM string, notAfter time.Time) bundle.Bundle {
-	nebVer, nebSHA, nebURL := s.nebulaRelease(ctx, dev.OverlayIP)
-	pilotVer, pilotSHA, pilotURL := s.pilotRelease(ctx, dev.OverlayIP)
+	nebVer, nebSHA, nebURL := s.nebulaRelease(ctx, dev.OverlayIP, dev.GOOS, dev.GOARCH)
+	pilotVer, pilotSHA, pilotURL := s.pilotRelease(ctx, dev.OverlayIP, dev.GOOS, dev.GOARCH)
 	return bundle.Bundle{
 		BundleVersion:    s.bundleVersion(ctx, dev.OverlayIP),
 		BlocklistVersion: s.blocklistVersion(ctx),
@@ -454,17 +470,25 @@ func (s *Server) assembleBundle(ctx context.Context, dev enrollment.Enrollment, 
 // When a nebula rollout governs the host (1c), it is the tuple for that host's
 // staged generation (in-wave -> target, else prev; gen 0 -> unpinned, leave nebula
 // alone). Otherwise it falls back to the static NebulaVersion config (Phase 1a/1b).
-func (s *Server) nebulaRelease(ctx context.Context, overlayIP string) (version, sha256, url string) {
+func (s *Server) nebulaRelease(ctx context.Context, overlayIP, goos, goarch string) (version, sha256, url string) {
 	if s.cfg.Rollout != nil && s.cfg.NebulaReleases != nil {
 		if gen, governed := s.cfg.Rollout.NebulaGenFor(ctx, overlayIP); governed {
 			if gen == 0 {
 				return "", "", "" // unpinned (e.g. prev of the first rollout / rolled back to none)
 			}
-			if v, sh, u, ok := s.cfg.NebulaReleases.Lookup(ctx, gen); ok {
+			if v, sh, u, ok := s.cfg.NebulaReleases.Lookup(ctx, gen, goos, goarch); ok {
 				return v, sh, u
 			}
-			// Pinned to a gen the registry can't resolve (shouldn't happen): fall through
-			// to the static config rather than stamp an empty tuple.
+			// Either pinned to a gen the registry can't resolve (shouldn't happen) or the gen
+			// has no artifact for this host's arch: leave the host's nebula ALONE (empty tuple)
+			// rather than stamp a wrong-arch binary or the static config. The host stays on its
+			// current nebula until the operator registers its arch for the staged generation.
+			// Warn (not audit — this fires per bundle build): a stranded host never converges,
+			// so the nebula rollout will eventually observe-window-rollback with a generic note;
+			// this breadcrumb attributes that to the missing per-arch artifact.
+			slog.Warn("coreapi: no nebula artifact for host arch in staged generation; leaving host on current binary",
+				"lane", "nebula", "overlay_ip", overlayIP, "gen", gen, "goos", goos, "goarch", goarch)
+			return "", "", ""
 		}
 	}
 	return s.cfg.NebulaVersion, s.cfg.NebulaSHA256, s.cfg.NebulaURL
@@ -473,15 +497,22 @@ func (s *Server) nebulaRelease(ctx context.Context, overlayIP string) (version, 
 // pilotRelease is nebulaRelease for the PILOT binary (ADR 0003 Phase 3c): the staged
 // pilot generation's tuple when a pilot rollout governs the host, else the static
 // PilotVersion config.
-func (s *Server) pilotRelease(ctx context.Context, overlayIP string) (version, sha256, url string) {
+func (s *Server) pilotRelease(ctx context.Context, overlayIP, goos, goarch string) (version, sha256, url string) {
 	if s.cfg.Rollout != nil && s.cfg.PilotReleases != nil {
 		if gen, governed := s.cfg.Rollout.PilotGenFor(ctx, overlayIP); governed {
 			if gen == 0 {
 				return "", "", "" // unpinned (prev of the first rollout / rolled back to none)
 			}
-			if v, sh, u, ok := s.cfg.PilotReleases.Lookup(ctx, gen); ok {
+			if v, sh, u, ok := s.cfg.PilotReleases.Lookup(ctx, gen, goos, goarch); ok {
 				return v, sh, u
 			}
+			// Governed but no artifact for this host's arch (or a dangling gen): leave the
+			// host's pilot ALONE rather than stamp a wrong-arch binary or the static config.
+			// Warn (see nebulaRelease) so a stranded host + a later observe-window rollback can
+			// be attributed to a missing per-arch artifact.
+			slog.Warn("coreapi: no pilot artifact for host arch in staged generation; leaving host on current binary",
+				"lane", "pilot", "overlay_ip", overlayIP, "gen", gen, "goos", goos, "goarch", goarch)
+			return "", "", ""
 		}
 	}
 	return s.cfg.PilotVersion, s.cfg.PilotSHA256, s.cfg.PilotURL
