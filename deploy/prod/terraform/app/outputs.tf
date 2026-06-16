@@ -34,18 +34,18 @@ output "lighthouse_ecr_repo" {
 }
 
 output "gateway_url" {
-  description = "PUBLIC enrollment URL for OFF-CLOUD clients (the iMac). With gateway_domain set the gateway terminates HTTPS (Let's Encrypt), so clients MUST connect by that name (operator points DNS/Cloudflare at the public NLB); else http to the internet-facing NLB (EC2: the node's public IP). In-VPC clients use gateway_url_internal."
+  description = "PUBLIC enrollment URL for OFF-CLOUD clients (the iMac). With a mesh domain set the gateway terminates HTTPS (Let's Encrypt) as <mesh_name>-gateway.<mesh_domain>, so clients MUST connect by that name (operator points DNS/Cloudflare at the public NLB); else http to the internet-facing NLB (EC2: the node's public IP). In-VPC clients use gateway_url_internal."
   value = (
-    var.gateway_domain != "" ? "https://${var.gateway_domain}:${var.gateway_port}" :
+    local.gateway_domain != "" ? "https://${local.gateway_domain}:${var.gateway_port}" :
     var.gateway_runtime == "fargate" ? "http://${one(aws_lb.gateway[*].dns_name)}:${var.gateway_port}" :
     "http://${lookup(local.public_ip, "gateway", "")}:${var.gateway_port}"
   )
 }
 
 output "gateway_url_internal" {
-  description = "IN-VPC enrollment URL (e.g. the cloud client). With gateway_domain set, connect by that name (split-horizon DNS must resolve it to the INTERNAL NLB, since the gateway serves a cert for that hostname); else http to the internal NLB (EC2: the node's private IP)."
+  description = "IN-VPC enrollment URL (e.g. the cloud client). With a mesh domain set, connect by <mesh_name>-gateway.<mesh_domain> (split-horizon DNS must resolve it to the INTERNAL NLB, since the gateway serves a cert for that hostname); else http to the internal NLB (EC2: the node's private IP)."
   value = (
-    var.gateway_domain != "" ? "https://${var.gateway_domain}:${var.gateway_port}" :
+    local.gateway_domain != "" ? "https://${local.gateway_domain}:${var.gateway_port}" :
     var.gateway_runtime == "fargate" ? "http://${one(aws_lb.gateway_internal[*].dns_name)}:${var.gateway_port}" :
     "http://${try(aws_instance.node["gateway"].private_ip, "")}:${var.gateway_port}"
   )
@@ -145,8 +145,8 @@ output "cloudflare_token_secret_arn" {
 }
 
 output "harbor_domain" {
-  description = "DNS name harbor's core-api + console serve their own Let's Encrypt cert for (empty = harbor stays plain HTTP on the overlay IP). The genesis bootstrap reads this to wire -acme-domain; operators must resolve it to Core's overlay IP for mesh members."
-  value       = var.harbor_domain
+  description = "DNS name harbor's core-api + console serve their own Let's Encrypt cert for — <mesh_name>-harbor.<mesh_domain> (empty = harbor stays plain HTTP on the overlay IP). The genesis bootstrap reads this to wire -acme-domain; operators must resolve it to Core's overlay IP for mesh members."
+  value       = local.harbor_domain
 }
 
 output "acme_email" {

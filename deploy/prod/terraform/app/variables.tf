@@ -92,6 +92,14 @@ variable "gateway_runtime" {
     condition     = contains(["ec2", "fargate"], var.gateway_runtime)
     error_message = "gateway_runtime must be \"ec2\" or \"fargate\"."
   }
+
+  validation {
+    # Auto-TLS (the derived <mesh_name>-gateway.<mesh_domain> cert: EFS cache, token grant,
+    # -acme-domain, https outputs) is wired ONLY on the Fargate gateway. On EC2 a mesh domain
+    # would create an orphaned token secret + advertise an https URL the node never serves.
+    condition     = var.gateway_runtime == "fargate" || var.mesh_name == "" || var.mesh_domain == ""
+    error_message = "a gateway domain (mesh_name + mesh_domain) requires gateway_runtime=fargate; auto-TLS is wired only on the Fargate gateway."
+  }
 }
 
 variable "gateway_image" {
@@ -167,40 +175,33 @@ variable "gateway_cidr" {
 }
 
 # ── Edge TLS: per-component Let's Encrypt via ACME DNS-01 (Cloudflare) ────────
-# The scoped Cloudflare DNS token itself is NOT a variable — it lives in the Secrets
-# Manager secret created here (operator/bootstrap populates it), injected as
-# $NCP_ACME_CLOUDFLARE_TOKEN. Cloudflare DNS records + WAF are operator-owned.
-variable "gateway_domain" {
-  description = "Public DNS name the enrollment gateway serves (e.g. enroll.example.com). When set (+ gateway_runtime=fargate), the gateway obtains a Let's Encrypt cert via ACME DNS-01 and serves HTTPS; empty keeps the -insecure plaintext-behind-proxy spike."
+# Component DNS names follow one convention: <mesh_name>-<component>.<mesh_domain>, e.g.
+# mesh_name="poc" + mesh_domain="mesh.failsafe.net" -> poc-gateway.mesh.failsafe.net and
+# poc-harbor.mesh.failsafe.net. Set BOTH to enable auto-TLS (each component obtains its own
+# Let's Encrypt cert via ACME DNS-01); leave either empty for the plaintext/-insecure spike.
+# The scoped Cloudflare DNS token is NOT a variable — it lives in the Secrets Manager secret
+# created here (operator/bootstrap populates it), injected as $NCP_ACME_CLOUDFLARE_TOKEN.
+# Cloudflare DNS records + WAF are operator-owned.
+variable "mesh_name" {
+  description = "Short mesh identifier prefixed onto component DNS names (e.g. \"poc\" -> poc-gateway.<mesh_domain>, poc-harbor.<mesh_domain>). With mesh_domain, enables auto-TLS; empty disables it."
   type        = string
   default     = ""
 
   validation {
-    # ACME wiring (EFS cache, token grant, -acme-domain flag, https outputs) is Fargate-only.
-    # gateway_domain on the EC2 runtime would create an orphaned token secret no gateway
-    # principal can read AND advertise an https:// enroll URL the EC2 gateway never serves.
-    condition     = var.gateway_domain == "" || var.gateway_runtime == "fargate"
-    error_message = "gateway_domain requires gateway_runtime=fargate — auto-TLS is wired only on the Fargate gateway. For the EC2 gateway, terminate TLS upstream or use -tls-cert."
-  }
-
-  validation {
-    # The bootstrap interpolates this into shell + an ACME hostname; constrain to a hostname
-    # charset so a stray space/metacharacter can't break the command or inject.
-    condition     = var.gateway_domain == "" || can(regex("^[a-zA-Z0-9.-]+$", var.gateway_domain))
-    error_message = "gateway_domain must be a bare hostname (letters, digits, dots, hyphens)."
+    # A DNS label (also interpolated into the bootstrap shell) — keep it injection-safe.
+    condition     = var.mesh_name == "" || can(regex("^[a-z0-9-]+$", var.mesh_name))
+    error_message = "mesh_name must be a short DNS label (lowercase letters, digits, hyphens)."
   }
 }
 
-variable "harbor_domain" {
-  description = "DNS name harbor's core-api + console serve (e.g. harbor.mesh.example.com, an A record to Core's overlay IP). When set, Core's role is granted read on the Cloudflare DNS token so it can obtain LE certs via ACME DNS-01 (the bootstrap passes -acme-domain)."
+variable "mesh_domain" {
+  description = "Parent DNS zone for this mesh's component names (e.g. \"mesh.failsafe.net\"). With mesh_name set, gateway/harbor serve LE certs for <mesh_name>-gateway/-harbor.<mesh_domain> via ACME DNS-01. Operators point these names at the gateway NLB / Core's overlay IP. Empty disables auto-TLS."
   type        = string
   default     = ""
 
   validation {
-    # The bootstrap interpolates this into shell + an ACME hostname; constrain to a hostname
-    # charset so a stray space/metacharacter can't break the command or inject.
-    condition     = var.harbor_domain == "" || can(regex("^[a-zA-Z0-9.-]+$", var.harbor_domain))
-    error_message = "harbor_domain must be a bare hostname (letters, digits, dots, hyphens)."
+    condition     = var.mesh_domain == "" || can(regex("^[a-zA-Z0-9.-]+$", var.mesh_domain))
+    error_message = "mesh_domain must be a DNS name (letters, digits, dots, hyphens)."
   }
 }
 

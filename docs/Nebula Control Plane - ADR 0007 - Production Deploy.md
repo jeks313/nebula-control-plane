@@ -194,7 +194,11 @@ Ordered so each phase de-risks the next; KMS + Aurora are the foundation.
   gateway (its ACME cache must survive restarts or LE rate-limits bite) behind a non-root EFS
   access point; least-priv `GetSecretValue` grants for the gateway exec role + Core; the
   gateway task now serves `-acme-domain` (with `health_check_grace_period` for the blocking
-  first issuance) and harbor-side vars/outputs. The genesis bootstrap (`bootstrap-genesis.sh`)
+  first issuance) and harbor-side outputs. Component DNS names follow ONE convention:
+  `mesh_name` + `mesh_domain` derive `<mesh_name>-gateway.<mesh_domain>` /
+  `<mesh_name>-harbor.<mesh_domain>` (e.g. `poc` + `mesh.failsafe.net` →
+  `poc-gateway.mesh.failsafe.net`); the `harbor_domain`/`gateway_url` outputs are derived from
+  them. The genesis bootstrap (`bootstrap-genesis.sh`)
   now wires harbor too: when `harbor_domain` is set it fetches the scoped Cloudflare token
   (Secrets Manager), delivers it to the box as a `0600` file over ssh stdin, and passes
   `-acme-domain`/`-acme-cloudflare-token-file`/`-acme-cache` to core-api + admin-api (sharing a

@@ -329,7 +329,7 @@ resource "aws_ecs_task_definition" "gateway" {
         "-queue-dsn", "/tmp/queue.db?_pragma=busy_timeout(5000)",
       ],
       local.gateway_acme == 1 ? concat(
-        ["-acme-domain", var.gateway_domain, "-acme-cache", "/var/lib/gateway/acme"],
+        ["-acme-domain", local.gateway_domain, "-acme-cache", "/var/lib/gateway/acme"],
         var.acme_email != "" ? ["-acme-email", var.acme_email] : [],
         var.acme_staging ? ["-acme-staging"] : []
       ) : ["-insecure"]
