@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jeks313/nebula-control-plane/internal/autotls"
 	"github.com/jeks313/nebula-control-plane/internal/clilog"
 	"github.com/jeks313/nebula-control-plane/internal/collect"
 	"github.com/jeks313/nebula-control-plane/internal/gateway"
@@ -50,9 +51,12 @@ func main() {
 	burst := fs.Int("burst", 20, "edge rate-limit burst")
 	queueDSN := fs.String("queue-dsn", "", "durable queue SQLite DSN (default: in-memory dev queue)")
 	queueKeyPath := fs.String("queue-key", "", "gateway<->Core queue HMAC key (base64url, >=16 bytes)")
-	tlsCert := fs.String("tls-cert", "", "TLS certificate PEM (serve HTTPS — required on this public endpoint unless -insecure)")
+	tlsCert := fs.String("tls-cert", "", "TLS certificate PEM (serve HTTPS — required on this public endpoint unless -acme-domain or -insecure)")
 	tlsKey := fs.String("tls-key", "", "TLS private key PEM (with -tls-cert)")
 	insecure := fs.Bool("insecure", false, "serve plain HTTP on this PUBLIC endpoint (only when TLS is terminated by a trusted proxy)")
+	// Auto-TLS via Let's Encrypt (ACME DNS-01 over Cloudflare): the gateway obtains + renews
+	// its own public cert, so TLS terminates here (end-to-end, even behind an L4 proxy/NLB).
+	acme := autotls.RegisterFlags(fs, "/var/lib/gateway/acme")
 	logFormat := fs.String("log-format", "auto", "log format: auto (text on a TTY, JSON as a service) | text | json")
 	logLevel := fs.String("log-level", "info", "log level: debug | info | warn | error")
 	// ADR 0005 pull transport: when -collect-addr is set, expose a Harbor-facing
@@ -70,10 +74,14 @@ func main() {
 	switch {
 	case (*tlsCert == "") != (*tlsKey == ""):
 		fatalf("-tls-cert and -tls-key must be set together")
-	case *tlsCert == "" && !*insecure:
-		fatalf("refusing to serve the public enroll endpoint over plaintext; provide -tls-cert/-tls-key, or pass -insecure if TLS is terminated by a trusted proxy")
-	case *tlsCert == "" && *insecure:
+	case acme.Enabled():
+		// Auto-TLS terminates here; cert obtained below once the ctx exists.
+	case *tlsCert != "":
+		// Static cert/key pair.
+	case *insecure:
 		log.Warn("gateway: serving plain HTTP by operator opt-out (-insecure) — ensure TLS is terminated by a trusted proxy")
+	default:
+		fatalf("refusing to serve the public enroll endpoint over plaintext; provide -acme-domain (Let's Encrypt), -tls-cert/-tls-key, or -insecure if TLS is terminated by a trusted proxy")
 	}
 
 	keys, err := loadKeys(*keyPath, *prevPath)
@@ -115,6 +123,16 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Auto-TLS: obtain (blocking) + auto-renew a Let's Encrypt cert via DNS-01, and serve
+	// HTTPS with it. Done after the ctx exists so a shutdown signal cancels issuance.
+	if err := acme.Apply(ctx, srv); err != nil {
+		fatalf("gateway: auto-TLS: %v", err)
+	}
+	if acme.Enabled() {
+		log.Info("gateway: auto-TLS via Let's Encrypt (ACME DNS-01)", "domain", *acme.Domain, "staging", *acme.Staging)
+	}
+
 	go func() {
 		<-ctx.Done()
 		log.Info("gateway shutting down", "reason", "signal")
@@ -128,7 +146,7 @@ func main() {
 		startCollect(ctx, &wg, log, q, *collectAddr, *collectCert, *collectKey, *harborClientCert)
 	}
 
-	log.Info("gateway listening", "addr", *addr, "scheme", httpserve.Scheme(*tlsCert, *tlsKey), "version", version, "access", "public/credential-less")
+	log.Info("gateway listening", "addr", *addr, "scheme", httpserve.SchemeFor(srv, *tlsCert, *tlsKey), "version", version, "access", "public/credential-less")
 	if err := httpserve.Serve(srv, *tlsCert, *tlsKey); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		fatalf("%v", err)
 	}
