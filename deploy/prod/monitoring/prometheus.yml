@@ -1,0 +1,50 @@
+# Prometheus scrape config for the Nebula control plane (ADR 0007 Phase 7b).
+#
+# This is a REFERENCE for the common case (the default pool 10.44.0.0/16, harbor serving
+# plain HTTP on its overlay IP). The genesis bootstrap renders the real values when it
+# stands up the monitoring node — the overlay IPs (HARBOR_OVERLAY / lighthouse), and the
+# scheme: if a mesh domain is set (mesh_name+mesh_domain), core-api/admin-api serve HTTPS
+# for <mesh_name>-harbor.<mesh_domain>, so switch those jobs to `scheme: https` and target
+# that hostname (the monitoring node resolves it to the overlay IP; the LE cert is trusted).
+#
+# Prometheus runs ON A MESH MEMBER so it can reach the mesh-only core-api/admin-api over the
+# overlay. The gateway is off-mesh — scrape its internal -obs-addr port over the VPC instead
+# (commented below; enable once -obs-addr is set + the SG allows the monitoring node).
+global:
+  scrape_interval: 30s
+  scrape_timeout: 10s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # Harbor control plane — mesh-only, scraped over the overlay. (scheme: https + the
+  # <mesh_name>-harbor.<mesh_domain> hostname when harbor's auto-TLS is on.)
+  - job_name: core-api
+    static_configs:
+      - targets: ["10.44.0.2:8444"]
+  - job_name: admin-api
+    static_configs:
+      - targets: ["10.44.0.2:8445"]
+
+  # Lighthouse — nebula's prometheus stats over the overlay (EC2 lighthouse; the Fargate
+  # spike exposes the same port). Bootstrap fills the real lighthouse overlay IP.
+  - job_name: lighthouse
+    static_configs:
+      - targets: ["10.44.0.1:8080"]
+
+  # Gateway (off-mesh) — uncomment once the gateway runs with -obs-addr and the monitoring
+  # node's SG can reach that port. Fargate task IPs are ephemeral, so prefer ECS service
+  # discovery (ecs_sd) or a stable internal endpoint over a static target.
+  # - job_name: gateway
+  #   static_configs:
+  #     - targets: ["<gateway-obs-host>:9091"]

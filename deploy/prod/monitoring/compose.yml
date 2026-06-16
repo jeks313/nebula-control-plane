@@ -1,0 +1,55 @@
+# Monitoring stack for the Nebula control plane (ADR 0007 Phase 7b): Prometheus +
+# Alertmanager + Grafana, run with `podman compose` (or docker compose) on the dedicated
+# mesh-member monitoring node. The genesis bootstrap installs this dir + the rendered
+# prometheus.yml and brings the stack up.
+#
+# The UIs (9090/9093/3000) are reachable only over the mesh / via SSH tunnel — the
+# monitoring node's security group does not expose them publicly (see the node terraform).
+# Pin images by @sha256 digest for reproducibility (ADR 0006 Phase 3 hardening) — tags here
+# are the floor.
+services:
+  prometheus:
+    image: docker.io/prom/prometheus:v3.1.0
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro,Z
+      - ./alerts.yml:/etc/prometheus/alerts.yml:ro,Z
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+
+  alertmanager:
+    image: docker.io/prom/alertmanager:v0.28.0
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    volumes:
+      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro,Z
+      - alertmanager-data:/alertmanager
+    ports:
+      - "9093:9093"
+
+  grafana:
+    image: docker.io/grafana/grafana:11.4.0
+    restart: unless-stopped
+    environment:
+      # Set a real password out-of-band (e.g. an EnvironmentFile the bootstrap drops);
+      # never commit it. Sign-up disabled so the only account is admin.
+      GF_SECURITY_ADMIN_PASSWORD: "${GF_ADMIN_PASSWORD:-changeme}"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro,Z
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+
+volumes:
+  prometheus-data:
+  alertmanager-data:
+  grafana-data:
