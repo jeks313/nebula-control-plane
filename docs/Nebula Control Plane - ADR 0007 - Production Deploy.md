@@ -160,10 +160,22 @@ Ordered so each phase de-risks the next; KMS + Aurora are the foundation.
   lock (`audit.go:64`), pluggable shared **nonce replay** store, shared **signer breaker**,
   rollout `Evaluate` under `SELECT … FOR UPDATE` (`rollout.go:229`); raise gateways to ≥2
   and register ≥3 lighthouses across AZs.
-- **Phase 5 — Edge/TLS.** Move public **enroll** to an **ALB + ACM** cert (gateway stays
-  `-insecure` behind the trusted proxy — the path `cmd/gateway/main.go` already anticipates),
-  attach **WAF** (rate rules + managed groups), tighten `gateway_cidr`; carve subnets across
-  ≥2 AZs. Collect + the lighthouse UDP NLB are unchanged.
+- **Phase 5 — Edge/TLS (REVISED: end-to-end TLS, no ALB/ACM/AWS-WAF).** Encrypt every hop
+  including load-balancer→application: each component **terminates its own TLS** with a
+  **public Let's Encrypt cert it obtains via ACME DNS-01 (Cloudflare)** — no plaintext
+  anywhere. So **no ALB and no ACM**: the NLBs stay **L4/TCP passthrough**, preserving the
+  app's own TLS. **WAF is Cloudflare's** (the public edge proxies to the origin; AWS WAF
+  walked back). ✅ **Code done** (`internal/autotls`, certmagic DNS-01/Cloudflare → an
+  auto-renewing `*tls.Config`; wired into gateway + core-api + console via a shared
+  `-acme-domain`/`-acme-cloudflare-token-file`/`$NCP_ACME_CLOUDFLARE_TOKEN`; `httpserve`
+  serves a preconfigured ACME `TLSConfig`; `-insecure` kept only as an explicit
+  behind-proxy opt-out). DNS-01 (not HTTP-01/ALPN) because origins sit behind Cloudflare
+  and harbor is mesh-only. The mesh-only harbor APIs also get public LE certs by hostname
+  (uniform mechanism). **Remaining (infra):** a Secrets Manager secret for the scoped
+  Cloudflare token; durable cert storage for the ephemeral Fargate gateway (its ACME cache
+  must survive restarts or LE rate-limits bite); the gateway/harbor hostnames; switch the
+  gateway task from `-insecure` to `-acme-domain`. Cloudflare DNS + WAF are operator-owned.
+  Collect + the lighthouse UDP NLB are unchanged.
 - **Phase 6 — Images.** Distroless per **ADR 0006** (gateway env-var config + `cmd/nebula-boot`).
 - **Phase 7 — Obs/DR.** `/metrics`+`/healthz`+`/readyz` on core-api/admin/gateway; ship
   EC2-harbor logs to CloudWatch; SNS alarms (wire `signer.OnAlarm`, breaker trips,

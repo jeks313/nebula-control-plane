@@ -15,6 +15,7 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/adminapi"
 	"github.com/jeks313/nebula-control-plane/internal/adminauth"
 	"github.com/jeks313/nebula-control-plane/internal/adminui"
+	"github.com/jeks313/nebula-control-plane/internal/autotls"
 	"github.com/jeks313/nebula-control-plane/internal/bundle"
 	"github.com/jeks313/nebula-control-plane/internal/coreapi"
 	"github.com/jeks313/nebula-control-plane/internal/enrollment"
@@ -39,6 +40,7 @@ func cmdCoreAPI(args []string) {
 	addr := fs.String("addr", ":8444", "listen address (bind to Core's overlay IP in production)")
 	tlsCert := fs.String("tls-cert", "", "TLS certificate PEM (serve HTTPS; recommended even mesh-only)")
 	tlsKey := fs.String("tls-key", "", "TLS private key PEM (with -tls-cert)")
+	acme := autotls.RegisterFlags(fs, "/var/lib/harbor/acme") // auto-TLS via Let's Encrypt (DNS-01)
 	hostCert := fs.String("host-cert", "", "Core's own Nebula host cert PEM; verified at boot to carry group:control-plane (recommended)")
 	lf := addLogFlags(fs)
 	_ = fs.Parse(args)
@@ -109,7 +111,10 @@ func cmdCoreAPI(args []string) {
 		defer cancel()
 		_ = srv.Shutdown(sc)
 	}()
-	log.Info("core-api listening", "addr", *addr, "scheme", httpserve.Scheme(*tlsCert, *tlsKey), "access", "mesh-only", "pool", pool.String(), "version", version)
+	if err := acme.Apply(ctx, srv); err != nil {
+		fatalf("core-api: auto-TLS: %v", err)
+	}
+	log.Info("core-api listening", "addr", *addr, "scheme", httpserve.SchemeFor(srv, *tlsCert, *tlsKey), "access", "mesh-only", "pool", pool.String(), "version", version)
 	if err := httpserve.Serve(srv, *tlsCert, *tlsKey); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		fatalf("core-api: %v", err)
 	}
@@ -134,9 +139,12 @@ func cmdAdminAPI(args []string) {
 	clockSkew := fs.Int("clock-skew-ms", 5000, "clock-skew health threshold (ms)")
 	tlsCert := fs.String("tls-cert", "", "TLS certificate PEM (serve HTTPS; recommended even mesh-only — Secure cookies, HTTP/2)")
 	tlsKey := fs.String("tls-key", "", "TLS private key PEM (with -tls-cert)")
+	acme := autotls.RegisterFlags(fs, "/var/lib/harbor/acme") // auto-TLS via Let's Encrypt (DNS-01)
 	lf := addLogFlags(fs)
 	_ = fs.Parse(args)
-	tlsOn := *tlsCert != "" && *tlsKey != ""
+	// TLS terminates in-process via either a static cert/key pair OR auto-TLS (ACME) — both
+	// mean session/CSRF cookies must be Secure (and both satisfy the production guard below).
+	tlsOn := (*tlsCert != "" && *tlsKey != "") || acme.Enabled()
 	log := lf.setup()
 
 	// Issuance mode: when the CA/signing config is supplied, build the full
@@ -181,7 +189,7 @@ func cmdAdminAPI(args []string) {
 			fatalf("admin-api: -dev-auth must never be enabled in production (-environment=production)")
 		}
 		if !*af.secure {
-			fatalf("admin-api: -environment=production requires Secure cookies; supply -tls-cert/-tls-key, or set -auth-secure (only behind a TLS-terminating proxy)")
+			fatalf("admin-api: -environment=production requires Secure cookies; serve TLS in-process (-acme-domain or -tls-cert/-tls-key), or set -auth-secure (only behind a TLS-terminating proxy)")
 		}
 	}
 	sessionIdP, authHandler, csrfWrap, authCleanup := buildAdminAuth(ctx, af, *addr, s.DB)
@@ -243,7 +251,10 @@ func cmdAdminAPI(args []string) {
 		defer cancel()
 		_ = srv.Shutdown(sc)
 	}()
-	log.Info("admin-api listening", "addr", *addr, "scheme", httpserve.Scheme(*tlsCert, *tlsKey), "access", "mesh-only", "version", version)
+	if err := acme.Apply(ctx, srv); err != nil {
+		fatalf("admin-api: auto-TLS: %v", err)
+	}
+	log.Info("admin-api listening", "addr", *addr, "scheme", httpserve.SchemeFor(srv, *tlsCert, *tlsKey), "access", "mesh-only", "version", version)
 	if err := httpserve.Serve(srv, *tlsCert, *tlsKey); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		fatalf("admin-api: %v", err)
 	}
