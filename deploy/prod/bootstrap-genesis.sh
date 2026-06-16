@@ -413,8 +413,9 @@ fi
 # 0600/0644 files over ssh stdin (never on argv), mirroring the Cloudflare token. Set:
 #   SAML_METADATA_URL   (or SAML_METADATA_FILE)  — Entra App Federation Metadata
 #   SAML_SP_KEY_FILE  +  SAML_SP_CERT_FILE        — the STABLE SP signing keypair (local PEM paths)
-#   SAML_ROLE_MAP                                 — e.g. '<entra-admin-group-guid>=admin;<ops-guid>=operator'
+#   SAML_ROLE_MAP                                 — e.g. '<entra-admin-group-guid>=admin;<ops-guid>=operator' (';' between groups)
 #   SAML_ENTITY_ID      (optional)                — SP entity id (defaults to the SP metadata URL)
+#   SAML_GROUPS_ATTR    (optional)                — IdP group-claim name (defaults to the Entra claim URI)
 IDP_FLAGS="-mock-idp -mock-idp-addr $HARBOR_OVERLAY:$MOCK_IDP_PORT -environment development"
 if [[ -n "${SAML_METADATA_URL:-}" || -n "${SAML_METADATA_FILE:-}" ]]; then
   echo "==> [harbor] wire the console to real Entra SAML (production posture)"
@@ -437,6 +438,11 @@ if [[ -n "${SAML_METADATA_URL:-}" || -n "${SAML_METADATA_FILE:-}" ]]; then
     IDP_FLAGS="$IDP_FLAGS -saml-idp-metadata-file /home/$SSH_USER/ncp/saml/idp-metadata.xml"
   fi
   [[ -n "${SAML_ENTITY_ID:-}" ]] && IDP_FLAGS="$IDP_FLAGS -saml-entity-id '$SAML_ENTITY_ID'"
+  # Entra emits the group claim under its long URI name, but harbor's -saml-groups-attr defaults to
+  # "groups" — mismatch => NO group matches the role-map => every SSO user lands as viewer. Default
+  # to the Entra claim name (override SAML_GROUPS_ATTR for a different IdP or a renamed claim).
+  SAML_GROUPS_ATTR="${SAML_GROUPS_ATTR:-http://schemas.microsoft.com/ws/2008/06/identity/claims/groups}"
+  IDP_FLAGS="$IDP_FLAGS -saml-groups-attr '$SAML_GROUPS_ATTR'"
   # The SP advertises ACS/metadata/entity-id derived from base-url ($ADMIN_URL); print the EXACT
   # values (incl. the :$ADMIN_PORT port) the operator must register in the Entra Enterprise App so
   # they can't drift. Entity ID is the -saml-entity-id override if set, else the SP metadata URL.
