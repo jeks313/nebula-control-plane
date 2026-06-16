@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -128,6 +129,7 @@ func Enroll(ctx context.Context, p Params) (Result, error) {
 			RequestedName: p.RequestedName, RequestedGroups: p.RequestedGroups,
 		}
 		req.Client.SupportedProtocolVersions = []int{wire.ProtocolVersion}
+		req.Client.OS, req.Client.Arch = runtime.GOOS, runtime.GOARCH // per-arch release selection
 		payload, _ := json.Marshal(req)
 		env, err := jws.SignBackendES256(kp, jws.Header{Typ: wire.TypEnrollRequest, Ver: 1, Kid: pubkeyHash}, payload)
 		if err != nil {

@@ -21,7 +21,7 @@ import (
 
 func cmdPilot(args []string) {
 	if len(args) < 1 {
-		fatalf("pilot: want add|list|release|status|abort")
+		fatalf("pilot: want add|add-artifact|list|release|status|abort")
 	}
 	sub := args[0]
 	fs := flag.NewFlagSet("pilot "+sub, flag.ExitOnError)
@@ -31,6 +31,8 @@ func cmdPilot(args []string) {
 	file := fs.String("file", "", "local binary to hash for the sha256, instead of -sha256 (add); Harbor still does not host it")
 	url := fs.String("url", "", "artifact download URL the pilot fetches; a {version} token is substituted (add)")
 	note := fs.String("note", "", "optional note recorded with the release (add)")
+	osFlag := fs.String("os", "", "GOOS the artifact is for, e.g. linux|darwin (add/add-artifact); empty -> linux")
+	archFlag := fs.String("arch", "", "GOARCH the artifact is for, e.g. amd64|arm64 (add/add-artifact); empty -> amd64")
 	skipURLCheck := fs.Bool("skip-url-check", false, "skip the best-effort reachability HEAD on -url at add time (air-gapped admin host)")
 	gen := fs.Int("gen", 0, "generation to release (release)")
 	canary := fs.Int("canary", 1, "canary wave size (release)")
@@ -53,12 +55,36 @@ func cmdPilot(args []string) {
 		if err != nil {
 			fatalf("pilot add: %v", err)
 		}
-		r, err := reg.Add(ctx, *version, rsha, rurl, *note)
+		r, err := reg.Add(ctx, *version, *osFlag, *archFlag, rsha, rurl, *note)
 		if err != nil {
 			fatalf("pilot add: %v", err)
 		}
-		fmt.Printf("registered pilot %s as generation %d (sha %s)\n", r.Version, r.Gen, r.SHA256[:12])
-		fmt.Printf("  release it with: harbor pilot release -gen %d\n", r.Gen)
+		fmt.Printf("registered pilot %s (%s/%s) as generation %d (sha %s)\n", r.Version, r.GOOS, r.GOARCH, r.Gen, r.SHA256[:12])
+		fmt.Printf("  add other platforms: harbor pilot add-artifact -gen %d -os <goos> -arch <goarch> -url ... -sha256 ...\n", r.Gen)
+		fmt.Printf("  release it with:     harbor pilot release -gen %d\n", r.Gen)
+		if !*skipURLCheck {
+			reportReleaseURL(ctx, *file, rurl)
+		}
+	case "add-artifact":
+		if *gen == 0 {
+			fatalf("pilot add-artifact: -gen is required (see `harbor pilot list`)")
+		}
+		if *osFlag == "" || *archFlag == "" {
+			fatalf("pilot add-artifact: -os and -arch are required")
+		}
+		rel, ok := reg.Get(ctx, *gen)
+		if !ok {
+			fatalf("pilot add-artifact: no such generation %d (see `harbor pilot list`)", *gen)
+		}
+		rsha, rurl, err := resolveReleaseArgs(*file, rel.Version, *sha, *url)
+		if err != nil {
+			fatalf("pilot add-artifact: %v", err)
+		}
+		a, err := reg.AddArtifact(ctx, *gen, *osFlag, *archFlag, rsha, rurl)
+		if err != nil {
+			fatalf("pilot add-artifact: %v", err)
+		}
+		fmt.Printf("registered pilot %s %s/%s for generation %d (sha %s)\n", rel.Version, a.GOOS, a.GOARCH, *gen, a.SHA256[:12])
 		if !*skipURLCheck {
 			reportReleaseURL(ctx, *file, rurl)
 		}
@@ -72,13 +98,17 @@ func cmdPilot(args []string) {
 			return
 		}
 		cur := eng.CurrentPilotGen(ctx)
-		fmt.Printf("%-4s %-12s %-11s %-14s %s\n", "GEN", "VERSION", "STATUS", "SHA256", "URL")
+		fmt.Printf("%-4s %-12s %-11s %-13s %-14s %s\n", "GEN", "VERSION", "STATUS", "PLATFORM", "SHA256", "URL")
 		for _, r := range rows {
 			status := r.Status
 			if int(r.Gen) == cur {
 				status = pilotrelease.StatusCurrent
 			}
-			fmt.Printf("%-4d %-12s %-11s %-14s %s\n", r.Gen, r.Version, status, r.SHA256[:12], r.URL)
+			fmt.Printf("%-4d %-12s %-11s %-13s %-14s %s\n", r.Gen, r.Version, status, r.GOOS+"/"+r.GOARCH, r.SHA256[:12], r.URL)
+			arts, _ := reg.Artifacts(ctx, int(r.Gen)) // per-arch artifacts, indented under their generation
+			for _, a := range arts {
+				fmt.Printf("%-4s %-12s %-11s %-13s %-14s %s\n", "", "", "", a.GOOS+"/"+a.GOARCH, a.SHA256[:12], a.URL)
+			}
 		}
 	case "release":
 		if *gen == 0 {

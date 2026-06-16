@@ -79,6 +79,13 @@ type Enrollment struct {
 	AttestPrincipal string `gorm:"column:attest_principal"` // AWS ARN / Azure principal / GCP SA
 	AttestRegion    string `gorm:"column:attest_region"`
 	VerifiedAt      int64  `gorm:"column:verified_at"`
+
+	// Host platform (per-arch release URL support): the pilot self-reports runtime.GOOS/GOARCH
+	// at enrollment (advisory — NOT attested, unlike the cloud evidence above), and the heartbeat
+	// refreshes it. Core stamps the host's arch-specific binary from it. Empty = unknown -> the
+	// linux/amd64 default at release lookup.
+	GOOS   string `gorm:"column:goos"`
+	GOARCH string `gorm:"column:goarch"`
 }
 
 func (Enrollment) TableName() string { return "enrollments" }
@@ -136,15 +143,18 @@ type Config struct {
 	// newly enrolling host (ADR 0003 Phase 1c) — the latest settled release from the
 	// registry — overriding the static NebulaVersion fields above. So a new host joins
 	// on the current version rather than a stale flag value; later staged updates
-	// converge via the renew/heartbeat path. nil -> the static fields.
-	NebulaReleaseFor func(context.Context) (version, sha256, url string)
+	// converge via the renew/heartbeat path. nil -> the static fields. goos/goarch are
+	// the host's reported platform (from the enroll request), so the FIRST bundle already
+	// carries the host's arch-specific artifact (empty -> the linux/amd64 default).
+	NebulaReleaseFor func(ctx context.Context, goos, goarch string) (version, sha256, url string)
 	// PilotVersion / PilotSHA256 / PilotURL distribute the PILOT binary (ADR 0003 Phase
 	// 3c), stamped into every issued bundle; PilotReleaseFor (if set) overrides them with
-	// the current fleet-desired pilot release for a newly enrolling host.
+	// the current fleet-desired pilot release for a newly enrolling host (per-arch, like
+	// NebulaReleaseFor).
 	PilotVersion    string
 	PilotSHA256     string
 	PilotURL        string
-	PilotReleaseFor func(context.Context) (version, sha256, url string)
+	PilotReleaseFor func(ctx context.Context, goos, goarch string) (version, sha256, url string)
 	// LighthouseSource, if set, is consulted at bundle-build time so registry
 	// changes (6.8) propagate live; overrides Lighthouses, with a fallback to it
 	// on error (a transient registry read must not sever discovery).
@@ -294,7 +304,7 @@ func (c *Consumer) Process(ctx context.Context, cand queue.Candidate) (Result, e
 	if err != nil {
 		return Result{}, err
 	}
-	bundleJWS, err := c.buildBundle(ctx, deviceName, ip.String(), jk.GroupList(), certPEM, notAfter)
+	bundleJWS, err := c.buildBundle(ctx, deviceName, ip.String(), jk.GroupList(), certPEM, notAfter, req.Client.OS, req.Client.Arch)
 	if err != nil {
 		return Result{}, err
 	}
@@ -374,7 +384,7 @@ func (c *Consumer) processAttested(ctx context.Context, cand queue.Candidate, re
 	if err != nil {
 		return Result{}, err
 	}
-	bundleJWS, err := c.buildBundle(ctx, deviceName, ip.String(), groupsSlice, certPEM, notAfter)
+	bundleJWS, err := c.buildBundle(ctx, deviceName, ip.String(), groupsSlice, certPEM, notAfter, req.Client.OS, req.Client.Arch)
 	if err != nil {
 		return Result{}, err
 	}
@@ -446,7 +456,7 @@ func (c *Consumer) Approve(ctx context.Context, enrollmentID, approver string) (
 		return Result{}, ErrNotPending // another mutator decided it first; cert undelivered
 	}
 	// We won the claim — deliver the bundle (secret hash preserved from the pending row).
-	bundleJWS, err := c.buildBundle(ctx, e.DeviceName, ip.String(), groups, certPEM, notAfter)
+	bundleJWS, err := c.buildBundle(ctx, e.DeviceName, ip.String(), groups, certPEM, notAfter, e.GOOS, e.GOARCH)
 	if err != nil {
 		return Result{}, err
 	}
@@ -604,17 +614,17 @@ func (c *Consumer) issue(ctx context.Context, actor, deviceName string, pubBytes
 
 // buildBundle assembles + signs the config bundle (3.6). Returns nil if no
 // config-signing backend is configured.
-func (c *Consumer) buildBundle(ctx context.Context, deviceName, ip string, groups []string, certPEM []byte, notAfter time.Time) ([]byte, error) {
+func (c *Consumer) buildBundle(ctx context.Context, deviceName, ip string, groups []string, certPEM []byte, notAfter time.Time, goos, goarch string) ([]byte, error) {
 	if c.cfg.ConfigBackend == nil {
 		return nil, nil
 	}
 	nebVer, nebSHA, nebURL := c.cfg.NebulaVersion, c.cfg.NebulaSHA256, c.cfg.NebulaURL
 	if c.cfg.NebulaReleaseFor != nil {
-		nebVer, nebSHA, nebURL = c.cfg.NebulaReleaseFor(ctx)
+		nebVer, nebSHA, nebURL = c.cfg.NebulaReleaseFor(ctx, goos, goarch)
 	}
 	pilotVer, pilotSHA, pilotURL := c.cfg.PilotVersion, c.cfg.PilotSHA256, c.cfg.PilotURL
 	if c.cfg.PilotReleaseFor != nil {
-		pilotVer, pilotSHA, pilotURL = c.cfg.PilotReleaseFor(ctx)
+		pilotVer, pilotSHA, pilotURL = c.cfg.PilotReleaseFor(ctx, goos, goarch)
 	}
 	b := bundle.Bundle{
 		BundleVersion: 1,
@@ -712,6 +722,8 @@ func (c *Consumer) record(ctx context.Context, enrollmentID string, req wire.Enr
 		AttestPrincipal: ev.principal,
 		AttestRegion:    ev.region,
 		VerifiedAt:      ev.verifiedAt,
+		GOOS:            req.Client.OS,
+		GOARCH:          req.Client.Arch,
 	}
 	if status != StatusPending {
 		e.DecidedAt = c.now().UnixNano()
