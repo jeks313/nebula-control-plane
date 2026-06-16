@@ -54,15 +54,27 @@ func writeField(h hash.Hash, b []byte) {
 	_, _ = h.Write(b)
 }
 
-// AppendAudit adds a row to the chain and returns it. Appends are serialized
-// (single logical writer) so the prev-hash link is always correct; for HA Harbor
-// with multiple Core writers this needs a DB advisory lock (tracked for M9.5).
+// advisoryClassAudit namespaces the audit chain's pg_advisory_xact_lock (two-int
+// form: classid, objid) so it can't collide with other advisory-lock users.
+const advisoryClassAudit = 1
+
+// AppendAudit adds a row to the chain and returns it. The read-head→write-link must
+// be serialized so the prev-hash link is always correct. The process mutex covers
+// one process; for HA Harbor (≥2 Core writers on one Postgres) a transaction-scoped
+// advisory lock makes the whole fleet take turns. SQLite needs neither beyond its
+// single writer (SetMaxOpenConns(1)), which already serializes appends.
 func (s *Store) AppendAudit(ctx context.Context, actor, action, target, details string) (Audit, error) {
 	s.auditMu.Lock()
 	defer s.auditMu.Unlock()
 
 	var e Audit
 	err := s.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// Cross-process serialization (Postgres only; auto-released at commit/rollback).
+		if IsPostgres(tx) {
+			if err := tx.Exec("SELECT pg_advisory_xact_lock(?, ?)", advisoryClassAudit, 0).Error; err != nil {
+				return err
+			}
+		}
 		var last Audit
 		seq := int64(1)
 		prev := genesisPrev

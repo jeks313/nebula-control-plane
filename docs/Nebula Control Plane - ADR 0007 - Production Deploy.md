@@ -155,11 +155,28 @@ Ordered so each phase de-risks the next; KMS + Aurora are the foundation.
   custody a **stable SP keypair**; add OIDC client-secret-from-file (SAML already uses key
   files); schedule `SessionStore.GC`; sessions persist via Aurora (Phase 1). Pin a
   `-role-map` from the Entra admin group to `admin` and verify before cutover.
-- **Phase 4 — HA.** ≥2 Cores across AZs (ASG or Fargate `desired_count≥2`, each its own
-  mesh node in `group:control-plane`); land the four shared-state fixes — audit advisory
-  lock (`audit.go:64`), pluggable shared **nonce replay** store, shared **signer breaker**,
-  rollout `Evaluate` under `SELECT … FOR UPDATE` (`rollout.go:229`); raise gateways to ≥2
-  and register ≥3 lighthouses across AZs.
+- **Phase 4 — HA.** ✅ **The four shared-state code fixes are DONE** (Core-side; the
+  credential-less gateway is untouched and gains no DB access):
+  - **Audit advisory lock** — `store.AppendAudit` takes `pg_advisory_xact_lock` (Postgres)
+    so the hash-chain read-head→write-link serializes across Cores; SQLite's single writer
+    already does.
+  - **Shared nonce replay** — `replay.Observer` interface + DB-backed `SQLStore`
+    (`nonce_replays`, atomic `INSERT … ON CONFLICT`); a transient store error retries
+    rather than false-rejecting. Wired Core-side in `buildConsumer`.
+  - **Shared signer breaker** — `signer.Breaker` interface + DB-backed `SQLBreaker`
+    (`signer_breaker` latch + `signer_issuance` events, advisory-locked count→latch) so the
+    cert/hour ceiling is fleet-wide and a trip halts every Core; fails closed. Lane `ca`
+    shared by core-api renewal + the enroll consumer.
+  - **Rollout `Evaluate` row-lock** — `evaluateLane` runs in one tx with the rollout row
+    `SELECT … FOR UPDATE` (Postgres), audits deferred past commit; `AbortLane`/`Start` take
+    the same lock / a lane advisory lock so operator paths can't race a concurrent evaluate.
+  - Postgres-only primitives are guarded by `db.Name()=="postgres"`; SQLite stays correct via
+    its single-writer connection. Migrations `000018`/`000019` (up+down verified).
+  **Remaining (terraform/deploy):** ≥2 Cores across AZs (ASG / Fargate `desired_count≥2`,
+  each its own `group:control-plane` mesh node) + ≥3 lighthouses across AZs. ⚠ Scaling
+  gateways to ≥2 behind the single internal NLB needs its own design — each task has its own
+  local queue, so claim/ack could land on different tasks; register each gateway separately
+  or front per-task, don't just bump `desired_count`.
 - **Phase 5 — Edge/TLS (REVISED: end-to-end TLS, no ALB/ACM/AWS-WAF).** Encrypt every hop
   including load-balancer→application: each component **terminates its own TLS** with a
   **public Let's Encrypt cert it obtains via ACME DNS-01 (Cloudflare)** — no plaintext

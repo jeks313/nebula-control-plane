@@ -64,12 +64,36 @@ var (
 // ErrCircuitOpen is returned when the signing circuit breaker has halted issuance.
 var ErrCircuitOpen = errors.New("signer: signing halted by circuit breaker")
 
+// LaneCA is the breaker lane for CA leaf issuance — a single fleet-wide ceiling shared
+// by every Core process and every issuing path (enrollment + renewal).
+const LaneCA = "ca"
+
+// Breaker is the signing circuit breaker. Two impls live in this package: the in-process
+// breaker (default; a single Core) and SQLBreaker (a shared DB table) so an HA Harbor
+// enforces the rate ceiling fleet-wide and a trip halts every Core. Methods are
+// unexported so only this package's impls satisfy it; external callers wire one via
+// Config.Breaker (e.g. NewSQLBreaker).
+type Breaker interface {
+	// acquire consumes one unit. allowed: may proceed. justTripped: true only on the
+	// call that flips the breaker open (so the alarm fires once, fleet-wide). A non-nil
+	// err is an infrastructure failure (shared store unreachable) — the signer fails
+	// closed (halts) since it cannot confirm it is under the ceiling.
+	acquire(ctx context.Context) (allowed, justTripped bool, err error)
+	// reset re-arms the breaker (an operator action).
+	reset(ctx context.Context) error
+	// limit returns the configured ceiling (for the alarm/audit detail).
+	limit() int
+}
+
 // Config builds a Signer.
 type Config struct {
 	CACertPEM       []byte
 	Backend         Backend
 	Policy          IssuePolicy
 	MaxCertsPerHour int
+	// Breaker overrides the circuit breaker. When nil, an in-process breaker bounded by
+	// MaxCertsPerHour is used (a single Core). Set a SQLBreaker for HA (fleet-wide).
+	Breaker Breaker
 	// Audit records every outcome. Required.
 	Audit func(ctx context.Context, actor, action, target, details string) error
 	// OnAlarm fires once when the breaker trips (optional; wire to paging).
@@ -83,7 +107,7 @@ type Signer struct {
 	caCert  cert.Certificate
 	backend Backend
 	policy  IssuePolicy
-	breaker *breaker
+	breaker Breaker
 	audit   func(ctx context.Context, actor, action, target, details string) error
 	onAlarm func(count int)
 	now     func() time.Time
@@ -120,11 +144,15 @@ func New(cfg Config) (*Signer, error) {
 	if now == nil {
 		now = time.Now
 	}
+	br := cfg.Breaker
+	if br == nil {
+		br = newBreaker(cfg.MaxCertsPerHour, time.Hour, now)
+	}
 	return &Signer{
 		caCert:  ca,
 		backend: cfg.Backend,
 		policy:  cfg.Policy,
-		breaker: newBreaker(cfg.MaxCertsPerHour, time.Hour, now),
+		breaker: br,
 		audit:   cfg.Audit,
 		onAlarm: cfg.OnAlarm,
 		now:     now,
@@ -142,14 +170,19 @@ func (s *Signer) Issue(ctx context.Context, actor string, t Template) (cert.Cert
 	}
 
 	// 2. Circuit breaker (2.5): halt + alarm + audit on breach.
-	allowed, justTripped := s.breaker.acquire()
+	allowed, justTripped, berr := s.breaker.acquire(ctx)
+	if berr != nil {
+		// Fail closed: we couldn't confirm we're under the ceiling, so don't sign.
+		_ = s.audit(ctx, actor, "issue-cert-error", t.Name, berr.Error())
+		return nil, nil, fmt.Errorf("signer: circuit breaker: %w", berr)
+	}
 	if !allowed {
 		if justTripped {
 			if s.onAlarm != nil {
-				s.onAlarm(s.breaker.max)
+				s.onAlarm(s.breaker.limit())
 			}
 			_ = s.audit(ctx, "system", "signing-circuit-tripped", t.Name,
-				fmt.Sprintf(`{"limit_per_hour":%d}`, s.breaker.max))
+				fmt.Sprintf(`{"limit_per_hour":%d}`, s.breaker.limit()))
 		}
 		_ = s.audit(ctx, actor, "issue-cert-rejected", t.Name, ErrCircuitOpen.Error())
 		return nil, nil, ErrCircuitOpen
@@ -192,7 +225,7 @@ func (s *Signer) Issue(ctx context.Context, actor string, t Template) (cert.Cert
 
 // ResetBreaker clears a tripped circuit breaker (an admin action; should itself
 // be dual-controlled when wired into the API, M2.11).
-func (s *Signer) ResetBreaker() { s.breaker.reset() }
+func (s *Signer) ResetBreaker(ctx context.Context) error { return s.breaker.reset(ctx) }
 
 func (s *Signer) validate(t Template) error {
 	if t.Name == "" {

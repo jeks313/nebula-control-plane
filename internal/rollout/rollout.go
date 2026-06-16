@@ -18,11 +18,25 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"time"
 
 	"github.com/jeks313/nebula-control-plane/internal/wire"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
+
+// advisoryClassRollout namespaces the rollout engine's pg_advisory_xact_lock (classid) so
+// it can't collide with other advisory-lock users (audit chain, signer breaker). objid is
+// the lane, so Start on one lane doesn't serialize against another.
+const advisoryClassRollout = 3
+
+// laneAdvisoryKey hashes a lane to an int32 objid for pg_advisory_xact_lock(classid, objid).
+func laneAdvisoryKey(lane string) int32 {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(lane))
+	return int32(h.Sum32())
+}
 
 // Rollout states.
 const (
@@ -182,11 +196,6 @@ func (e *Engine) Start(ctx context.Context, cfg StartConfig) (Rollout, error) {
 	if lane == "" {
 		lane = LanePolicy
 	}
-	if _, ok, err := e.activeCurrent(ctx, lane); err != nil {
-		return Rollout{}, err
-	} else if ok {
-		return Rollout{}, ErrActiveExists
-	}
 	canary := cfg.CanarySize
 	if canary < 1 {
 		canary = 1
@@ -203,6 +212,19 @@ func (e *Engine) Start(ctx context.Context, cfg StartConfig) (Rollout, error) {
 		WaveStartedAt: now, CreatedAt: now, UpdatedAt: now,
 	}
 	err := e.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// Serialize concurrent Starts on this lane (Postgres advisory lock; SQLite's single
+		// writer already serializes) and re-check "no active rollout" INSIDE the lock, so two
+		// Cores can't both create a second active rollout on the same lane.
+		if e.postgres() {
+			if lerr := tx.Exec("SELECT pg_advisory_xact_lock(?, ?)", advisoryClassRollout, laneAdvisoryKey(lane)).Error; lerr != nil {
+				return lerr
+			}
+		}
+		if _, ok, cerr := e.lockedActiveCurrent(tx, lane); cerr != nil {
+			return cerr
+		} else if ok {
+			return ErrActiveExists
+		}
 		if err := tx.Create(&r).Error; err != nil {
 			return err
 		}
@@ -222,6 +244,9 @@ func (e *Engine) Start(ctx context.Context, cfg StartConfig) (Rollout, error) {
 		return nil
 	})
 	if err != nil {
+		if errors.Is(err, ErrActiveExists) {
+			return Rollout{}, ErrActiveExists // surface the sentinel bare (callers errors.Is it)
+		}
 		return Rollout{}, fmt.Errorf("rollout: start: %w", err)
 	}
 	e.recordAudit(ctx, cfg.Actor, "rollout-start", fmt.Sprintf("rollout#%d", r.ID),
@@ -244,57 +269,84 @@ func (e *Engine) Evaluate(ctx context.Context) (changed bool, err error) {
 	return changed, nil
 }
 
-// evaluateLane advances the active rollout (if any) on a single lane.
+// auditEvt is a deferred audit record. Rollout state changes are decided inside a
+// row-locked transaction, but the audit append is its OWN transaction (with its own
+// advisory lock), so we collect events and emit them AFTER the rollout tx commits —
+// nesting AppendAudit inside the rollout tx would deadlock SQLite's single connection.
+type auditEvt struct{ actor, action, target, details string }
+
+// postgres reports whether the engine's DB is Postgres (gates SELECT … FOR UPDATE; on
+// SQLite the single-writer connection already serializes Evaluate, and FOR UPDATE is
+// not valid SQLite syntax).
+func (e *Engine) postgres() bool { return e.db.Name() == "postgres" }
+
+// evaluateLane advances the active rollout (if any) on a single lane. The whole
+// decision runs in one transaction with the rollout row locked FOR UPDATE (Postgres),
+// so two concurrent Cores can't both read active_wave=N and both advance it: the second
+// blocks on the lock, then re-reads the now-advanced rollout and re-decides idempotently.
 func (e *Engine) evaluateLane(ctx context.Context, lane string) (changed bool, err error) {
-	r, ok, err := e.activeCurrent(ctx, lane)
-	if err != nil || !ok {
-		return false, err
-	}
-	var hosts []Host
-	if err := e.db.WithContext(ctx).Where("rollout_id = ? AND wave = ?", r.ID, r.ActiveWave).Find(&hosts).Error; err != nil {
-		return false, err
-	}
-	now := e.now().UTC().UnixNano()
-	elapsed := now - r.WaveStartedAt
-
-	var converged, failed, missing int
-	var trigger string
-	for _, h := range hosts {
-		var beat hb
-		hbErr := e.db.WithContext(ctx).Where("overlay_ip = ?", h.OverlayIP).First(&beat).Error
-		switch {
-		case hbErr == nil && healthBad[beat.Health]:
-			failed++
-			if trigger == "" {
-				trigger = h.OverlayIP + " reported health=" + beat.Health
-			}
-		case hbErr == nil && appliedFor(beat, r.Lane) == r.TargetVersion && beat.LastSeen >= now-r.MissingAfter:
-			converged++
-		case e.isMissing(beat, hbErr, now, r):
-			missing++
-			if trigger == "" {
-				trigger = h.OverlayIP + " went silent (no healthy heartbeat on the target version)"
-			}
-		default:
-			// still applying / observing
+	var audits []auditEvt
+	txErr := e.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		r, ok, lerr := e.lockedActiveCurrent(tx, lane)
+		if lerr != nil || !ok {
+			return lerr
 		}
-	}
+		var hosts []Host
+		if herr := tx.Where("rollout_id = ? AND wave = ?", r.ID, r.ActiveWave).Find(&hosts).Error; herr != nil {
+			return herr
+		}
+		now := e.now().UTC().UnixNano()
+		elapsed := now - r.WaveStartedAt
 
-	need := r.MinHealthy
-	if need <= 0 || need > len(hosts) {
-		need = len(hosts)
-	}
+		var converged, failed, missing int
+		var trigger string
+		for _, h := range hosts {
+			var beat hb
+			hbErr := tx.Where("overlay_ip = ?", h.OverlayIP).First(&beat).Error
+			switch {
+			case hbErr == nil && healthBad[beat.Health]:
+				failed++
+				if trigger == "" {
+					trigger = h.OverlayIP + " reported health=" + beat.Health
+				}
+			case hbErr == nil && appliedFor(beat, r.Lane) == r.TargetVersion && beat.LastSeen >= now-r.MissingAfter:
+				converged++
+			case e.isMissing(beat, hbErr, now, r):
+				missing++
+				if trigger == "" {
+					trigger = h.OverlayIP + " went silent (no healthy heartbeat on the target version)"
+				}
+			default:
+				// still applying / observing
+			}
+		}
 
-	switch {
-	case failed > 0 || missing > 0:
-		return true, e.rollback(ctx, r, trigger)
-	case converged >= need:
-		return true, e.advance(ctx, r, hosts)
-	case elapsed >= r.ObserveWindow:
-		return true, e.rollback(ctx, r, fmt.Sprintf("wave %d did not converge within the observe window (%d/%d healthy)", r.ActiveWave, converged, need))
-	default:
-		return false, nil
+		need := r.MinHealthy
+		if need <= 0 || need > len(hosts) {
+			need = len(hosts)
+		}
+
+		var aerr error
+		switch {
+		case failed > 0 || missing > 0:
+			changed = true
+			audits, aerr = e.rollbackTx(tx, r, now, trigger)
+		case converged >= need:
+			changed = true
+			audits, aerr = e.advanceTx(tx, r, now)
+		case elapsed >= r.ObserveWindow:
+			changed = true
+			audits, aerr = e.rollbackTx(tx, r, now, fmt.Sprintf("wave %d did not converge within the observe window (%d/%d healthy)", r.ActiveWave, converged, need))
+		}
+		return aerr
+	})
+	if txErr != nil {
+		return false, txErr
 	}
+	for _, a := range audits {
+		e.recordAudit(ctx, a.actor, a.action, a.target, a.details)
+	}
+	return changed, nil
 }
 
 // isMissing reports whether a wave host should count as down: it has no
@@ -313,58 +365,53 @@ func (e *Engine) isMissing(beat hb, hbErr error, now int64, r Rollout) bool {
 	return beat.LastSeen < now-r.MissingAfter
 }
 
-func (e *Engine) advance(ctx context.Context, r Rollout, waveHosts []Host) error {
-	now := e.now().UTC().UnixNano()
-	if err := e.db.WithContext(ctx).Model(&Host{}).
+// advanceTx widens the converged wave to the next (or completes the rollout), all
+// within the caller's row-locked transaction. It returns the audit events to emit
+// after commit (see auditEvt).
+func (e *Engine) advanceTx(tx *gorm.DB, r Rollout, now int64) ([]auditEvt, error) {
+	if err := tx.Model(&Host{}).
 		Where("rollout_id = ? AND wave = ?", r.ID, r.ActiveWave).
 		Updates(map[string]any{"status": HostConverged, "updated_at": now}).Error; err != nil {
-		return err
+		return nil, err
 	}
 	// More waves?
 	var remaining int64
-	if err := e.db.WithContext(ctx).Model(&Host{}).
+	if err := tx.Model(&Host{}).
 		Where("rollout_id = ? AND wave > ?", r.ID, r.ActiveWave).Count(&remaining).Error; err != nil {
-		return err
+		return nil, err
 	}
 	if remaining == 0 {
-		if err := e.update(ctx, r.ID, map[string]any{"state": StateCompleted, "updated_at": now,
-			"note": "all waves converged"}); err != nil {
-			return err
+		if err := tx.Model(&Rollout{}).Where("id = ?", r.ID).Updates(map[string]any{
+			"state": StateCompleted, "updated_at": now, "note": "all waves converged"}).Error; err != nil {
+			return nil, err
 		}
-		e.recordAudit(ctx, "system", "rollout-completed", fmt.Sprintf("rollout#%d", r.ID),
-			fmt.Sprintf("target=%d", r.TargetVersion))
-		return nil
+		return []auditEvt{{"system", "rollout-completed", fmt.Sprintf("rollout#%d", r.ID),
+			fmt.Sprintf("target=%d", r.TargetVersion)}}, nil
 	}
-	if err := e.update(ctx, r.ID, map[string]any{
+	if err := tx.Model(&Rollout{}).Where("id = ?", r.ID).Updates(map[string]any{
 		"state": StateWidening, "active_wave": r.ActiveWave + 1, "wave_started_at": now, "updated_at": now,
-	}); err != nil {
-		return err
+	}).Error; err != nil {
+		return nil, err
 	}
-	e.recordAudit(ctx, "system", "rollout-advanced", fmt.Sprintf("rollout#%d", r.ID),
-		fmt.Sprintf("wave %d converged -> activating wave %d", r.ActiveWave, r.ActiveWave+1))
-	return nil
+	return []auditEvt{{"system", "rollout-advanced", fmt.Sprintf("rollout#%d", r.ID),
+		fmt.Sprintf("wave %d converged -> activating wave %d", r.ActiveWave, r.ActiveWave+1)}}, nil
 }
 
-func (e *Engine) rollback(ctx context.Context, r Rollout, trigger string) error {
-	now := e.now().UTC().UnixNano()
-	err := e.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// Mark the failing wave's hosts failed; earlier converged waves keep their
-		// status but will be commanded back to prev (CommandFor handles waves <=
-		// active_wave). Freeze: no further widening.
-		if err := tx.Model(&Host{}).Where("rollout_id = ? AND wave = ?", r.ID, r.ActiveWave).
-			Updates(map[string]any{"status": HostFailed, "updated_at": now}).Error; err != nil {
-			return err
-		}
-		return tx.Model(&Rollout{}).Where("id = ?", r.ID).Updates(map[string]any{
-			"state": StateRolledBack, "updated_at": now, "note": "auto-rollback: " + trigger,
-		}).Error
-	})
-	if err != nil {
-		return err
+// rollbackTx marks the failing wave's hosts failed and freezes the rollout, within the
+// caller's row-locked transaction. Earlier converged waves keep their status but will be
+// commanded back to prev (CommandFor handles waves <= active_wave). Returns audit events.
+func (e *Engine) rollbackTx(tx *gorm.DB, r Rollout, now int64, trigger string) ([]auditEvt, error) {
+	if err := tx.Model(&Host{}).Where("rollout_id = ? AND wave = ?", r.ID, r.ActiveWave).
+		Updates(map[string]any{"status": HostFailed, "updated_at": now}).Error; err != nil {
+		return nil, err
 	}
-	e.recordAudit(ctx, "system", "rollout-rolledback", fmt.Sprintf("rollout#%d", r.ID),
-		"auto-rollback (frozen): "+trigger)
-	return nil
+	if err := tx.Model(&Rollout{}).Where("id = ?", r.ID).Updates(map[string]any{
+		"state": StateRolledBack, "updated_at": now, "note": "auto-rollback: " + trigger,
+	}).Error; err != nil {
+		return nil, err
+	}
+	return []auditEvt{{"system", "rollout-rolledback", fmt.Sprintf("rollout#%d", r.ID),
+		"auto-rollback (frozen): " + trigger}}, nil
 }
 
 // CommandFor returns the heartbeat command (if any) to drive a host toward its
@@ -573,19 +620,28 @@ func (e *Engine) Abort(ctx context.Context, actor string) error {
 // AbortLane cancels a lane's active rollout. For the policy lane touched hosts
 // revert to prev; for the blocklist lane the rollout simply freezes (no revert).
 func (e *Engine) AbortLane(ctx context.Context, lane, actor string) error {
-	r, ok, err := e.activeCurrent(ctx, lane)
+	now := e.now().UTC().UnixNano()
+	var rolloutID int64
+	err := e.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// Take the SAME FOR UPDATE row lock evaluateLane uses, so an operator abort and a
+		// concurrent auto-advance on another Core serialize on the rollout row instead of
+		// racing to a last-writer-wins inconsistent state (HA).
+		r, ok, lerr := e.lockedActiveCurrent(tx, lane)
+		if lerr != nil {
+			return lerr
+		}
+		if !ok {
+			return ErrNotActive
+		}
+		rolloutID = r.ID
+		return tx.Model(&Rollout{}).Where("id = ?", r.ID).Updates(map[string]any{
+			"state": StateRolledBack, "updated_at": now, "note": "operator-aborted"}).Error
+	})
 	if err != nil {
 		return err
 	}
-	if !ok {
-		return ErrNotActive
-	}
-	now := e.now().UTC().UnixNano()
-	if err := e.update(ctx, r.ID, map[string]any{"state": StateRolledBack, "updated_at": now,
-		"note": "operator-aborted"}); err != nil {
-		return err
-	}
-	e.recordAudit(ctx, actor, "rollout-aborted", fmt.Sprintf("rollout#%d", r.ID), "operator abort (lane="+lane+")")
+	// Audit after commit (AppendAudit takes its own tx; nesting would deadlock SQLite).
+	e.recordAudit(ctx, actor, "rollout-aborted", fmt.Sprintf("rollout#%d", rolloutID), "operator abort (lane="+lane+")")
 	return nil
 }
 
@@ -603,20 +659,26 @@ func (e *Engine) current(ctx context.Context, lane string) (Rollout, bool, error
 	}
 }
 
-// activeCurrent returns the lane's current rollout only if it is active (canary|widening).
-func (e *Engine) activeCurrent(ctx context.Context, lane string) (Rollout, bool, error) {
-	r, ok, err := e.current(ctx, lane)
-	if err != nil || !ok {
+// lockedActiveCurrent reads the lane's current rollout (returning it only if active) within
+// the given transaction, taking a FOR UPDATE row lock on Postgres so concurrent evaluators /
+// operator mutations serialize on it. tx already carries the request context.
+func (e *Engine) lockedActiveCurrent(tx *gorm.DB, lane string) (Rollout, bool, error) {
+	q := tx
+	if e.postgres() {
+		q = tx.Clauses(clause.Locking{Strength: "UPDATE"})
+	}
+	var r Rollout
+	switch err := q.Where("lane = ?", lane).Order("id DESC").First(&r).Error; {
+	case err == nil:
+		if r.State == StateCanary || r.State == StateWidening {
+			return r, true, nil
+		}
+		return Rollout{}, false, nil
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		return Rollout{}, false, nil
+	default:
 		return Rollout{}, false, err
 	}
-	if r.State == StateCanary || r.State == StateWidening {
-		return r, true, nil
-	}
-	return Rollout{}, false, nil
-}
-
-func (e *Engine) update(ctx context.Context, id int64, fields map[string]any) error {
-	return e.db.WithContext(ctx).Model(&Rollout{}).Where("id = ?", id).Updates(fields).Error
 }
 
 func (e *Engine) markReverted(ctx context.Context, hostID int64) {
