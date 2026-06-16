@@ -150,7 +150,21 @@ Ordered so each phase de-risks the next; KMS + Aurora are the foundation.
     ephemeral storage is encrypted by default.
     `fmt`/`validate` clean; reviewed (0 findings). Operational follow-up: the genesis bootstrap
     runs Core with `-backend kms … -dsn <from the secret>` (ARNs/endpoints are outputs).
-  - Remaining `app/` layers: edge (ALB + ACM + WAF) → artifacts (S3 + CloudFront) → obs.
+  - ✅ **`app/` artifacts layer** — `artifacts.tf`: an opt-in **public-read** S3 bucket
+    (`artifacts_bucket_name`) hosting the **pilot + nebula** data-plane binaries the self-update
+    lanes fetch (ADR 0003). Public-read (NOT CloudFront — operator's choice) is safe because the
+    signed bundle's sha256 is the integrity anchor (the `-pilot-url`/`-nebula-url` flags are
+    explicitly "sha-verified, so the source need not be trusted"), and no-creds reach lets the
+    off-cloud iMac self-update. Objects are RAW executables (both updaters sha256 raw bytes +
+    chmod 0755, no untar); `deploy/prod/artifacts/publish.sh` builds pilot + extracts nebula's raw
+    binary from the GitHub tarball, uploads under `pilot|nebula/<ver>/<name>-<os>-<arch>`, and
+    prints the `harbor … add`/`release` commands. `BucketOwnerEnforced`, versioned, AES256, TLS-
+    only; the public-access-block deliberately allows the public-read policy (the lone public
+    bucket in the stack). Outputs: `artifacts_bucket` + `{version}`-token URL templates. Caveat:
+    the registry stores one URL per generation → a mixed-arch fleet needs a gen/lane per arch
+    (per-arch URL selection is a harbor follow-up). `fmt`/`validate` clean.
+  - Other `app/` layers: **edge** pivoted to per-component ACME/Let's-Encrypt (Phase 5 `acme.tf`,
+    no ALB/ACM/WAF); **obs** landed in Phase 7. So the originally-listed remaining layers are done.
 - **Phase 3 — IdP (Entra SAML).** Configure the existing SAML SP per the **runbook**;
   custody a **stable SP keypair**; add OIDC client-secret-from-file (SAML already uses key
   files); schedule `SessionStore.GC`; sessions persist via Aurora (Phase 1). Pin a
