@@ -73,6 +73,13 @@ func Open(cfg Config) (*Store, error) {
 	return &Store{DB: db}, nil
 }
 
+// IsPostgres reports whether db is backed by Postgres (vs SQLite). It gates the
+// Postgres-only HA coordination primitives (advisory locks, SELECT … FOR UPDATE):
+// on SQLite the single-writer connection (SetMaxOpenConns(1) above) already
+// serializes all writers, so those primitives are unnecessary — and FOR UPDATE
+// isn't valid SQLite syntax, so they must not be emitted there.
+func IsPostgres(db *gorm.DB) bool { return db.Name() == "postgres" }
+
 // Close releases the underlying connection pool.
 func (s *Store) Close() error {
 	sqlDB, err := s.DB.DB()

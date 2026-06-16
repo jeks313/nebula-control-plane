@@ -104,7 +104,7 @@ type ResultSink interface {
 type Config struct {
 	Store        *store.Store
 	Nonces       *nonce.Keyring
-	Replay       *replay.Cache
+	Replay       replay.Observer
 	Signer       *signer.Signer
 	Allocator    *ipam.Allocator
 	Pool         netip.Prefix
@@ -564,8 +564,16 @@ func (c *Consumer) verify(ctx context.Context, cand queue.Candidate) (wire.Enrol
 	if err := c.cfg.Nonces.Verify(req.Nonce, []byte(pubkeyHash)); err != nil {
 		return wire.EnrollRequest{}, nil, ErrNonce
 	}
-	if c.cfg.Replay != nil && !c.cfg.Replay.Observe(req.Nonce) {
-		return wire.EnrollRequest{}, nil, ErrReplay
+	if c.cfg.Replay != nil {
+		first, rerr := c.cfg.Replay.Observe(req.Nonce)
+		if rerr != nil {
+			// Infra failure (shared store unreachable), NOT a replay: return a
+			// non-terminal error so the candidate is retried, not dropped.
+			return wire.EnrollRequest{}, nil, fmt.Errorf("enrollment: replay store: %w", rerr)
+		}
+		if !first {
+			return wire.EnrollRequest{}, nil, ErrReplay
+		}
 	}
 	return req, pubBytes, nil
 }

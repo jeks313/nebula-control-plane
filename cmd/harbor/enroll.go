@@ -172,8 +172,11 @@ func (cf *coreFlags) buildConsumer(s *store.Store, results enrollment.ResultSink
 	audit := func(c context.Context, a, ac, t, d string) error { _, e := s.AppendAudit(c, a, ac, t, d); return e }
 	sg, err := signer.New(signer.Config{
 		CACertPEM: caPEM, Backend: caB,
-		Policy:          signer.IssuePolicy{AllowedNetwork: pool, MaxLifetime: *cf.certLifetime},
-		MaxCertsPerHour: *cf.maxPerHour, Audit: audit,
+		Policy: signer.IssuePolicy{AllowedNetwork: pool, MaxLifetime: *cf.certLifetime},
+		// Fleet-wide signing breaker (shared with core-api renewal, lane "ca") so the
+		// cert/hour ceiling holds across ≥2 Cores and a trip halts every Core (HA).
+		Breaker: signer.NewSQLBreaker(s.DB, signer.LaneCA, *cf.maxPerHour, time.Hour),
+		Audit:   audit,
 	})
 	if err != nil {
 		fatalf("signer: %v", err)
@@ -213,7 +216,9 @@ func (cf *coreFlags) buildConsumer(s *store.Store, results enrollment.ResultSink
 		return *cf.pilotVersion, *cf.pilotSHA256, *cf.pilotURL
 	}
 	return enrollment.New(enrollment.Config{
-		Store: s, Nonces: ring, Replay: replay.New(2 * time.Minute),
+		// Shared, DB-backed replay guard so single-use holds across ≥2 Core processes
+		// (a per-process cache would let a nonce be reused once per Core).
+		Store: s, Nonces: ring, Replay: replay.NewSQLStore(s.DB, 2*time.Minute),
 		Signer: sg, Allocator: alloc, Pool: pool, CertLifetime: *cf.certLifetime,
 		TunDev: *cf.tunDev, ListenPort: *cf.listenPort,
 		NebulaVersion: *cf.nebulaVersion, NebulaSHA256: *cf.nebulaSHA256, NebulaURL: *cf.nebulaURL,

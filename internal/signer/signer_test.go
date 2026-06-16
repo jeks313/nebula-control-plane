@@ -199,7 +199,9 @@ func TestCircuitBreaker(t *testing.T) {
 		t.Errorf("trip should be audited, got %v", audit.actions)
 	}
 
-	s.ResetBreaker()
+	if err := s.ResetBreaker(context.Background()); err != nil {
+		t.Fatalf("reset breaker: %v", err)
+	}
 	if _, _, err := s.Issue(context.Background(), "alice", goodTemplate(t)); err != nil {
 		t.Fatalf("issue after reset: %v", err)
 	}

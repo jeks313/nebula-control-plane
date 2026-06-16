@@ -1,6 +1,7 @@
 package signer
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -25,17 +26,17 @@ func newBreaker(maxPerWindow int, window time.Duration, now func() time.Time) *b
 
 // acquire attempts to consume one unit of the budget. allowed reports whether
 // the caller may proceed; justTripped is true only on the call that flips the
-// breaker open (so the alarm fires exactly once).
-func (b *breaker) acquire() (allowed, justTripped bool) {
+// breaker open (so the alarm fires exactly once). The in-memory breaker never errors.
+func (b *breaker) acquire(_ context.Context) (allowed, justTripped bool, err error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	if b.open {
-		return false, false
+		return false, false, nil
 	}
 	// A non-positive ceiling means "no limit configured" — allow.
 	if b.max <= 0 {
-		return true, false
+		return true, false, nil
 	}
 
 	cutoff := b.now().Add(-b.window)
@@ -49,16 +50,20 @@ func (b *breaker) acquire() (allowed, justTripped bool) {
 
 	if len(b.events) >= b.max {
 		b.open = true
-		return false, true
+		return false, true, nil
 	}
 	b.events = append(b.events, b.now())
-	return true, false
+	return true, false, nil
 }
 
 // reset re-arms the breaker (an operator action).
-func (b *breaker) reset() {
+func (b *breaker) reset(_ context.Context) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.open = false
 	b.events = nil
+	return nil
 }
+
+// limit returns the configured ceiling.
+func (b *breaker) limit() int { return b.max }

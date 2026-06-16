@@ -81,6 +81,9 @@ func cmdCoreAPI(args []string) {
 	sg, err := signer.New(signer.Config{
 		CACertPEM: caPEM, Backend: caB,
 		Policy: signer.IssuePolicy{AllowedNetwork: pool, MaxLifetime: *cf.certLifetime}, Audit: audit,
+		// Fleet-wide signing breaker (shared with the enroll consumer, lane "ca") so the
+		// cert/hour ceiling holds across ≥2 Cores and a trip halts every Core (HA).
+		Breaker: signer.NewSQLBreaker(s.DB, signer.LaneCA, *cf.maxPerHour, time.Hour),
 	})
 	if err != nil {
 		fatalf("core-api: signer: %v", err)
