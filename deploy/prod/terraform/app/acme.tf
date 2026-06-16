@@ -17,11 +17,18 @@
 # only the token grant (compute.tf), not EFS.
 
 locals {
+  # Component DNS names: <mesh_name>-<component>.<mesh_domain> (both must be set to enable
+  # auto-TLS; either empty => plain transport). e.g. poc + mesh.failsafe.net ->
+  # poc-gateway.mesh.failsafe.net / poc-harbor.mesh.failsafe.net.
+  mesh_tls       = var.mesh_name != "" && var.mesh_domain != ""
+  gateway_domain = local.mesh_tls ? "${var.mesh_name}-gateway.${var.mesh_domain}" : ""
+  harbor_domain  = local.mesh_tls ? "${var.mesh_name}-harbor.${var.mesh_domain}" : ""
+
   # The shared Cloudflare DNS token exists when ANY component does ACME.
-  acme_token = (var.gateway_domain != "" || var.harbor_domain != "") ? 1 : 0
+  acme_token = (local.gateway_domain != "" || local.harbor_domain != "") ? 1 : 0
   # Gateway ACME is on only when the Fargate gateway is built AND a domain is set
   # (local.gw_fargate lives in fargate.tf). The EFS cache is gateway-specific.
-  gateway_acme = local.gw_fargate == 1 && var.gateway_domain != "" ? 1 : 0
+  gateway_acme = local.gw_fargate == 1 && local.gateway_domain != "" ? 1 : 0
 }
 
 # ── Scoped Cloudflare DNS token (Zone.DNS:Edit only) ─────────────────────────────

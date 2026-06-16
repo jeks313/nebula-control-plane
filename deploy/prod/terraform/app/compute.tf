@@ -68,7 +68,7 @@ resource "aws_iam_role_policy" "core_db_secret" {
 # 0007). NB: admin-api fatals under -environment=production without in-process TLS, so the
 # bootstrap change must add -acme-domain in the same step it flips harbor to production.
 resource "aws_iam_role_policy" "core_acme_token" {
-  count       = var.harbor_domain != "" ? 1 : 0
+  count       = local.harbor_domain != "" ? 1 : 0
   name_prefix = "acme-token-"
   role        = aws_iam_role.core.id
   policy = jsonencode({
