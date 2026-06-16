@@ -72,6 +72,27 @@ GATEWAY_RUNTIME="$(val '.gateway_runtime.value')"; GATEWAY_RUNTIME="${GATEWAY_RU
 LIGHTHOUSE_RUNTIME="$(val '.lighthouse_runtime.value')"; LIGHTHOUSE_RUNTIME="${LIGHTHOUSE_RUNTIME:-ec2}"
 NAME_PREFIX="$(val '.name_prefix.value')"; NAME_PREFIX="${NAME_PREFIX:-ncp}"
 TF_REGION="$(val '.region.value')"
+# Trust-root signing backend (ADR 0007 Phase 2): the foundation stack provisions two ECC_NIST_P256
+# KMS keys (CA + config-signing) and re-exports their ARNs. When present (always, in the prod app
+# stack), genesis + Core sign via AWS KMS and the CA/config-signing PRIVATE KEYS NEVER TOUCH DISK;
+# empty ARNs fall back to the software backend (genesis writes ca.key/config-signing.key into
+# ~/ncp/genesis). The harbor node's IAM role grants kms:Sign + kms:GetPublicKey on exactly these two
+# keys (foundation core_kms_sign), and AWS creds reach KMS via that instance role.
+CA_KEY_ARN="$(val '.ca_key_arn.value')"
+CFG_KEY_ARN="$(val '.config_signing_key_arn.value')"
+if [[ -n "$CA_KEY_ARN" && -n "$CFG_KEY_ARN" ]]; then
+  KMS_FLAGS="-backend kms -kms-ca-key-id $CA_KEY_ARN -kms-config-key-id $CFG_KEY_ARN"
+  [[ -n "$TF_REGION" ]] && KMS_FLAGS="$KMS_FLAGS -kms-region $TF_REGION"
+  GENESIS_BACKEND="$KMS_FLAGS"  # genesis selects KMS; it then writes only PUBLIC ca.crt + config-signing.pub
+  SIGN_BACKEND="$KMS_FLAGS"     # core-api/admin-api/collect: same KMS flags (the public -ca-cert is kept alongside)
+  APPROVE_BACKEND="$KMS_FLAGS"  # the printed manual enroll-approve hint
+  TRUST_BACKEND_DESC="AWS KMS (CA + config-signing private keys never on disk)"
+else
+  GENESIS_BACKEND=""                                                     # software: genesis GENERATES + writes the keys to -out
+  SIGN_BACKEND="-ca-key \$G/ca.key -config-key \$G/config-signing.key"   # software: read the genesis-written keys (\$G expands remotely)
+  APPROVE_BACKEND="-ca-key ~/ncp/genesis/ca.key -config-key ~/ncp/genesis/config-signing.key"
+  TRUST_BACKEND_DESC="software (keys in ~/ncp/genesis on the harbor node)"
+fi
 # Harbor edge TLS (ADR 0007 Phase 5): when harbor_domain is set, core-api + the console obtain
 # their OWN Let's Encrypt cert via ACME DNS-01 and serve HTTPS; clients then reach Harbor by
 # that hostname (operators must resolve it to Harbor's overlay IP for mesh members). Empty =
@@ -88,6 +109,7 @@ fi
 echo "    lighthouse=$LH_IP  harbor=$HB_IP  gateway=${GW_IP:-<fargate>}  client=$CL_IP"
 echo "    lighthouse underlay=$LH_ADDR  enroll=$GW_URL  collect=$GW_COLLECT  harbor-overlay=$HARBOR_OVERLAY"
 echo "    runtimes: gateway=$GATEWAY_RUNTIME  lighthouse=$LIGHTHOUSE_RUNTIME  harbor-tls=${HARBOR_DOMAIN:+ACME:$HARBOR_DOMAIN}${HARBOR_DOMAIN:-plain-http}"
+echo "    trust-root signing: $TRUST_BACKEND_DESC"
 
 # Any Fargate component (gateway and/or the SPIKE lighthouse) needs the AWS CLI + a
 # container engine locally (build/push the image, populate the config secret, force the
@@ -188,7 +210,7 @@ rsh "$HB_IP" "set -e
   mkdir -p ~/ncp
   DSN=~/ncp/harbor.db
   harbor migrate up -dsn \$DSN >/dev/null
-  harbor genesis -dsn \$DSN -out ~/ncp/genesis \
+  harbor genesis -dsn \$DSN -out ~/ncp/genesis${GENESIS_BACKEND:+ $GENESIS_BACKEND} \
     -operator-a alice -operator-b bob -pool '$POOL' \
     -lighthouse-pub /tmp/lh-host.pub -lighthouse-ip '$LH_OVERLAY' -lighthouse-addr '$LH_ADDR' \
     -core-pub /tmp/hb-host.pub -core-ip '$HARBOR_OVERLAY' -core-name harbor-core >/dev/null
@@ -354,7 +376,7 @@ rsh "$HB_IP" "set -e
   sudo systemctl reset-failed ncp-collect ncp-core ncp-admin 2>/dev/null || true
   # Run AS ec2-user so harbor.db stays ec2-user-owned (CLI/console can write results).
   sudo systemd-run --uid=$SSH_USER --gid=$SSH_USER --unit ncp-collect --collect /usr/local/bin/harbor collect -pool '$POOL' \
-    -dsn \$DSN -ca-cert \$G/ca.crt -ca-key \$G/ca.key -config-key \$G/config-signing.key \
+    -dsn \$DSN -ca-cert \$G/ca.crt $SIGN_BACKEND \
     -hmac-key ~/ncp/hmac.b64 -lighthouse '$LH' -cloudtrust-db \
     -client-cert ~/ncp/harbor-collect.crt -client-key ~/ncp/harbor-collect.key >/dev/null
   echo registered"
@@ -364,7 +386,7 @@ echo "    gateway registered + collector pulling (attestation enabled)"
 echo "==> [harbor] create the imac join key"
 IMAC_KEY="$(rsh "$HB_IP" "harbor joinkey create -dsn ~/ncp/harbor.db -name imac -groups laptops 2>/dev/null | grep -o 'njk_[A-Za-z0-9_-]*' || true")"
 
-# ── 8. harbor: core-api (renew/heartbeat) + admin console (mock-IdP) ─────────
+# ── 8. harbor: core-api (renew/heartbeat) + admin console (SAML or mock-IdP) ─
 # Edge TLS: when harbor_domain is set, fetch the scoped Cloudflare token (Secrets Manager)
 # and deliver it to the box as a 0600 file (piped over ssh stdin — never on a command line),
 # prep the ACME cert cache (~/ncp/acme, on the CMK-encrypted root EBS so it survives reboots),
@@ -385,6 +407,43 @@ if [[ -n "$HARBOR_DOMAIN" ]]; then
   [[ "$ACME_STAGING" == "true" ]] && ACME_FLAGS="$ACME_FLAGS -acme-staging"
   echo "    harbor will serve HTTPS for $HARBOR_DOMAIN (core-api :$CORE_PORT + console :$ADMIN_PORT) via Let's Encrypt$( [[ "$ACME_STAGING" == "true" ]] && echo ' [STAGING CA]')"
 fi
+# Console IdP (ADR 0007 Phase 3): default to the in-process DEV mock IdP so a PoC without an IdP
+# still works. When the operator supplies real Entra SAML inputs (env vars), authenticate admins
+# against the real SAML IdP in PRODUCTION posture instead, delivering the SP signing keypair as
+# 0600/0644 files over ssh stdin (never on argv), mirroring the Cloudflare token. Set:
+#   SAML_METADATA_URL   (or SAML_METADATA_FILE)  — Entra App Federation Metadata
+#   SAML_SP_KEY_FILE  +  SAML_SP_CERT_FILE        — the STABLE SP signing keypair (local PEM paths)
+#   SAML_ROLE_MAP                                 — e.g. '<entra-admin-group-guid>=admin;<ops-guid>=operator'
+#   SAML_ENTITY_ID      (optional)                — SP entity id (defaults to the SP metadata URL)
+IDP_FLAGS="-mock-idp -mock-idp-addr $HARBOR_OVERLAY:$MOCK_IDP_PORT -environment development"
+if [[ -n "${SAML_METADATA_URL:-}" || -n "${SAML_METADATA_FILE:-}" ]]; then
+  echo "==> [harbor] wire the console to real Entra SAML (production posture)"
+  [[ -n "${SAML_SP_KEY_FILE:-}"  && -f "${SAML_SP_KEY_FILE:-}"  ]] || { echo "FATAL: SAML requested but SAML_SP_KEY_FILE is unset/missing (the STABLE SP signing key PEM)" >&2; exit 1; }
+  [[ -n "${SAML_SP_CERT_FILE:-}" && -f "${SAML_SP_CERT_FILE:-}" ]] || { echo "FATAL: SAML requested but SAML_SP_CERT_FILE is unset/missing (the SP signing cert PEM)" >&2; exit 1; }
+  [[ -n "${SAML_ROLE_MAP:-}" ]] || { echo "FATAL: SAML requested but SAML_ROLE_MAP is unset (e.g. '<entra-admin-group-guid>=admin') — without it every SSO user lands as viewer" >&2; exit 1; }
+  # Deliver the SP keypair (key 0600, cert 0644) — bytes preserved via ssh stdin, never argv.
+  rsh "$HB_IP" "umask 077; mkdir -p /home/$SSH_USER/ncp/saml; cat > /home/$SSH_USER/ncp/saml/sp.key && chmod 600 /home/$SSH_USER/ncp/saml/sp.key" < "$SAML_SP_KEY_FILE"
+  rsh "$HB_IP" "cat > /home/$SSH_USER/ncp/saml/sp.crt && chmod 644 /home/$SSH_USER/ncp/saml/sp.crt" < "$SAML_SP_CERT_FILE"
+  # URLs/role-map are single-quoted so the remote shell keeps ';', '&', '?' literal (not command/glob).
+  IDP_FLAGS="-saml-sp-key /home/$SSH_USER/ncp/saml/sp.key -saml-sp-cert /home/$SSH_USER/ncp/saml/sp.crt -role-map '$SAML_ROLE_MAP' -environment production"
+  if [[ -n "${SAML_METADATA_URL:-}" ]]; then
+    IDP_FLAGS="$IDP_FLAGS -saml-idp-metadata-url '$SAML_METADATA_URL'"
+  else
+    rsh "$HB_IP" "cat > /home/$SSH_USER/ncp/saml/idp-metadata.xml && chmod 644 /home/$SSH_USER/ncp/saml/idp-metadata.xml" < "$SAML_METADATA_FILE"
+    IDP_FLAGS="$IDP_FLAGS -saml-idp-metadata-file /home/$SSH_USER/ncp/saml/idp-metadata.xml"
+  fi
+  [[ -n "${SAML_ENTITY_ID:-}" ]] && IDP_FLAGS="$IDP_FLAGS -saml-entity-id '$SAML_ENTITY_ID'"
+  echo "    console IdP: Entra SAML [production]; SP keypair delivered (0600); role-map=$SAML_ROLE_MAP"
+else
+  echo "    console IdP: DEV mock-IdP (export SAML_METADATA_URL + SAML_SP_KEY_FILE + SAML_SP_CERT_FILE + SAML_ROLE_MAP for real Entra SAML)"
+fi
+# The console-access hints printed at the end adapt to the IdP actually wired above: the mock IdP
+# needs its port tunnelled too, real SAML redirects the browser to Entra instead.
+if [[ "$IDP_FLAGS" == *"-mock-idp"* ]]; then
+  CONSOLE_LOGIN_NOTE="mock-IdP login"; IDP_TUNNEL=" -L $MOCK_IDP_PORT:$HARBOR_OVERLAY:$MOCK_IDP_PORT"
+else
+  CONSOLE_LOGIN_NOTE="Entra SAML login (browser redirects to Entra; base-url/ACS must be reachable — see the SAML runbook)"; IDP_TUNNEL=""
+fi
 echo "==> [harbor] start core-api + admin console on the overlay ($HARBOR_OVERLAY, mesh-only)"
 rsh "$HB_IP" "set -e
   cd ~/ncp
@@ -394,19 +453,19 @@ rsh "$HB_IP" "set -e
   # stays 0600 root). Without this core-api crashes at boot with 'permission denied'.
   sudo chmod o+rx /etc/nebula
   # admin-api needs a local queue key (issuance/approval queue); the bootstrap never minted
-  # it, so ncp-admin (the console + mock-IdP) crashed at boot. Mint it here, like hmac.b64.
+  # it, so ncp-admin (the console + its IdP) crashed at boot. Mint it here, like hmac.b64.
   umask 077; [ -f ~/ncp/queue.b64 ] || openssl rand 32 | basenc --base64url | tr -d '=' > ~/ncp/queue.b64
   # core-api: renew + heartbeat over the mesh, verifying its own control-plane cert at boot.
   sudo systemd-run --uid=$SSH_USER --gid=$SSH_USER --unit ncp-core --collect /usr/local/bin/harbor core-api \
-    -dsn \$DSN -ca-cert \$G/ca.crt -ca-key \$G/ca.key -config-key \$G/config-signing.key \
+    -dsn \$DSN -ca-cert \$G/ca.crt $SIGN_BACKEND \
     -pool '$POOL' -lighthouse '$LH' -host-cert /etc/nebula/host.crt \
     -addr $HARBOR_OVERLAY:$CORE_PORT${ACME_FLAGS:+ $ACME_FLAGS} >/dev/null
   # admin console: issuance mode (so it can approve enrollments) + dev mock-IdP login.
   sudo systemd-run --uid=$SSH_USER --gid=$SSH_USER --unit ncp-admin --collect /usr/local/bin/harbor admin-api \
-    -dsn \$DSN -ca-cert \$G/ca.crt -ca-key \$G/ca.key -config-key \$G/config-signing.key \
+    -dsn \$DSN -ca-cert \$G/ca.crt $SIGN_BACKEND \
     -hmac-key ~/ncp/hmac.b64 -queue-dsn \$QDSN -queue-key ~/ncp/queue.b64 -pool '$POOL' \
-    -addr $HARBOR_OVERLAY:$ADMIN_PORT -mock-idp -mock-idp-addr $HARBOR_OVERLAY:$MOCK_IDP_PORT \
-    -base-url $ADMIN_URL -environment development${ACME_FLAGS:+ $ACME_FLAGS} >/dev/null
+    -addr $HARBOR_OVERLAY:$ADMIN_PORT -base-url $ADMIN_URL \
+    $IDP_FLAGS${ACME_FLAGS:+ $ACME_FLAGS} >/dev/null
   echo ok"
 cp "$WORK/config-signing.pub" "$ROOT/deploy/prod/terraform/app/config-signing.pub"  # gitignored; the pin for clients
 echo "    core-api + admin console up"
@@ -457,18 +516,17 @@ cat <<EOF
    ssh -i $SSH_KEY $SSH_USER@$HB_IP \\
      'EID=\$(harbor enroll pending -dsn ~/ncp/harbor.db | awk "/imac/{print \\\$1}"); \\
       harbor enroll approve \$EID -approver alice -dsn ~/ncp/harbor.db \\
-        -ca-cert ~/ncp/genesis/ca.crt -ca-key ~/ncp/genesis/ca.key \\
-        -config-key ~/ncp/genesis/config-signing.key \\
+        -ca-cert ~/ncp/genesis/ca.crt $APPROVE_BACKEND \\
         -hmac-key ~/ncp/hmac.b64 -queue-dsn ~/ncp/queue.db -queue-key ~/ncp/queue.b64 \\
         -pool $POOL -lighthouse "$LH"'
    # then re-run the iMac enroll to fetch the bundle; supervise with -core as above.
 
  Open the ADMIN CONSOLE (mesh-only — reach it from an enrolled mesh member, e.g.
  the iMac once it has joined, in a browser):
-     $ADMIN_URL    (mock-IdP login; approve enrollments, see
+     $ADMIN_URL    ($CONSOLE_LOGIN_NOTE; approve enrollments, see
                                             fleet health, policy, cloud-trust, etc.)
-   Off-mesh convenience (out-of-band admin path): SSH-tunnel both ports —
-     ssh -i $SSH_KEY -L $ADMIN_PORT:$HARBOR_OVERLAY:$ADMIN_PORT -L $MOCK_IDP_PORT:$HARBOR_OVERLAY:$MOCK_IDP_PORT $SSH_USER@$HB_IP
+   Off-mesh convenience (out-of-band admin path): SSH-tunnel the console —
+     ssh -i $SSH_KEY -L $ADMIN_PORT:$HARBOR_OVERLAY:$ADMIN_PORT$IDP_TUNNEL $SSH_USER@$HB_IP
 $TUNNEL_NOTE
 
  Verify: from any joined node,  ping $LH_OVERLAY  and  ping $HARBOR_OVERLAY ;
