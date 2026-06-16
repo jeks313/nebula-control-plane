@@ -53,7 +53,7 @@ from the control tier at two layers:
 
 Only the **lighthouse's UDP discovery** and the **gateway's TCP enroll port** face the
 internet; the gateway's collect port is reachable **only from harbor's SG**; core-api
-(8444) + console (8445) are overlay-only (in no SG). SSH is locked to your IP. The
+(8444) + console (443) are overlay-only (in no SG). SSH is locked to your IP. The
 **lighthouse** stays a mesh member, so it must keep Nebula UDP to/from harbor — it
 can't be fully fenced from harbor without leaving the mesh; its SG egress is still
 tightened to mesh UDP + bootstrap.
@@ -150,7 +150,7 @@ join secret, and the exact enroll commands: the **cloud client joins keyless via
 `aws-sigv4` attestation** (its IAM role; auto-issued), and the **off-cloud iMac** joins
 via a join key with **manual approval** (approve it in the console or by CLI). The
 **admin console** is mesh-only — reach it from an enrolled member at
-`http://<harbor-overlay>:8445`, or SSH-tunnel ports 8445+8446 to Harbor (the out-of-band
+`https://<harbor-overlay>` (default port 443; HTTPS when the mesh domain is set), or SSH-tunnel the console port to Harbor (binding local 443 needs sudo — see the bootstrap output) (the out-of-band
 admin path). (Re-run with `--skip-build` to skip rebuilding.)
 
 **Overlay range (important):** the bootstrap defaults the overlay to `10.44.0.0/16`
@@ -163,7 +163,7 @@ nebula data plane (handshakes succeed, pings don't). This was hit and fixed live
 - A **dedicated VPC** (`vpc_cidr`, default `10.99.0.0/16`) + Internet Gateway + a public route table, with **four per-tier /24 subnets** (control/edge/mesh/client). *(This replaces the earlier single-default-subnet layout — `terraform apply` over an old deployment recreates the topology: it destroys the default-VPC nodes and builds the new VPC.)*
 - `t3.micro` EC2 nodes (Amazon Linux 2023), encrypted root volume, IMDSv2-only, one per tier subnet, with Elastic IPs — **3 by default** (lighthouse, harbor, client) plus the gateway when `gateway_runtime=ec2` / minus the lighthouse when `lighthouse_runtime=fargate`.
 - For `gateway_runtime=fargate` (default): an **ECS Fargate gateway** — ECR repo, ECS service in the edge subnet, an NLB, a Secrets Manager config secret, a least-privilege task role, CloudWatch logs (`gateway_fargate.tf`). `lighthouse_runtime=fargate` adds the analogous serverless lighthouse with a **UDP NLB + pinned Elastic IP** (`lighthouse_fargate.tf`, spike).
-- Role-split security groups with **locked egress** (the gateway may egress only bootstrap + DNS — no path into harbor/mesh; harbor/lighthouse/client to mesh UDP + bootstrap), plus a restrictive **NACL on the edge (gateway) subnet** (defense-in-depth: no UDP egress except DNS). Only the lighthouse UDP + the gateway's enroll TCP face the internet; the gateway's collect port is reachable only from harbor's SG (the NLB SG enforces this in Fargate mode); core-api (8444), console (8445), mock-IdP (8446) are overlay-only, in no SG.
+- Role-split security groups with **locked egress** (the gateway may egress only bootstrap + DNS — no path into harbor/mesh; harbor/lighthouse/client to mesh UDP + bootstrap), plus a restrictive **NACL on the edge (gateway) subnet** (defense-in-depth: no UDP egress except DNS). Only the lighthouse UDP + the gateway's enroll TCP face the internet; the gateway's collect port is reachable only from harbor's SG (the NLB SG enforces this in Fargate mode); core-api (8444), console (443), mock-IdP (8446) are overlay-only, in no SG.
 - An EC2 key pair from your `~/.ssh/absolute.pub`.
 - A permission-less IAM role + instance profile (enough for `sts:GetCallerIdentity`).
 
