@@ -1,0 +1,62 @@
+# Prometheus alert rules for the Nebula control plane (ADR 0007 Phase 7b).
+# These fire on the metrics exposed by Phase 7a (/metrics on core-api, admin-api, gateway,
+# and the lighthouse's nebula stats). Alertmanager routes them (see alertmanager.yml).
+groups:
+  - name: ncp-control-plane
+    rules:
+      # ── Signing circuit breaker ─────────────────────────────────────────────
+      # Issuance is HALTED fleet-wide (the cert/hour ceiling was breached — possible CA
+      # abuse). ncp_signer_breaker_open is reconciled from the shared DB latch on every Core,
+      # so max() across Cores is the fleet truth. Page immediately.
+      - alert: SignerBreakerOpen
+        expr: max(ncp_signer_breaker_open) >= 1
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "Signing circuit breaker OPEN — cert issuance halted fleet-wide"
+          description: "ncp_signer_breaker_open=1: the signer's rate ceiling tripped and issuance is latched off until an operator resets it. Investigate for anomalous/abusive signing."
+
+      # A trip occurred recently (counter increase) — corroborates the gauge / catches a
+      # trip+reset that the gauge no longer shows.
+      - alert: SignerBreakerTripped
+        expr: increase(ncp_signer_breaker_trips_total[10m]) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "Signing circuit breaker tripped in the last 10m"
+          description: "ncp_signer_breaker_trips_total increased — the signing rate ceiling was breached at least once."
+
+      # ── Audit chain integrity ───────────────────────────────────────────────
+      # A TAMPER (hash mismatch / broken link / seq gap) — a security event. Page.
+      - alert: AuditChainTampered
+        expr: increase(ncp_audit_verify_tampered_total[1h]) > 0
+        labels: { severity: critical }
+        annotations:
+          summary: "Audit chain INTEGRITY failure (tamper) detected"
+          description: "ncp_audit_verify_tampered_total increased — the hash-chained audit log failed verification (content tamper, row removal, or reorder)."
+
+      # The verifier ran but couldn't complete cleanly (transient read errors, etc.).
+      - alert: AuditVerifyFailing
+        expr: increase(ncp_audit_verify_failures_total[1h]) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "Audit-chain verification failing"
+          description: "ncp_audit_verify_failures_total increased (tamper OR a transient read error). If AuditChainTampered is NOT also firing, this is likely transient/infra."
+
+      # The verifier hasn't completed a clean run in a while — it may be wedged or the chain
+      # is persistently unreadable. (Default verify cadence is hourly.)
+      - alert: AuditVerifyStale
+        expr: time() - max(ncp_audit_verify_last_success_seconds) > 7200
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "No clean audit-chain verification in >2h"
+          description: "ncp_audit_verify_last_success_seconds is stale — the periodic verifier may be wedged or every run is failing."
+
+      # ── Liveness ────────────────────────────────────────────────────────────
+      - alert: ControlPlaneTargetDown
+        expr: up == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "Control-plane target down: {{ $labels.job }} ({{ $labels.instance }})"
+          description: "Prometheus cannot scrape {{ $labels.job }} at {{ $labels.instance }} for 2m."

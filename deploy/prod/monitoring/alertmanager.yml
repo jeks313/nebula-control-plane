@@ -1,0 +1,25 @@
+# Alertmanager config for the Nebula control plane (ADR 0007 Phase 7b).
+#
+# PLACEHOLDER ROUTING (operator decision deferred): every alert currently goes to the
+# "null" receiver — alerts FIRE and are visible in the Prometheus/Alertmanager UIs, but are
+# not delivered anywhere. Wire a real receiver out-of-band (do NOT commit the secret):
+#   • Slack:     add a slack_configs block with api_url pointing at a webhook (mount the URL
+#                from a file / env, e.g. AM_SLACK_WEBHOOK, like the Cloudflare token pattern).
+#   • Email:     add email_configs (smarthost = your SES/SMTP endpoint + auth).
+#   • PagerDuty: add pagerduty_configs with a routing_key.
+# Then point the route's receiver (and/or a severity=critical sub-route) at it.
+route:
+  receiver: "null"
+  group_by: ["alertname", "job"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    # Critical alerts (breaker open, audit tamper, target down) should page once a real
+    # receiver is wired — kept on "null" for now so nothing is silently mis-delivered.
+    - matchers: ['severity="critical"']
+      receiver: "null"
+      repeat_interval: 1h
+
+receivers:
+  - name: "null"
