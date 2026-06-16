@@ -120,10 +120,27 @@ func cmdNebula(args []string) {
 		if err := s.DB.WithContext(ctx).Table("heartbeats").Order("overlay_ip ASC").Pluck("overlay_ip", &ips).Error; err != nil {
 			fatalf("nebula release: read fleet: %v", err)
 		}
+		// Arch affinity: only stage hosts whose arch this generation actually ships. A host whose
+		// arch is missing would never converge and would observe-window-roll-back the whole rollout.
+		servable, excluded, err := reg.ServableFleet(ctx, *gen, ips)
+		if err != nil {
+			fatalf("nebula release: %v", err)
+		}
+		if len(excluded) > 0 {
+			fmt.Printf("note: %d of %d host(s) excluded — gen %d ships no artifact for their arch:\n", len(excluded), len(ips), *gen)
+			for _, h := range excluded {
+				fmt.Printf("  %-18s %s/%s\n", h.OverlayIP, h.GOOS, h.GOARCH)
+			}
+			fmt.Printf("  add their arch then re-release: harbor nebula add-artifact -gen %d -os <goos> -arch <goarch> -url ... -sha256 ...\n", *gen)
+		}
+		if len(ips) > 0 && len(servable) == 0 {
+			fmt.Printf("no hosts can run gen %d — all %d live host(s) are an arch this generation does not ship; register their arch first\n", *gen, len(ips))
+			return
+		}
 		prev := eng.CurrentNebulaGen(ctx) // fleet falls back to this on rollback
 		r, err := eng.Start(ctx, rollout.StartConfig{
 			Lane: rollout.LaneNebula, Description: fmt.Sprintf("nebula %s (gen %d)", rel.Version, rel.Gen),
-			TargetVersion: *gen, PrevVersion: prev, Hosts: ips,
+			TargetVersion: *gen, PrevVersion: prev, Hosts: servable,
 			CanarySize: *canary, WaveSize: *waveSize, Observe: *observe, MissingAfter: *missingAfter, Actor: *actor,
 		})
 		switch {
@@ -135,7 +152,7 @@ func cmdNebula(args []string) {
 			fatalf("nebula release: %v", err)
 		default:
 			fmt.Printf("staged nebula %s (gen %d over %d) to %d host(s), canary %d; core-api drives convergence on heartbeats\n",
-				rel.Version, *gen, prev, len(ips), *canary)
+				rel.Version, *gen, prev, len(servable), min(*canary, len(servable)))
 			_ = r
 		}
 	case "status":

@@ -54,6 +54,12 @@ its `runtime.GOOS/GOARCH` (at enrollment and each heartbeat); Core stamps each h
 matching its own platform, and leaves a host alone (no update) if its arch isn't registered for
 the staged generation — it never serves a wrong-arch binary.
 
+`release` applies **arch affinity**: it stages only hosts whose arch the generation actually ships
+and reports the rest (a host whose arch is unregistered would never converge and would trip the
+rollout's observe-window auto-rollback). So register every platform for a generation
+(`add` + `add-artifact`) **before** `release`; if you forget one, `release` tells you which hosts
+it skipped and how to add their arch.
+
 `publish.sh` defaults to **linux/amd64** (the cloud fleet the rollout drives). Publish another
 platform with `GOOS=… GOARCH=… publish.sh …` (the iMac is `GOOS=darwin GOARCH=arm64`; nebula's
 darwin asset is the **universal `nebula-darwin.zip`** — a zip, not a tarball — which `publish.sh`

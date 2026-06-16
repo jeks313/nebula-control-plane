@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jeks313/nebula-control-plane/internal/enrollment"
 	"github.com/jeks313/nebula-control-plane/internal/nebularelease"
 	"github.com/jeks313/nebula-control-plane/internal/store"
 	"github.com/jeks313/nebula-control-plane/internal/store/migrate"
@@ -263,5 +264,70 @@ func TestAddArtifactAndPerArchLookup(t *testing.T) {
 	// Case-insensitive for the child sha too.
 	if got := s.GenForSHA(ctx, strings.ToUpper(sha2)); got != gen {
 		t.Fatalf("GenForSHA must be case-insensitive for child sha, got %d", got)
+	}
+}
+
+func TestServableFleet(t *testing.T) {
+	st, err := store.Open(store.Config{Driver: "sqlite", DSN: store.DefaultSQLiteDSN(t.TempDir() + "/sf.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	if err := migrate.Up(st.DB); err != nil {
+		t.Fatal(err)
+	}
+	s := nebularelease.New(st.DB)
+	ctx := context.Background()
+
+	g, err := s.Add(ctx, "1.0.0", "linux", "amd64", sha1, "https://art/linux-amd64", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddArtifact(ctx, int(g.Gen), "darwin", "arm64", sha2, "https://art/darwin-arm64"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Seed each host's arch via its (issued) enrollment row.
+	enrollAt := func(enrollID, ip, goos, goarch string, createdAt int64) {
+		t.Helper()
+		e := enrollment.Enrollment{
+			EnrollmentID: enrollID, DeviceName: enrollID, PubkeyHash: enrollID, Pubkey: []byte{1},
+			Method: "joinkey", Status: "issued", OverlayIP: ip, CreatedAt: createdAt,
+			GOOS: goos, GOARCH: goarch,
+		}
+		if err := st.DB.Create(&e).Error; err != nil {
+			t.Fatalf("seed enrollment %s: %v", enrollID, err)
+		}
+	}
+	enroll := func(ip, goos, goarch string) { enrollAt(ip, ip, goos, goarch, 1) }
+
+	enroll("10.0.0.1", "linux", "amd64")   // default platform -> servable
+	enroll("10.0.0.2", "darwin", "arm64")  // per-arch artifact -> servable
+	enroll("10.0.0.3", "windows", "amd64") // no artifact -> excluded
+	enroll("10.0.0.4", "", "")             // empty arch -> linux/amd64 default -> servable
+	// 10.0.0.5 has NO issued enrollment -> resolves to the default platform -> servable
+	// 10.0.0.6 has TWO issued rows: the LATER (higher-id) row is windows/amd64 (unshipped) but
+	// carries an EARLIER created_at than the older linux/amd64 row. Only id-DESC (the resolver Core
+	// uses) selects the true-latest row, so the host must be EXCLUDED; a created_at-ASC resolver
+	// would wrongly pick linux/amd64 and stage it (the convergence/auto-rollback hazard).
+	enrollAt("e6-old", "10.0.0.6", "linux", "amd64", 100) // lower id, later created_at
+	enrollAt("e6-new", "10.0.0.6", "windows", "amd64", 1) // higher id, earlier created_at -> latest
+
+	ips := []string{"10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5", "10.0.0.6"}
+	servable, excluded, err := s.ServableFleet(ctx, int(g.Gen), ips)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"10.0.0.1", "10.0.0.2", "10.0.0.4", "10.0.0.5"}; strings.Join(servable, ",") != strings.Join(want, ",") {
+		t.Errorf("servable = %v, want %v", servable, want)
+	}
+	if len(excluded) != 2 ||
+		excluded[0].OverlayIP != "10.0.0.3" || excluded[0].GOOS != "windows" ||
+		excluded[1].OverlayIP != "10.0.0.6" || excluded[1].GOOS != "windows" {
+		t.Errorf("excluded = %+v, want [{10.0.0.3 windows amd64} {10.0.0.6 windows amd64}]", excluded)
+	}
+
+	if _, _, err := s.ServableFleet(ctx, 9999, ips); err == nil {
+		t.Error("ServableFleet on an unknown generation should error")
 	}
 }

@@ -177,7 +177,7 @@ type StartConfig struct {
 	Description   string
 	TargetVersion int
 	PrevVersion   int
-	Hosts         []string      // ordered; the first CanarySize form wave 0
+	Hosts         []string      // ordered; the first CanarySize form wave 0. Callers staging a per-arch release lane (nebula/pilot) MUST pre-filter to arch-servable hosts (nebularelease/pilotrelease.ServableFleet) — the engine is arch-agnostic, so an unservable host here would never converge and would observe-window-roll-back the rollout.
 	CanarySize    int           // wave-0 size (default 1)
 	WaveSize      int           // post-canary wave size (0 = all remaining in one wave)
 	MinHealthy    int           // healthy-converged required per wave (0 = all hosts in the wave)
