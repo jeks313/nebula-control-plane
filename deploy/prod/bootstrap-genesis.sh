@@ -418,6 +418,10 @@ fi
 IDP_FLAGS="-mock-idp -mock-idp-addr $HARBOR_OVERLAY:$MOCK_IDP_PORT -environment development"
 if [[ -n "${SAML_METADATA_URL:-}" || -n "${SAML_METADATA_FILE:-}" ]]; then
   echo "==> [harbor] wire the console to real Entra SAML (production posture)"
+  # SAML needs HTTPS: the cross-site ACS cookie is SameSite=None => Secure (set by -environment
+  # production), so a plain-HTTP overlay console can never complete login. base-url ($ADMIN_URL) is
+  # HTTPS only when the mesh domain (ACME) is set — refuse rather than launch a silently-broken SSO.
+  [[ -n "$HARBOR_DOMAIN" ]] || { echo "FATAL: SAML requires HTTPS, but the console would serve plain HTTP at $ADMIN_URL (mesh_name/mesh_domain unset). Set mesh_name + mesh_domain so harbor serves HTTPS via ACME, then re-run." >&2; exit 1; }
   [[ -n "${SAML_SP_KEY_FILE:-}"  && -f "${SAML_SP_KEY_FILE:-}"  ]] || { echo "FATAL: SAML requested but SAML_SP_KEY_FILE is unset/missing (the STABLE SP signing key PEM)" >&2; exit 1; }
   [[ -n "${SAML_SP_CERT_FILE:-}" && -f "${SAML_SP_CERT_FILE:-}" ]] || { echo "FATAL: SAML requested but SAML_SP_CERT_FILE is unset/missing (the SP signing cert PEM)" >&2; exit 1; }
   [[ -n "${SAML_ROLE_MAP:-}" ]] || { echo "FATAL: SAML requested but SAML_ROLE_MAP is unset (e.g. '<entra-admin-group-guid>=admin') — without it every SSO user lands as viewer" >&2; exit 1; }
@@ -433,7 +437,16 @@ if [[ -n "${SAML_METADATA_URL:-}" || -n "${SAML_METADATA_FILE:-}" ]]; then
     IDP_FLAGS="$IDP_FLAGS -saml-idp-metadata-file /home/$SSH_USER/ncp/saml/idp-metadata.xml"
   fi
   [[ -n "${SAML_ENTITY_ID:-}" ]] && IDP_FLAGS="$IDP_FLAGS -saml-entity-id '$SAML_ENTITY_ID'"
+  # The SP advertises ACS/metadata/entity-id derived from base-url ($ADMIN_URL); print the EXACT
+  # values (incl. the :$ADMIN_PORT port) the operator must register in the Entra Enterprise App so
+  # they can't drift. Entity ID is the -saml-entity-id override if set, else the SP metadata URL.
+  SAML_ENTITY="${SAML_ENTITY_ID:-$ADMIN_URL/admin/v1/auth/saml/metadata}"
   echo "    console IdP: Entra SAML [production]; SP keypair delivered (0600); role-map=$SAML_ROLE_MAP"
+  echo "    register these EXACT values in the Entra Enterprise App (match them — note the :$ADMIN_PORT port):"
+  echo "      Identifier (Entity ID):  $SAML_ENTITY"
+  echo "      Reply URL (ACS):         $ADMIN_URL/admin/v1/auth/saml/acs"
+  echo "      SP metadata (reference): $ADMIN_URL/admin/v1/auth/saml/metadata"
+  echo "      browser must reach $HARBOR_DOMAIN (mesh-only console) — be an enrolled mesh member resolving it to $HARBOR_OVERLAY"
 else
   echo "    console IdP: DEV mock-IdP (export SAML_METADATA_URL + SAML_SP_KEY_FILE + SAML_SP_CERT_FILE + SAML_ROLE_MAP for real Entra SAML)"
 fi
