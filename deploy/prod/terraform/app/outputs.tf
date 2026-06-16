@@ -81,6 +81,11 @@ output "bootstrap_hint" {
   value       = "SSH_KEY=~/.ssh/absolute bash ../../bootstrap-genesis.sh   # run from app/; reads these outputs via 'terraform output -json'"
 }
 
+output "monitoring_hint" {
+  description = "Stand up the monitoring stack (ADR 0007 Phase 7b) after the genesis bootstrap: `SSH_KEY=~/.ssh/absolute bash deploy/prod/monitoring/deploy.sh` (enrolls the monitoring node + brings up Prometheus/Alertmanager/Grafana). Reach the UIs via SSH tunnel to the monitoring node (Grafana :3000, Prometheus :9090, Alertmanager :9093)."
+  value       = "monitoring node: ${try("ssh ec2-user@${local.public_ip["monitoring"]}", "<applied with the monitoring node>")}  ·  deploy: deploy/prod/monitoring/deploy.sh"
+}
+
 output "console_hint" {
   description = "The admin console is mesh-only (Harbor's overlay IP, default 10.44.0.2:8445). After the bootstrap, reach it from an enrolled mesh member, or SSH-tunnel ports 8445+8446 to Harbor (see deploy README / the bootstrap output)."
   value       = "mesh-only — http://<harbor-overlay>:8445 (default 10.44.0.2); not exposed in any security group by design"
