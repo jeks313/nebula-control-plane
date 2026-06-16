@@ -9,7 +9,7 @@ and (optionally) the gateway's internal obs port over the VPC.
 ```
 monitoring node (mesh member, VPC)
   ├─ Prometheus  ── scrape ──► core-api  10.44.0.2:8444/metrics   (overlay, mesh-only)
-  │                          ├► admin-api 10.44.0.2:8445/metrics  (overlay, mesh-only)
+  │                          ├► admin-api 10.44.0.2:443/metrics   (overlay, mesh-only)
   │                          └► lighthouse 10.44.0.1:8080/metrics (overlay)
   │     (auto-TLS: targets the overlay IP, validates the LE cert via tls_config.server_name)
   ├─ alert rules (alerts.yml) ──► Alertmanager ──► [receiver: placeholder]

@@ -34,7 +34,7 @@ scrape_configs:
       - targets: ["10.44.0.2:8444"]
   - job_name: admin-api
     static_configs:
-      - targets: ["10.44.0.2:8445"]
+      - targets: ["10.44.0.2:443"]
 
   # Lighthouse — nebula's prometheus stats over the overlay (EC2 lighthouse; the Fargate
   # spike exposes the same port). Bootstrap fills the real lighthouse overlay IP.

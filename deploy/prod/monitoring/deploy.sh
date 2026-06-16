@@ -33,7 +33,7 @@ PIN="$TFDIR/config-signing.pub" # written by bootstrap-genesis.sh (gitignored)
 HARBOR_OVERLAY="${HARBOR_OVERLAY:-10.44.0.2}"
 LH_OVERLAY="${LH_OVERLAY:-10.44.0.1}"
 CORE_PORT="${CORE_PORT:-8444}"
-ADMIN_PORT="${ADMIN_PORT:-8445}"
+ADMIN_PORT="${ADMIN_PORT:-443}" # MUST match bootstrap-genesis.sh's ADMIN_PORT default (the console moved to 443); else the admin-api scrape target is a dead port
 LH_STATS_PORT="${LH_STATS_PORT:-8080}"
 
 for t in terraform jq go ssh scp; do command -v "$t" >/dev/null || { echo "missing tool: $t" >&2; exit 1; }; done
