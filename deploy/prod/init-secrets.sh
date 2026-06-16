@@ -55,8 +55,11 @@ _ncp_init_secrets() {
   local aws_blob
   aws_blob="$(gpg --quiet --batch --decrypt "$aws_gpg" 2>/dev/null)" \
     || { echo "init-secrets: gpg failed to decrypt $aws_gpg" >&2; return 1; }
+  aws_blob="${aws_blob//$'\r'/}" # tolerate CRLF files
 
-  if printf '%s' "$aws_blob" | grep -qi 'aws_access_key_id'; then
+  # Case-SENSITIVE: the ~/.aws/credentials INI uses lowercase aws_access_key_id; an env
+  # file uses uppercase AWS_ACCESS_KEY_ID and must take the eval/export branch instead.
+  if printf '%s' "$aws_blob" | grep -q 'aws_access_key_id'; then
     # ~/.aws/credentials INI: take the first profile's keys.
     AWS_ACCESS_KEY_ID="$(printf '%s\n' "$aws_blob"  | sed -n 's/^[[:space:]]*aws_access_key_id[[:space:]]*=[[:space:]]*//p'      | head -n1)"
     AWS_SECRET_ACCESS_KEY="$(printf '%s\n' "$aws_blob" | sed -n 's/^[[:space:]]*aws_secret_access_key[[:space:]]*=[[:space:]]*//p' | head -n1)"
@@ -85,6 +88,7 @@ _ncp_init_secrets() {
   local cf_blob cf_token
   cf_blob="$(gpg --quiet --batch --decrypt "$cf_gpg" 2>/dev/null)" \
     || { echo "init-secrets: gpg failed to decrypt $cf_gpg" >&2; return 1; }
+  cf_blob="${cf_blob//$'\r'/}" # tolerate CRLF files
   # Value only (no eval): CLOUDFLARE_API_KEY (preferred) or a couple of common aliases.
   cf_token="$(printf '%s\n' "$cf_blob" | sed -n 's/^[[:space:]]*\(export[[:space:]]\+\)\?\(CLOUDFLARE_API_KEY\|CLOUDFLARE_DNS_API_TOKEN\|NCP_ACME_CLOUDFLARE_TOKEN\)[[:space:]]*=[[:space:]]*//p' | head -n1)"
   cf_token="${cf_token%\"}"; cf_token="${cf_token#\"}"; cf_token="${cf_token%\'}"; cf_token="${cf_token#\'}"
