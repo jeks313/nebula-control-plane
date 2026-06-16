@@ -26,7 +26,7 @@ resource "aws_ecr_repository" "gateway" {
 resource "aws_cloudwatch_log_group" "gateway" {
   count             = local.gw_fargate
   name              = "/${var.name_prefix}/gateway"
-  retention_in_days = 14
+  retention_in_days = var.fargate_log_retention_days
 }
 
 # The gateway's runtime config (nonce HMAC key + leaf-pinned mTLS material), created
@@ -35,7 +35,7 @@ resource "aws_cloudwatch_log_group" "gateway" {
 resource "aws_secretsmanager_secret" "gateway" {
   count                   = local.gw_fargate
   name                    = "${var.name_prefix}-gateway-config"
-  recovery_window_in_days = 0 # lab: allow immediate delete/recreate
+  recovery_window_in_days = var.secret_recovery_window_days # 0 = immediate (lab); 7-30 = prod accidental-delete window
 }
 
 resource "aws_secretsmanager_secret_version" "gateway" {
