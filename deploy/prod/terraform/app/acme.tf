@@ -46,7 +46,7 @@ resource "aws_secretsmanager_secret" "cloudflare_token" {
   count                   = local.acme_token
   name                    = "${var.name_prefix}-cloudflare-dns-token"
   description             = "Scoped Cloudflare API token (Zone.DNS:Edit) for ACME DNS-01. Populated out-of-band; injected as $NCP_ACME_CLOUDFLARE_TOKEN."
-  recovery_window_in_days = 0 # lab: allow immediate delete/recreate
+  recovery_window_in_days = var.secret_recovery_window_days # 0 = immediate (lab); 7-30 = prod accidental-delete window
 }
 
 resource "aws_secretsmanager_secret_version" "cloudflare_token" {

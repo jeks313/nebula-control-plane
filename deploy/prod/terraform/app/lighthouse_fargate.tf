@@ -32,7 +32,7 @@ resource "aws_ecr_repository" "lighthouse" {
 resource "aws_cloudwatch_log_group" "lighthouse" {
   count             = local.lh_fargate
   name              = "/${var.name_prefix}/lighthouse"
-  retention_in_days = 14
+  retention_in_days = var.fargate_log_retention_days
 }
 
 # The lighthouse's nebula identity (CA + its genesis-issued cert + host key), created
@@ -42,7 +42,7 @@ resource "aws_cloudwatch_log_group" "lighthouse" {
 resource "aws_secretsmanager_secret" "lighthouse" {
   count                   = local.lh_fargate
   name                    = "${var.name_prefix}-lighthouse-config"
-  recovery_window_in_days = 0 # lab: allow immediate delete/recreate
+  recovery_window_in_days = var.secret_recovery_window_days # 0 = immediate (lab); 7-30 = prod accidental-delete window
 }
 
 resource "aws_secretsmanager_secret_version" "lighthouse" {

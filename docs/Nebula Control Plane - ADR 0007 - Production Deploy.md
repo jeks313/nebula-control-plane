@@ -237,8 +237,17 @@ Ordered so each phase de-risks the next; KMS + Aurora are the foundation.
     ingress 3100 ← harbor; harbor egress 3100 → client tier). `deploy.sh` installs Alloy +
     renders its endpoint. The Fargate gateway/lighthouse already ship via awslogs. (Future
     hardening: ship over the overlay instead of the VPC — needs a nebula-policy inbound rule.)
-  - **7d — DR terraform: TODO.** KMS multi-Region replica keys; export the hash-chained audit
-    to an S3 Object-Lock bucket; raise log retention + non-zero secret recovery windows.
+  - **7d — DR terraform: ✅ DONE (with one documented caveat).** `secret_recovery_window_days`
+    (default 7) on the gateway/lighthouse/cloudflare secrets (was 0 = immediate); raised
+    `fargate_log_retention_days` (default 30, was 14); an **opt-in S3 Object-Lock** audit-export
+    bucket (`audit_export_bucket_name`) — versioned, COMPLIANCE-mode retention, BPA, TLS-only,
+    `prevent_destroy` — plus a Core `s3:PutObject`-only grant, so the hash-chained audit can be
+    archived WORM (the `harbor audit export` writer is a tracked code follow-up). **Caveat —
+    KMS multi-Region:** `multi_region` is fixed at key CREATION and the live CA/config-signing/
+    RDS/EBS/EFS keys are `prevent_destroy`, so it can't be retrofitted without destroying
+    encrypted data; it must be chosen at first apply (a fresh-deploy setting), so the existing
+    keys are deliberately left single-Region. DR for them is cross-region snapshot/replica of the
+    encrypted data, not key replication.
 
 ## Consequences
 

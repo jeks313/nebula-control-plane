@@ -232,6 +232,46 @@ variable "flow_log_retention_days" {
   description = "CloudWatch retention for VPC flow logs."
   type        = number
   default     = 90
+
+  validation {
+    condition     = contains([1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288, 3653], var.flow_log_retention_days)
+    error_message = "flow_log_retention_days must be a CloudWatch-allowed retention value (1,3,5,7,14,30,60,90,120,150,180,365,400,545,731,1096,1827,2192,2557,2922,3288,3653)."
+  }
+}
+
+# ── DR / durability (ADR 0007 Phase 7d) ──────────────────────────────────────
+variable "secret_recovery_window_days" {
+  description = "Secrets Manager recovery window for the app secrets (gateway/lighthouse config, Cloudflare token). 0 = immediate delete (fast lab iteration); 7-30 = a prod-grade accidental-delete window. Defaults to 7 (prod-safe); set 0 for throwaway labs."
+  type        = number
+  default     = 7
+
+  validation {
+    condition     = var.secret_recovery_window_days == 0 || (var.secret_recovery_window_days >= 7 && var.secret_recovery_window_days <= 30)
+    error_message = "secret_recovery_window_days must be 0 (immediate) or 7-30 (AWS's allowed window)."
+  }
+}
+
+variable "fargate_log_retention_days" {
+  description = "CloudWatch retention for the Fargate gateway/lighthouse log groups."
+  type        = number
+  default     = 30
+
+  validation {
+    condition     = contains([1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288, 3653], var.fargate_log_retention_days)
+    error_message = "fargate_log_retention_days must be a CloudWatch-allowed retention value (1,3,5,7,14,30,60,90,120,150,180,365,400,545,731,1096,1827,2192,2557,2922,3288,3653)."
+  }
+}
+
+variable "audit_export_bucket_name" {
+  description = "Name for the S3 Object-Lock bucket that the hash-chained audit log is exported to (WORM, tamper-evident off-DB copy — Phase 7d). Empty disables the bucket. Must be globally unique."
+  type        = string
+  default     = ""
+}
+
+variable "audit_export_lock_days" {
+  description = "Object-Lock retention (days, COMPLIANCE mode) on exported audit objects — they cannot be deleted/overwritten before this elapses, even by root."
+  type        = number
+  default     = 365
 }
 
 # ── Data layer (Aurora PostgreSQL) ───────────────────────────────────────────
