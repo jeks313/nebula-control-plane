@@ -275,14 +275,14 @@ resource "aws_security_group" "monitoring" {
     cidr_blocks = ["0.0.0.0/0"]
   }
   ingress {
-    description     = "Loki log ingest from harbor's promtail (Phase 7c) — harbor SG only"
+    description     = "Loki log ingest from harbor promtail (Phase 7c) - harbor SG only"
     from_port       = 3100
     to_port         = 3100
     protocol        = "tcp"
     security_groups = [aws_security_group.harbor.id]
   }
   egress {
-    description = "Nebula data plane + DNS (UDP) — the scrape traffic to mesh-only targets rides this tunnel"
+    description = "Nebula data plane + DNS (UDP) - the scrape traffic to mesh-only targets rides this tunnel"
     from_port   = 0
     to_port     = 65535
     protocol    = "udp"

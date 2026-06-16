@@ -63,7 +63,7 @@ resource "aws_rds_cluster_parameter_group" "aurora" {
   name_prefix = "${var.name_prefix}-aurora-pg-"
   # Derive the family from the engine major so the two can't drift (16.x -> aurora-postgresql16).
   family      = "aurora-postgresql${split(".", var.aurora_engine_version)[0]}"
-  description = "${var.name_prefix} Aurora PostgreSQL — force SSL."
+  description = "${var.name_prefix} Aurora PostgreSQL - force SSL."
 
   parameter {
     name  = "rds.force_ssl"
