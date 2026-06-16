@@ -274,6 +274,12 @@ variable "audit_export_lock_days" {
   default     = 365
 }
 
+variable "artifacts_bucket_name" {
+  description = "Name for the public-read S3 bucket that hosts the pilot + nebula data-plane binaries the self-update rollout lanes (ADR 0003) fetch. Integrity is anchored by the bundle sha256 (the source need not be trusted), so public-read is safe and reachable by off-cloud hosts (the iMac, no AWS creds). Empty disables the bucket — the registries then point at external URLs hosting the RAW binaries (note: GitHub's nebula asset is an ARCHIVE and won't work directly for self-update, which fetches a raw binary with no untar; publish.sh re-hosts the extracted raw binary). Must be globally unique. Publish to it with deploy/prod/artifacts/publish.sh."
+  type        = string
+  default     = ""
+}
+
 # ── Data layer (Aurora PostgreSQL) ───────────────────────────────────────────
 variable "aurora_engine_version" {
   description = "Aurora PostgreSQL engine version. VERIFY it exists in your region: `aws rds describe-db-engine-versions --engine aurora-postgresql --query 'DBEngineVersions[].EngineVersion'`."

@@ -173,3 +173,28 @@ output "gateway_acme_efs_id" {
   description = "EFS file system backing the Fargate gateway's ACME cert cache (empty unless the Fargate gateway has auto-TLS on)."
   value       = one(aws_efs_file_system.gateway_acme[*].id)
 }
+
+# ── Artifact hosting (ADR 0003 distribution / ADR 0007 artifacts layer) ──────
+# The public-read bucket the self-update lanes fetch pilot/nebula binaries from. Empty unless
+# artifacts_bucket_name is set. The *_url outputs are {version}-token TEMPLATES ready to paste
+# into `harbor pilot add -url` / `harbor nebula add -url` (harbor substitutes {version}); then
+# stage the registered generation with `harbor pilot release -gen <n>` / `harbor nebula release -gen <n>`.
+output "artifacts_bucket" {
+  description = "Public-read S3 bucket hosting the pilot + nebula binaries (empty unless artifacts_bucket_name is set). Publish with deploy/prod/artifacts/publish.sh."
+  value       = one(aws_s3_bucket.artifacts[*].bucket)
+}
+
+output "artifacts_base_url" {
+  description = "Base HTTPS URL for the artifact bucket (virtual-hosted S3 endpoint). publish.sh derives the per-binary keys under it."
+  value       = local.artifacts == 1 ? "https://${var.artifacts_bucket_name}.s3.${var.region}.amazonaws.com" : ""
+}
+
+output "artifacts_pilot_url" {
+  description = "Registry URL template for the linux/amd64 pilot binary — `harbor pilot add -url <this>` (harbor substitutes {version}); then `harbor pilot release -gen <n>`."
+  value       = local.artifacts == 1 ? "https://${var.artifacts_bucket_name}.s3.${var.region}.amazonaws.com/pilot/{version}/pilot-linux-amd64" : ""
+}
+
+output "artifacts_nebula_url" {
+  description = "Registry URL template for the linux/amd64 nebula binary (RAW, extracted from the GitHub tarball) — `harbor nebula add -url <this>` (harbor substitutes {version})."
+  value       = local.artifacts == 1 ? "https://${var.artifacts_bucket_name}.s3.${var.region}.amazonaws.com/nebula/{version}/nebula-linux-amd64" : ""
+}
