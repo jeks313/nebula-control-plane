@@ -49,9 +49,12 @@ echo "==> reading terraform outputs"
 OUT="$(terraform -chdir="$TFDIR" output -json)"
 val() { jq -r "$1 // \"\"" <<<"$OUT"; }
 MON_IP="$(val '.public_ips.value.monitoring')"
+MON_PRIV="$(val '.monitoring_private_ip.value')"
+HB_IP="$(val '.public_ips.value.harbor')"
 GW_URL_INTERNAL="$(val '.gateway_url_internal.value')"
 TF_REGION="$(val '.region.value')"
 HARBOR_DOMAIN="$(val '.harbor_domain.value')"
+ALLOY_VERSION="${ALLOY_VERSION:-1.5.1}" # Grafana Alloy (promtail's supported successor); bump at github.com/grafana/alloy/releases
 [[ -n "$MON_IP" ]] || { echo "no monitoring node IP in outputs — apply the app stack (it now includes the monitoring node)" >&2; exit 1; }
 [[ -n "$GW_URL_INTERNAL" ]] || { echo "no gateway_url_internal output — apply the app stack first" >&2; exit 1; }
 
@@ -125,19 +128,47 @@ YAML
 
 # ── 4. deploy the stack (podman-compose) ────────────────────────────────────
 echo "==> installing podman + bringing up Prometheus/Alertmanager/Grafana"
-rcp "$HERE/alerts.yml" "$HERE/alertmanager.yml" "$HERE/compose.yml" "$WORK/prometheus.yml" "$SSH_USER@$MON_IP:/tmp/"
+rcp "$HERE/alerts.yml" "$HERE/alertmanager.yml" "$HERE/loki-config.yml" "$HERE/compose.yml" "$WORK/prometheus.yml" "$SSH_USER@$MON_IP:/tmp/"
 rcp -r "$HERE/grafana" "$SSH_USER@$MON_IP:/tmp/grafana"
 rsh "$MON_IP" "set -e
   sudo dnf install -y podman python3-pip >/dev/null
   command -v podman-compose >/dev/null 2>&1 || sudo pip3 install --quiet podman-compose
   sudo install -d -o $SSH_USER -g $SSH_USER /opt/ncp-monitoring
-  install -m0644 /tmp/alerts.yml /tmp/alertmanager.yml /tmp/compose.yml /tmp/prometheus.yml /opt/ncp-monitoring/
+  install -m0644 /tmp/alerts.yml /tmp/alertmanager.yml /tmp/loki-config.yml /tmp/compose.yml /tmp/prometheus.yml /opt/ncp-monitoring/
   rm -rf /opt/ncp-monitoring/grafana && cp -r /tmp/grafana /opt/ncp-monitoring/grafana
   echo staged"
 # Grafana admin password as a 0600 .env (podman-compose substitutes \${GF_ADMIN_PASSWORD} from
 # it) — piped over ssh stdin so the secret never lands on a command line / in the node's ps.
 printf 'GF_ADMIN_PASSWORD=%s\n' "${GF_ADMIN_PASSWORD:-changeme}" | rsh "$MON_IP" 'umask 077; cat > /opt/ncp-monitoring/.env'
 rsh "$MON_IP" 'cd /opt/ncp-monitoring && podman-compose up -d && echo up'
+
+# ── 5. ship harbor's journald logs to Loki (Grafana Alloy on the harbor node, Phase 7c) ──
+# Alloy (promtail's supported successor) tails the systemd journal (core-api/admin-api/collect/
+# nebula run via systemd-run --collect) and pushes to Loki over the VPC (SG-locked). The Fargate
+# components already ship via awslogs. Skipped if the harbor node isn't an output.
+if [[ -n "$HB_IP" && -n "$MON_PRIV" ]]; then
+  echo "==> installing Grafana Alloy on harbor -> Loki ($MON_PRIV:3100)"
+  sed "s#http://MONITORING_PRIVATE_IP:3100#http://$MON_PRIV:3100#" "$HERE/config.alloy" > "$WORK/config.alloy"
+  rcp "$WORK/config.alloy" "$SSH_USER@$HB_IP:/tmp/config.alloy"
+  rsh "$HB_IP" "set -e
+    # persistent journal so Alloy reads more than the current boot
+    sudo mkdir -p /var/log/journal && sudo systemctl restart systemd-journald
+    if ! command -v alloy >/dev/null; then
+      cd /tmp
+      curl -fsSL -o alloy.zip 'https://github.com/grafana/alloy/releases/download/v$ALLOY_VERSION/alloy-linux-amd64.zip'
+      command -v unzip >/dev/null || sudo dnf install -y unzip >/dev/null
+      unzip -o alloy.zip >/dev/null && sudo install -m0755 alloy-linux-amd64 /usr/local/bin/alloy && rm -f alloy.zip alloy-linux-amd64
+    fi
+    sudo install -d /etc/alloy /var/lib/alloy
+    sudo install -m0644 /tmp/config.alloy /etc/alloy/config.alloy && rm -f /tmp/config.alloy
+    sudo systemctl reset-failed ncp-alloy 2>/dev/null || true
+    # Bind the Alloy UI to localhost (not exposed); --storage.path persists its WAL.
+    sudo systemd-run --unit ncp-alloy --collect /usr/local/bin/alloy run \
+      --server.http.listen-addr=127.0.0.1:12345 --storage.path=/var/lib/alloy /etc/alloy/config.alloy >/dev/null
+    echo alloy-up"
+else
+  echo "==> skipping harbor log shipping (no harbor / monitoring-private-ip output)"
+fi
 
 cat <<EOF
 
@@ -146,6 +177,7 @@ cat <<EOF
 ────────────────────────────────────────────────────────────────────────────
  Node            : $MON_IP (mesh member, group:workloads)
  Scrapes         : core-api/admin-api $SCHEME at $HARBOR_OVERLAY:{$CORE_PORT,$ADMIN_PORT}, lighthouse $LH_OVERLAY:$LH_STATS_PORT (over the overlay)
+ Logs            : harbor journald -> Grafana Alloy -> Loki ($MON_PRIV:3100). Query in Grafana (Loki datasource); the Fargate gateway/lighthouse ship via awslogs.
  Reach the UIs   : ssh -i $SSH_KEY -L 3000:localhost:3000 -L 9090:localhost:9090 -L 9093:localhost:9093 $SSH_USER@$MON_IP
                    then http://localhost:3000 (Grafana), :9090 (Prometheus), :9093 (Alertmanager)
  Alert delivery  : PLACEHOLDER (null receiver) — wire a real Slack/email/PagerDuty receiver in

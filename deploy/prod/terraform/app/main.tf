@@ -113,6 +113,13 @@ resource "aws_security_group" "harbor" {
     cidr_blocks = ["0.0.0.0/0"]
   }
   egress {
+    description = "Ship journald logs to Loki on the monitoring node (Phase 7c, client tier)"
+    from_port   = 3100
+    to_port     = 3100
+    protocol    = "tcp"
+    cidr_blocks = [local.tier_cidr["client"]]
+  }
+  egress {
     description = "Bootstrap package fetch (https/http)"
     from_port   = 443
     to_port     = 443
@@ -266,6 +273,13 @@ resource "aws_security_group" "monitoring" {
     to_port     = var.nebula_port
     protocol    = "udp"
     cidr_blocks = ["0.0.0.0/0"]
+  }
+  ingress {
+    description     = "Loki log ingest from harbor's promtail (Phase 7c) — harbor SG only"
+    from_port       = 3100
+    to_port         = 3100
+    protocol        = "tcp"
+    security_groups = [aws_security_group.harbor.id]
   }
   egress {
     description = "Nebula data plane + DNS (UDP) — the scrape traffic to mesh-only targets rides this tunnel"

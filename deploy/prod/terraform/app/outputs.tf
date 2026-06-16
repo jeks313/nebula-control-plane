@@ -81,6 +81,11 @@ output "bootstrap_hint" {
   value       = "SSH_KEY=~/.ssh/absolute bash ../../bootstrap-genesis.sh   # run from app/; reads these outputs via 'terraform output -json'"
 }
 
+output "monitoring_private_ip" {
+  description = "The monitoring node's private IP — harbor's promtail pushes journald logs to Loki here over the VPC (Phase 7c), SG-locked to the harbor node."
+  value       = try(aws_instance.node["monitoring"].private_ip, "")
+}
+
 output "monitoring_hint" {
   description = "Stand up the monitoring stack (ADR 0007 Phase 7b) after the genesis bootstrap: `SSH_KEY=~/.ssh/absolute bash deploy/prod/monitoring/deploy.sh` (enrolls the monitoring node + brings up Prometheus/Alertmanager/Grafana). Reach the UIs via SSH tunnel to the monitoring node (Grafana :3000, Prometheus :9090, Alertmanager :9093)."
   value       = "monitoring node: ${try("ssh ec2-user@${local.public_ip["monitoring"]}", "<applied with the monitoring node>")}  ·  deploy: deploy/prod/monitoring/deploy.sh"

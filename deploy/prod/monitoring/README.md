@@ -10,11 +10,19 @@ and (optionally) the gateway's internal obs port over the VPC.
 monitoring node (mesh member, VPC)
   ├─ Prometheus  ── scrape ──► core-api  10.44.0.2:8444/metrics   (overlay, mesh-only)
   │                          ├► admin-api 10.44.0.2:8445/metrics  (overlay, mesh-only)
-  │                          ├► lighthouse 10.44.0.1:8080/metrics (overlay/VPC)
-  │                          └► gateway   <obs-addr>/metrics       (VPC; optional)
+  │                          └► lighthouse 10.44.0.1:8080/metrics (overlay)
+  │     (auto-TLS: targets the overlay IP, validates the LE cert via tls_config.server_name)
   ├─ alert rules (alerts.yml) ──► Alertmanager ──► [receiver: placeholder]
-  └─ Grafana (datasource: Prometheus)
+  ├─ Loki  ◄── push ── Grafana Alloy on harbor (journald)   [VPC :3100, SG-locked to harbor]
+  └─ Grafana (datasources: Prometheus + Loki)
 ```
+
+Logs (Phase 7c): harbor's `core-api`/`admin-api`/`collect`/`nebula` run via `systemd-run
+--collect` (journald); **Grafana Alloy** (promtail's supported successor) on the harbor node
+tails the journal and pushes to **Loki** on the monitoring node over the VPC (SG-restricted to
+the harbor SG). Query them in Grafana via the Loki datasource (filter by the `unit` label). The
+Fargate gateway/lighthouse already ship to CloudWatch via the awslogs driver. (Future hardening:
+ship over the overlay instead of the VPC — needs a nebula-policy inbound rule on the monitoring node.)
 
 ## Files
 
@@ -23,8 +31,11 @@ monitoring node (mesh member, VPC)
 | `prometheus.yml` | scrape config (reference; the bootstrap renders the real overlay IPs + scheme) |
 | `alerts.yml` | alert rules on the Phase 7a metrics (breaker open/trips, audit tamper/fail/stale, target down) |
 | `alertmanager.yml` | routing — **placeholder `null` receiver** until a real destination is wired |
-| `compose.yml` | the Prometheus + Alertmanager + Grafana stack (`podman compose up -d`) |
-| `grafana/provisioning/` | Grafana datasource (the local Prometheus) |
+| `loki-config.yml` | Loki (single-binary, filesystem storage, 30d retention) — the log store |
+| `config.alloy` | Grafana Alloy (reference) — runs on harbor, tails journald → Loki; deploy.sh renders the Loki URL |
+| `compose.yml` | the Prometheus + Alertmanager + Loki + Grafana stack (`podman compose up -d`) |
+| `grafana/provisioning/` | Grafana datasources (Prometheus + Loki) |
+| `deploy.sh` | enrolls the node, renders prometheus.yml, deploys the stack + harbor Alloy |
 
 ## Deploy
 
