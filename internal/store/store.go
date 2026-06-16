@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/driver/postgres"
@@ -22,6 +23,13 @@ import (
 type Config struct {
 	Driver string
 	DSN    string
+
+	// Postgres connection-pool tuning (ignored on SQLite, which is pinned to a single
+	// writer). Zero values fall back to sane Aurora-friendly defaults in Open. Set
+	// MaxOpenConns so (Cores × MaxOpenConns) stays under Aurora's max_connections.
+	MaxOpenConns    int
+	MaxIdleConns    int
+	ConnMaxLifetime time.Duration
 }
 
 // DefaultSQLiteDSN returns a sensible local-dev DSN for a real on-disk file:
@@ -61,15 +69,40 @@ func Open(cfg Config) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store: open %s: %w", cfg.Driver, err)
 	}
-	if cfg.Driver == "sqlite" {
+	sqlDB, err := db.DB()
+	if err != nil {
+		return nil, err
+	}
+	switch cfg.Driver {
+	case "sqlite":
 		// SQLite is a single-writer engine; one connection avoids spurious
 		// "database is locked" under concurrent writers (the IPAM allocator
 		// still exercises real INSERT contention via the UNIQUE(ip) guard).
-		sqlDB, err := db.DB()
-		if err != nil {
-			return nil, err
-		}
 		sqlDB.SetMaxOpenConns(1)
+	case "postgres":
+		// Production Postgres (Aurora). Bound the pool so (Cores × MaxOpenConns)
+		// stays under Aurora's max_connections, keep a few idle connections warm to
+		// avoid per-request dial latency, and CAP CONNECTION LIFETIME so connections
+		// to a demoted writer are recycled after an Aurora failover (the cluster
+		// endpoint re-resolves to the new writer on the next dial).
+		maxOpen := cfg.MaxOpenConns
+		if maxOpen <= 0 {
+			maxOpen = 20
+		}
+		maxIdle := cfg.MaxIdleConns
+		if maxIdle <= 0 {
+			maxIdle = 5
+		}
+		if maxIdle > maxOpen {
+			maxIdle = maxOpen
+		}
+		life := cfg.ConnMaxLifetime
+		if life <= 0 {
+			life = 30 * time.Minute
+		}
+		sqlDB.SetMaxOpenConns(maxOpen)
+		sqlDB.SetMaxIdleConns(maxIdle)
+		sqlDB.SetConnMaxLifetime(life)
 	}
 	return &Store{DB: db}, nil
 }
