@@ -486,6 +486,15 @@ if [[ "$ADMIN_PORT" -lt 1024 ]]; then
   ADMIN_CAP=" -p AmbientCapabilities=CAP_NET_BIND_SERVICE"
   TUNNEL_PRIV_NOTE="   (the tunnel binds local $ADMIN_PORT, a privileged port — prefix the ssh with 'sudo', or just browse from an on-mesh member: no tunnel needed)"
 fi
+# Postgres connection-pool tuning for core-api (harbor's -db-* flags / store.go). The harbor box
+# runs on SQLite by default (~/ncp/harbor.db), which IGNORES these — they take effect once harbor
+# is pointed at Aurora (a postgres -dsn). Unset => harbor's built-in defaults (20 open / 5 idle /
+# 30m lifetime). Tune so (Cores × max-open) stays under Aurora's max_connections:
+#   DB_MAX_OPEN_CONNS   DB_MAX_IDLE_CONNS   DB_CONN_MAX_LIFETIME (a Go duration, e.g. 30m)
+DB_POOL_FLAGS=""
+[[ -n "${DB_MAX_OPEN_CONNS:-}" ]]    && DB_POOL_FLAGS="$DB_POOL_FLAGS -db-max-open-conns $DB_MAX_OPEN_CONNS"
+[[ -n "${DB_MAX_IDLE_CONNS:-}" ]]    && DB_POOL_FLAGS="$DB_POOL_FLAGS -db-max-idle-conns $DB_MAX_IDLE_CONNS"
+[[ -n "${DB_CONN_MAX_LIFETIME:-}" ]] && DB_POOL_FLAGS="$DB_POOL_FLAGS -db-conn-max-lifetime $DB_CONN_MAX_LIFETIME"
 echo "==> [harbor] start core-api + admin console on the overlay ($HARBOR_OVERLAY, mesh-only)"
 rsh "$HB_IP" "set -e
   cd ~/ncp
@@ -501,7 +510,7 @@ rsh "$HB_IP" "set -e
   sudo systemd-run --uid=$SSH_USER --gid=$SSH_USER --unit ncp-core --collect /usr/local/bin/harbor core-api \
     -dsn \$DSN -ca-cert \$G/ca.crt $SIGN_BACKEND \
     -pool '$POOL' -lighthouse '$LH' -host-cert /etc/nebula/host.crt \
-    -addr $HARBOR_OVERLAY:$CORE_PORT${ACME_FLAGS:+ $ACME_FLAGS} >/dev/null
+    -addr $HARBOR_OVERLAY:$CORE_PORT$DB_POOL_FLAGS${ACME_FLAGS:+ $ACME_FLAGS} >/dev/null
   # admin console: issuance mode (so it can approve enrollments) + SAML/mock IdP. $ADMIN_CAP grants
   # CAP_NET_BIND_SERVICE when the console is on a privileged port (default 443).
   sudo systemd-run --uid=$SSH_USER --gid=$SSH_USER$ADMIN_CAP --unit ncp-admin --collect /usr/local/bin/harbor admin-api \
@@ -512,6 +521,7 @@ rsh "$HB_IP" "set -e
   echo ok"
 cp "$WORK/config-signing.pub" "$ROOT/deploy/prod/terraform/app/config-signing.pub"  # gitignored; the pin for clients
 echo "    core-api + admin console up"
+[[ -n "$DB_POOL_FLAGS" ]] && echo "    core-api postgres pool:$DB_POOL_FLAGS (effective only when harbor runs on postgres)"
 
 # Client-facing hints adapt to harbor's TLS posture (computed CORE_URL/ADMIN_URL above).
 if [[ -n "$HARBOR_DOMAIN" ]]; then
