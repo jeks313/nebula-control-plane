@@ -45,8 +45,8 @@ SKIP_BUILD=0
 POOL="${POOL:-10.44.0.0/16}"
 LH_OVERLAY="${LH_OVERLAY:-10.44.0.1}"
 HARBOR_OVERLAY="${HARBOR_OVERLAY:-10.44.0.2}"   # Harbor's own mesh address (control-plane node)
-CORE_PORT="${CORE_PORT:-8444}"                   # core-api (renew/heartbeat), mesh-only
-ADMIN_PORT="${ADMIN_PORT:-8445}"                 # admin console, mesh-only
+CORE_PORT="${CORE_PORT:-8444}"                   # core-api (renew/heartbeat), mesh-only (machine-facing; stays off 443)
+ADMIN_PORT="${ADMIN_PORT:-443}"                  # admin console, mesh-only (default 443 => clean https URLs over the overlay; still NOT public)
 MOCK_IDP_PORT="${MOCK_IDP_PORT:-8446}"           # dev mock-IdP for the console login
 
 for t in terraform jq go ssh scp openssl; do command -v "$t" >/dev/null || { echo "missing tool: $t" >&2; exit 1; }; done
@@ -55,6 +55,17 @@ for t in terraform jq go ssh scp openssl; do command -v "$t" >/dev/null || { ech
 SSH_OPTS=(-i "$SSH_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o BatchMode=yes)
 rsh() { local host="$1"; shift; ssh "${SSH_OPTS[@]}" "$SSH_USER@$host" "$@"; }
 rcp() { scp "${SSH_OPTS[@]}" "$@"; }
+# url_for SCHEME HOST PORT — build a URL, omitting the port when it's the scheme default (https:443,
+# http:80). The console on 443 thus advertises a clean https://<host> base-url, which matters for
+# SAML: the SP entity-id/ACS are derived from base-url, and a stray ":443" would mismatch the IdP.
+url_for() {
+  local scheme="$1" host="$2" port="$3"
+  if [[ "$scheme" == https && "$port" == 443 ]] || [[ "$scheme" == http && "$port" == 80 ]]; then
+    printf '%s://%s' "$scheme" "$host"
+  else
+    printf '%s://%s:%s' "$scheme" "$host" "$port"
+  fi
+}
 
 echo "==> reading terraform outputs"
 OUT="$(terraform -chdir="$TFDIR" output -json)"
@@ -102,9 +113,9 @@ ACME_EMAIL="$(val '.acme_email.value')"
 ACME_STAGING="$(val '.acme_staging.value')"          # "true" when staging; else "" (jq's // collapses bool false to empty)
 CF_SECRET_ARN="$(val '.cloudflare_token_secret_arn.value')"
 if [[ -n "$HARBOR_DOMAIN" ]]; then
-  CORE_URL="https://$HARBOR_DOMAIN:$CORE_PORT"; ADMIN_URL="https://$HARBOR_DOMAIN:$ADMIN_PORT"
+  CORE_URL="$(url_for https "$HARBOR_DOMAIN" "$CORE_PORT")"; ADMIN_URL="$(url_for https "$HARBOR_DOMAIN" "$ADMIN_PORT")"
 else
-  CORE_URL="http://$HARBOR_OVERLAY:$CORE_PORT"; ADMIN_URL="http://$HARBOR_OVERLAY:$ADMIN_PORT"
+  CORE_URL="$(url_for http "$HARBOR_OVERLAY" "$CORE_PORT")"; ADMIN_URL="$(url_for http "$HARBOR_OVERLAY" "$ADMIN_PORT")"
 fi
 echo "    lighthouse=$LH_IP  harbor=$HB_IP  gateway=${GW_IP:-<fargate>}  client=$CL_IP"
 echo "    lighthouse underlay=$LH_ADDR  enroll=$GW_URL  collect=$GW_COLLECT  harbor-overlay=$HARBOR_OVERLAY"
@@ -178,13 +189,15 @@ YAML
 echo "    got harbor host pubkey"
 
 # pilot init's default nebula firewall allows inbound ICMP only — fine for a data-plane
-# member, but harbor SERVES core-api (8444) + the console (8445) over the overlay, so the
-# mesh must be allowed to reach those TCP ports inbound (otherwise heartbeat/renew time
-# out: ping works, the HTTP call is dropped). Patch the firewall BEFORE nebula starts.
-echo "==> [harbor] open nebula firewall for control-plane ports (core-api 8444 + console 8445)"
-rsh "$HB_IP" 'sudo python3 - /etc/nebula/config.yml <<PY
+# member, but harbor SERVES core-api + the console over the overlay, so the mesh must be
+# allowed to reach those TCP ports inbound (otherwise heartbeat/renew + the console time out:
+# ping works, the HTTP call is dropped). Patch the firewall BEFORE nebula starts. The ports
+# follow CORE_PORT/ADMIN_PORT (passed as argv), so moving the console to 443 stays consistent.
+echo "==> [harbor] open nebula firewall for control-plane ports (core-api $CORE_PORT + console $ADMIN_PORT)"
+rsh "$HB_IP" 'sudo python3 - /etc/nebula/config.yml '"$CORE_PORT $ADMIN_PORT"' <<PY
 import sys
 p = sys.argv[1]
+ports = [int(a) for a in sys.argv[2:]]
 lines = open(p).read().splitlines()
 out, i, done = [], 0, False
 while i < len(lines):
@@ -192,14 +205,15 @@ while i < len(lines):
     if (not done and lines[i].strip() == "proto: icmp"
             and i + 1 < len(lines) and lines[i + 1].strip().startswith("host:")):
         out.append(lines[i + 1])
-        for port in (8444, 8445):
+        for port in ports:
             out += ["    - port: %d" % port, "      proto: tcp", "      host: any"]
         done = True
         i += 2
         continue
     i += 1
 open(p, "w").write("\n".join(out) + "\n")
-print("firewall: added inbound tcp 8444+8445" if done else "firewall: PATTERN NOT FOUND (left unchanged)")
+msg = "firewall: added inbound tcp " + "+".join(str(x) for x in ports)
+print(msg if done else "firewall: PATTERN NOT FOUND (left unchanged)")
 PY'
 
 # ── 3. harbor: migrate + genesis (lighthouse + HARBOR control-plane certs) ───
@@ -444,11 +458,11 @@ if [[ -n "${SAML_METADATA_URL:-}" || -n "${SAML_METADATA_FILE:-}" ]]; then
   SAML_GROUPS_ATTR="${SAML_GROUPS_ATTR:-http://schemas.microsoft.com/ws/2008/06/identity/claims/groups}"
   IDP_FLAGS="$IDP_FLAGS -saml-groups-attr '$SAML_GROUPS_ATTR'"
   # The SP advertises ACS/metadata/entity-id derived from base-url ($ADMIN_URL); print the EXACT
-  # values (incl. the :$ADMIN_PORT port) the operator must register in the Entra Enterprise App so
+  # values (clean https URLs now that the console defaults to 443) the operator registers in Entra so
   # they can't drift. Entity ID is the -saml-entity-id override if set, else the SP metadata URL.
   SAML_ENTITY="${SAML_ENTITY_ID:-$ADMIN_URL/admin/v1/auth/saml/metadata}"
   echo "    console IdP: Entra SAML [production]; SP keypair delivered (0600); role-map=$SAML_ROLE_MAP"
-  echo "    register these EXACT values in the Entra Enterprise App (match them — note the :$ADMIN_PORT port):"
+  echo "    register these EXACT values in the Entra Enterprise App (copy them verbatim, including any port):"
   echo "      Identifier (Entity ID):  $SAML_ENTITY"
   echo "      Reply URL (ACS):         $ADMIN_URL/admin/v1/auth/saml/acs"
   echo "      SP metadata (reference): $ADMIN_URL/admin/v1/auth/saml/metadata"
@@ -462,6 +476,15 @@ if [[ "$IDP_FLAGS" == *"-mock-idp"* ]]; then
   CONSOLE_LOGIN_NOTE="mock-IdP login"; IDP_TUNNEL=" -L $MOCK_IDP_PORT:$HARBOR_OVERLAY:$MOCK_IDP_PORT"
 else
   CONSOLE_LOGIN_NOTE="Entra SAML login (browser redirects to Entra; base-url/ACS must be reachable — see the SAML runbook)"; IDP_TUNNEL=""
+fi
+# Binding a privileged port (<1024, e.g. the default console port 443) needs CAP_NET_BIND_SERVICE:
+# the console runs as the non-root service user, and the bind address (the overlay IP) is still a
+# privileged port. Grant the cap to the ncp-admin unit only when its port actually needs it. (core-api
+# stays on 8444, so it never needs the cap.)
+ADMIN_CAP=""; TUNNEL_PRIV_NOTE=""
+if [[ "$ADMIN_PORT" -lt 1024 ]]; then
+  ADMIN_CAP=" -p AmbientCapabilities=CAP_NET_BIND_SERVICE"
+  TUNNEL_PRIV_NOTE="   (the tunnel binds local $ADMIN_PORT, a privileged port — prefix the ssh with 'sudo', or just browse from an on-mesh member: no tunnel needed)"
 fi
 echo "==> [harbor] start core-api + admin console on the overlay ($HARBOR_OVERLAY, mesh-only)"
 rsh "$HB_IP" "set -e
@@ -479,8 +502,9 @@ rsh "$HB_IP" "set -e
     -dsn \$DSN -ca-cert \$G/ca.crt $SIGN_BACKEND \
     -pool '$POOL' -lighthouse '$LH' -host-cert /etc/nebula/host.crt \
     -addr $HARBOR_OVERLAY:$CORE_PORT${ACME_FLAGS:+ $ACME_FLAGS} >/dev/null
-  # admin console: issuance mode (so it can approve enrollments) + dev mock-IdP login.
-  sudo systemd-run --uid=$SSH_USER --gid=$SSH_USER --unit ncp-admin --collect /usr/local/bin/harbor admin-api \
+  # admin console: issuance mode (so it can approve enrollments) + SAML/mock IdP. $ADMIN_CAP grants
+  # CAP_NET_BIND_SERVICE when the console is on a privileged port (default 443).
+  sudo systemd-run --uid=$SSH_USER --gid=$SSH_USER$ADMIN_CAP --unit ncp-admin --collect /usr/local/bin/harbor admin-api \
     -dsn \$DSN -ca-cert \$G/ca.crt $SIGN_BACKEND \
     -hmac-key ~/ncp/hmac.b64 -queue-dsn \$QDSN -queue-key ~/ncp/queue.b64 -pool '$POOL' \
     -addr $HARBOR_OVERLAY:$ADMIN_PORT -base-url $ADMIN_URL \
@@ -546,6 +570,7 @@ cat <<EOF
                                             fleet health, policy, cloud-trust, etc.)
    Off-mesh convenience (out-of-band admin path): SSH-tunnel the console —
      ssh -i $SSH_KEY -L $ADMIN_PORT:$HARBOR_OVERLAY:$ADMIN_PORT$IDP_TUNNEL $SSH_USER@$HB_IP
+$TUNNEL_PRIV_NOTE
 $TUNNEL_NOTE
 
  Verify: from any joined node,  ping $LH_OVERLAY  and  ping $HARBOR_OVERLAY ;

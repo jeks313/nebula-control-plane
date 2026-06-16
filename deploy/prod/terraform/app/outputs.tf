@@ -92,8 +92,8 @@ output "monitoring_hint" {
 }
 
 output "console_hint" {
-  description = "The admin console is mesh-only (Harbor's overlay IP, default 10.44.0.2:8445). After the bootstrap, reach it from an enrolled mesh member, or SSH-tunnel ports 8445+8446 to Harbor (see deploy README / the bootstrap output)."
-  value       = "mesh-only — http://<harbor-overlay>:8445 (default 10.44.0.2); not exposed in any security group by design"
+  description = "The admin console is mesh-only (Harbor's overlay IP, default 10.44.0.2:443 — HTTPS when mesh_name/mesh_domain are set, else plain HTTP). After the bootstrap, reach it from an enrolled mesh member, or SSH-tunnel the console port to Harbor (see deploy README / the bootstrap output)."
+  value       = "mesh-only — https://<harbor-overlay> (default 10.44.0.2:443); not exposed in any security group by design"
 }
 
 # ── Trust root (re-exported from the foundation stack) ───────────────────────

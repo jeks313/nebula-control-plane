@@ -55,20 +55,20 @@ Harbor never sees your password — only Microsoft's signed "yes." Microsoft nev
 ## Your three URLs — write these down first
 
 Everything hinges on three URLs, and you can compute all of them **right now** from your
-`mesh_name` and `mesh_domain` (no need to run anything first). The console's address ("base URL")
-is `https://<mesh_name>-harbor.<mesh_domain>:8445`.
+`mesh_name` and `mesh_domain` (no need to run anything first). The console runs on the standard
+HTTPS port (443), so its address ("base URL") is just `https://<mesh_name>-harbor.<mesh_domain>`.
 
 Worked example with `mesh_name = poc` and `mesh_domain = mesh.failsafe.net`:
 
 | What | Value (with the example) |
 |---|---|
-| **Base URL** (the console) | `https://poc-harbor.mesh.failsafe.net:8445` |
-| **Entity ID / Identifier** | `https://poc-harbor.mesh.failsafe.net:8445/admin/v1/auth/saml/metadata` |
-| **Reply URL / ACS** | `https://poc-harbor.mesh.failsafe.net:8445/admin/v1/auth/saml/acs` |
+| **Base URL** (the console) | `https://poc-harbor.mesh.failsafe.net` |
+| **Entity ID / Identifier** | `https://poc-harbor.mesh.failsafe.net/admin/v1/auth/saml/metadata` |
+| **Reply URL / ACS** | `https://poc-harbor.mesh.failsafe.net/admin/v1/auth/saml/acs` |
 
-> ⚠️ **Note the `:8445` port.** The console runs on port 8445 (mesh-only), so the URLs include
-> it. A URL without the port will *not* match and login will fail. The bootstrap re-prints these
-> exact values when it wires SAML, so you can double-check.
+> ℹ️ **No port in these URLs** — the console is on the standard HTTPS port **443**. (If you override
+> `ADMIN_PORT` to something non-standard, add `:<port>` to all three.) The bootstrap re-prints these
+> exact values when it wires SAML, so you can copy them verbatim into Entra.
 
 ---
 
@@ -81,8 +81,8 @@ In the Entra admin center (`entra.microsoft.com`):
 2. **Start SAML.** Open the app → **Single sign-on** → choose **SAML**.
 
 3. **Basic SAML Configuration** → **Edit**, and paste your two URLs from above:
-   - **Identifier (Entity ID):** your Entity ID URL (e.g. `https://poc-harbor.mesh.failsafe.net:8445/admin/v1/auth/saml/metadata`).
-   - **Reply URL (Assertion Consumer Service URL):** your ACS URL (e.g. `…:8445/admin/v1/auth/saml/acs`).
+   - **Identifier (Entity ID):** your Entity ID URL (e.g. `https://poc-harbor.mesh.failsafe.net/admin/v1/auth/saml/metadata`).
+   - **Reply URL (Assertion Consumer Service URL):** your ACS URL (e.g. `…/admin/v1/auth/saml/acs`).
    - **Sign on URL:** optional; leave blank or set the base URL.
    - **Save.**
 
@@ -171,14 +171,14 @@ What the bootstrap does with these:
 
 ## Test it (do this before you rely on it)
 
-1. **Harbor advertises itself:** from a mesh member, `curl -sk https://<mesh_name>-harbor.<mesh_domain>:8445/admin/v1/auth/saml/metadata` returns XML (the SP metadata). If this fails, your HTTPS/cert or networking is the problem, not SAML.
-2. **Admin login works:** browse `https://<mesh_name>-harbor.<mesh_domain>:8445/` → you're redirected to Microsoft → sign in as a member of the **admin** group → you land in the console **as an admin**. The login shows up in the audit log.
+1. **Harbor advertises itself:** from a mesh member, `curl -sk https://<mesh_name>-harbor.<mesh_domain>/admin/v1/auth/saml/metadata` returns XML (the SP metadata). If this fails, your HTTPS/cert or networking is the problem, not SAML.
+2. **Admin login works:** browse `https://<mesh_name>-harbor.<mesh_domain>/` → you're redirected to Microsoft → sign in as a member of the **admin** group → you land in the console **as an admin**. The login shows up in the audit log.
 3. **Fail-closed check:** sign in as someone **not** in any mapped group → you land as **viewer** only (no admin buttons). This proves the role map is locked down.
 
 ## If it breaks — common causes (in order of likelihood)
 
 - **Everyone lands as `viewer`, even admins.** The role map didn't match. Check: (a) the GUIDs in `SAML_ROLE_MAP` are the **Object IDs** of the assigned groups, (b) you used **`;`** between groups (not `,`), (c) the group claim is actually being emitted (Part A step 4).
-- **Login loops / cookie errors.** You're not on HTTPS, or the URL/port the browser uses doesn't match the ACS you registered (remember the **`:8445`**).
+- **Login loops / cookie errors.** You're not on HTTPS, or the URL the browser uses doesn't match the ACS you registered (host **and** port must match exactly — the console defaults to 443, so the URLs have no port).
 - **`admin-api: SAML SP key must be RSA` at startup.** You generated an EC key. Re-make it with `-newkey rsa:2048` (B.1).
 - **Microsoft says the Reply URL/Identifier doesn't match.** A character or the port differs between Entra and the values the bootstrap printed. Make them identical.
 - **Browser can't reach the console at all.** You're not on the mesh, or the Harbor name doesn't resolve to its overlay IP from your machine.
@@ -199,8 +199,8 @@ console process to switch an already-running deployment to SAML without re-runni
 ```bash
 harbor admin-api \
   -dsn "$DSN" -ca-cert <genesis>/ca.crt -backend kms -kms-ca-key-id <arn> -kms-config-key-id <arn> \
-  -addr <harbor-overlay>:8445 \
-  -base-url https://<mesh_name>-harbor.<mesh_domain>:8445 \
+  -addr <harbor-overlay>:443 \
+  -base-url https://<mesh_name>-harbor.<mesh_domain> \
   -environment production \
   -saml-idp-metadata-url "<App Federation Metadata Url>" \
   -saml-sp-cert /home/<user>/ncp/saml/sp.crt -saml-sp-key /home/<user>/ncp/saml/sp.key \
@@ -209,6 +209,8 @@ harbor admin-api \
 ```
 
 - Drop `-mock-idp`/`-mock-idp-addr` entirely (they conflict with real SAML, and production refuses them).
+- **Port 443 is privileged** and admin-api runs **non-root**, so the unit needs `CAP_NET_BIND_SERVICE` (e.g. `systemd-run -p AmbientCapabilities=CAP_NET_BIND_SERVICE …`). The bootstrap adds this automatically; if you launch by hand on 443, grant it or the bind fails.
+- `-base-url` has **no port** because 443 is the HTTPS default — keep it port-less so the SP's advertised Entity ID/ACS match what you registered in Entra. (Override `ADMIN_PORT`/`-addr` to a non-443 port only if you must, and then put `:<port>` back on `-base-url`.)
 - `-saml-entity-id` is optional; omit it to default to `<base-url>/admin/v1/auth/saml/metadata`.
 - The `;` in `-role-map` separates groups; a `,` would (wrongly) be read as multiple roles for one group.
 
