@@ -24,8 +24,11 @@ serverless, and the example deploy uses it by default.
 
 `gateway_runtime = "fargate"` gives you:
 
-- an **ECS Fargate service** in the `edge` subnet running `cmd/gateway` (a tiny alpine
-  image: the static binary + an entrypoint that materializes config — `Dockerfile`),
+- an **ECS Fargate service** in the `edge` subnet running `cmd/gateway` (a **distroless,
+  shell-less, nonroot** image — ADR 0006: `gcr.io/distroless/static-debian12:nonroot` + the
+  bare static binary, no entrypoint shell; `Dockerfile`). The binary reads its key/cert
+  **material from env vars** (`NCP_GW_*`, injected from Secrets Manager) and its operational
+  flags from the ECS `command`,
 - **two network load balancers** for stable addresses (Fargate task IPs are ephemeral) —
   this split is required because an *internet-facing* NLB is **not reachable from inside
   the VPC** by DNS, so in-VPC consumers (Harbor pulling collect; the cloud client
@@ -60,8 +63,10 @@ gateway can.
 `lighthouse_runtime = "fargate"` gives you (`lighthouse_fargate.tf`):
 
 - an **ECS Fargate service** in the `mesh` subnet running the **`nebula.Dockerfile`**
-  image (alpine + the pinned, sha-verified `nebula` release; `nebula-entrypoint.sh`
-  renders a `tun.disabled` lighthouse `config.yml` from the injected identity),
+  image (**distroless, shell-less, nonroot** — ADR 0006: the pinned, sha-verified `nebula`
+  release + the static **`cmd/nebula-boot`** shim, which reads the injected identity from
+  `NCP_LH_*` env, renders a `tun.disabled` lighthouse `config.yml`, and `exec`s nebula —
+  replacing the old shell entrypoint),
 - a **UDP network load balancer with a pinned Elastic IP** — the lighthouse's underlay
   address is baked into every host's `static_host_map`, so it must be stable,
 - the nebula identity (CA + genesis-issued cert + host key) injected from **Secrets
@@ -92,8 +97,8 @@ injected for Fargate). To run the spike by hand after `terraform apply`:
 ```bash
 # 1. generate the lighthouse keypair + have harbor's genesis sign it for the LH overlay IP
 #    (pilot init -am-lighthouse locally; feed host.pub to `harbor genesis -lighthouse-pub`)
-# 2. push the image:
-deploy/fargate/build-push.sh lighthouse
+# 2. push the image (builds the nebula-boot shim + the distroless lighthouse image):
+deploy/prod/fargate/build-push.sh lighthouse
 # 3. populate the secret with ca.crt / the signed host.crt / host.key:
 aws secretsmanager put-secret-value --secret-id ncp-lighthouse-config \
   --secret-string "$(jq -n --rawfile ca ca.crt --rawfile c host.crt --rawfile k host.key \
@@ -107,26 +112,33 @@ aws ecs update-service --cluster ncp-lighthouse --service ncp-lighthouse --force
 ## Run it
 
 ```bash
-cd deploy/terraform
+cd deploy/prod/terraform/app
 terraform apply                                     # gateway=fargate by default: ECR repo, NLB, ECS service, empty secret
 # the genesis bootstrap builds/pushes the gateway image, populates the secret, and
 # forces the deploy — run it under the same AWS creds you used for terraform:
-aws-vault exec nebula -- bash ../scripts/bootstrap-genesis.sh
+aws-vault exec nebula -- bash ../../bootstrap-genesis.sh
 ```
 
-To build/push an image by hand: `deploy/fargate/build-push.sh [gateway|lighthouse]`.
+To build/push an image by hand: `deploy/prod/fargate/build-push.sh [gateway|lighthouse]`
+(needs `go` — both images now carry a static Go binary).
 
-**Status: spike.** `terraform validate` is clean in every runtime combination; the
-images build; the scripts pass `bash -n`. **Not** live-applied (no AWS creds / no docker
-in the dev env). Expect first-run iteration on a real apply.
+**Status: spike.** `terraform validate` is clean in every runtime combination; `go
+build`/`test`/`vet`/`golangci-lint` pass (incl. the `cmd/nebula-boot` test). **Not**
+live-applied (no AWS creds / no docker in the dev env). Expect first-run iteration on a
+real apply.
 
 ## Caveats (spike)
 
-- The gateway's **local queue is ephemeral** (task storage) — a task restart loses
+- The gateway's **local queue is ephemeral** (`/tmp` task storage) — a task restart loses
   in-flight enrollments; tolerable (Core re-verifies; devices retry), or mount EFS.
-- Public enroll is **plain HTTP behind the NLB** (`-insecure`, TCP passthrough) here;
-  production terminates TLS at the NLB (ACM) or in the gateway. The **collect port is
-  mTLS regardless** (leaf-pinned, the gateway terminates it).
+- Public enroll TLS terminates **in the gateway**: with `gateway_domain` set it obtains +
+  renews its **own Let's Encrypt cert via ACME DNS-01** (Cloudflare) and serves HTTPS end to
+  end (the NLB is L4 passthrough), persisting the cert cache on EFS (ADR 0007 TLS pivot);
+  without a domain it falls back to `-insecure` (plain HTTP behind the NLB). The **collect
+  port is mTLS regardless** (leaf-pinned, the gateway terminates it).
+- Both images are **distroless + nonroot** (uid 65532, ADR 0006): no shell, no package
+  manager — an attacker with code-exec has neither `/bin/sh` nor root, and rebuilds track the
+  Go/nebula payload, not an OS-distro CVE treadmill.
 - The Fargate lighthouse's **host key is generated off-box and injected** (vs the EC2
   lighthouse, where it never leaves the node) — a deliberate spike trade-off.
 - Single AZ / `desired_count = 1` for the spike; the NLB + ECS make scaling to N tasks

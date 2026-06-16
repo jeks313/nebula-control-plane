@@ -166,6 +166,42 @@ variable "gateway_cidr" {
   default     = "0.0.0.0/0"
 }
 
+# ── Edge TLS: per-component Let's Encrypt via ACME DNS-01 (Cloudflare) ────────
+# The scoped Cloudflare DNS token itself is NOT a variable — it lives in the Secrets
+# Manager secret created here (operator/bootstrap populates it), injected as
+# $NCP_ACME_CLOUDFLARE_TOKEN. Cloudflare DNS records + WAF are operator-owned.
+variable "gateway_domain" {
+  description = "Public DNS name the enrollment gateway serves (e.g. enroll.example.com). When set (+ gateway_runtime=fargate), the gateway obtains a Let's Encrypt cert via ACME DNS-01 and serves HTTPS; empty keeps the -insecure plaintext-behind-proxy spike."
+  type        = string
+  default     = ""
+
+  validation {
+    # ACME wiring (EFS cache, token grant, -acme-domain flag, https outputs) is Fargate-only.
+    # gateway_domain on the EC2 runtime would create an orphaned token secret no gateway
+    # principal can read AND advertise an https:// enroll URL the EC2 gateway never serves.
+    condition     = var.gateway_domain == "" || var.gateway_runtime == "fargate"
+    error_message = "gateway_domain requires gateway_runtime=fargate — auto-TLS is wired only on the Fargate gateway. For the EC2 gateway, terminate TLS upstream or use -tls-cert."
+  }
+}
+
+variable "harbor_domain" {
+  description = "DNS name harbor's core-api + console serve (e.g. harbor.mesh.example.com, an A record to Core's overlay IP). When set, Core's role is granted read on the Cloudflare DNS token so it can obtain LE certs via ACME DNS-01 (the bootstrap passes -acme-domain)."
+  type        = string
+  default     = ""
+}
+
+variable "acme_email" {
+  description = "ACME account email for Let's Encrypt. Empty = an anonymous LE account (valid, but you get NO cert-expiry warnings or account-recovery mail) — SET THIS for a production auto-renewing cert."
+  type        = string
+  default     = ""
+}
+
+variable "acme_staging" {
+  description = "Use the Let's Encrypt STAGING CA (untrusted, no rate limits) while testing the ACME wiring."
+  type        = bool
+  default     = false
+}
+
 variable "state_bucket_name" {
   description = "The foundation stack's Terraform state bucket (its `state_bucket` output) — this stack reads foundation's remote state from it for the KMS key ARNs + IAM policy. Same value you set in the backend block (versions.tf)."
   type        = string

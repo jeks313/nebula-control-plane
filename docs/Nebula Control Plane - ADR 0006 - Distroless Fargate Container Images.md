@@ -88,18 +88,25 @@ Phased. The image-hardening items previously tracked as standalone todos (#21–
 folded in here as **Phase 3** — they are all "harden the Fargate image supply chain" and
 belong with this decision.
 
-- **Phase 1 — gateway → distroless.** Add env-var config to `cmd/gateway` (HMAC + queue
-  keys, collect cert/key, Harbor client cert from env; create the ephemeral queue dir
-  in-process). Rewrite `deploy/fargate/Dockerfile`: `FROM gcr.io/distroless/static-debian12`
-  (digest-pinned), `COPY gateway /gateway`, `USER nonroot`, `ENTRYPOINT ["/gateway"]`.
-  Delete `entrypoint.sh`. Verify the image builds and that public enroll + the leaf-pinned
-  collect mTLS still work.
-- **Phase 2 — lighthouse → distroless (the extra work).** Add `cmd/nebula-boot` (static,
-  `CGO_ENABLED=0`): env → cert files + rendered `config.yml` → `exec` nebula. Rewrite
-  `nebula.Dockerfile` to distroless: `COPY` the sha-verified nebula binary **and** the
-  shim, `USER nonroot`, `ENTRYPOINT ["/nebula-boot"]`. Delete `nebula-entrypoint.sh`.
-  Confirm a `nonroot`, `tun.disabled` lighthouse still binds `:4242` + the stats port (no
-  privilege is needed without a TUN).
+**Implementation note (done):** Phases 1 + 2 landed in the **production** tree
+(`deploy/prod/fargate/`), which is the tree slated for distroless by ADR 0007 Phase 6 — not
+the demo `deploy/fargate/`, which ADR 0007 keeps on alpine for fast iteration. The shared
+binaries (`cmd/gateway`'s env-var config, the new `cmd/nebula-boot`) are backward-compatible,
+so the demo tree's alpine + shell entrypoints keep working unchanged. The base uses the
+`:nonroot` tag (uid 65532); `@sha256` digest-pinning is Phase 3 below.
+
+- ✅ **Phase 1 — gateway → distroless (DONE).** `cmd/gateway` reads its material (HMAC + queue
+  keys, collect cert/key, Harbor client cert) from `$NCP_GW_*` env, env-first with the
+  `-flag <file>` paths kept as a fallback; operational flags arrive via the ECS `command`.
+  `deploy/prod/fargate/Dockerfile`: `FROM gcr.io/distroless/static-debian12:nonroot`,
+  `COPY gateway /gateway`, bare-binary `ENTRYPOINT`. `entrypoint.sh` deleted. The durable
+  queue lives on `/tmp` (distroless ships a writable `/tmp`); the ACME cert cache is the
+  EFS mount (ADR 0007 Phase 5), writable via the EFS access point's enforced uid 65532.
+- ✅ **Phase 2 — lighthouse → distroless (DONE).** New static `cmd/nebula-boot` (`CGO_ENABLED=0`):
+  reads `$NCP_LH_*` → writes cert files + renders the `tun.disabled` `config.yml` → `syscall.Exec`
+  nebula. `nebula.Dockerfile` is distroless:nonroot (fetch stage stays alpine for curl/tar +
+  sha-verify), carrying nebula + the shim; bare-shim `ENTRYPOINT`. `nebula-entrypoint.sh`
+  deleted. Both bind only high ports (UDP 4242 + the TCP stats port) — no privilege without a TUN.
 - **Phase 3 — supply-chain hardening** (folds in former todos #21–#25):
   - Pin both images by **digest** and set the ECR repos `image_tag_mutability = "IMMUTABLE"`
     (reproducibility + rollback vs today's `:latest` / `MUTABLE`). *(was #21)*

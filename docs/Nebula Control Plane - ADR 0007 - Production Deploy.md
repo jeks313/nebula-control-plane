@@ -171,12 +171,22 @@ Ordered so each phase de-risks the next; KMS + Aurora are the foundation.
   serves a preconfigured ACME `TLSConfig`; `-insecure` kept only as an explicit
   behind-proxy opt-out). DNS-01 (not HTTP-01/ALPN) because origins sit behind Cloudflare
   and harbor is mesh-only. The mesh-only harbor APIs also get public LE certs by hostname
-  (uniform mechanism). **Remaining (infra):** a Secrets Manager secret for the scoped
-  Cloudflare token; durable cert storage for the ephemeral Fargate gateway (its ACME cache
-  must survive restarts or LE rate-limits bite); the gateway/harbor hostnames; switch the
-  gateway task from `-insecure` to `-acme-domain`. Cloudflare DNS + WAF are operator-owned.
-  Collect + the lighthouse UDP NLB are unchanged.
-- **Phase 6 — Images.** Distroless per **ADR 0006** (gateway env-var config + `cmd/nebula-boot`).
+  (uniform mechanism). ✅ **Infra done** (`deploy/prod/terraform/app/acme.tf`): a Secrets
+  Manager secret for the scoped Cloudflare token (placeholder + `ignore_changes`, injected as
+  `$NCP_ACME_CLOUDFLARE_TOKEN`); a CMK-encrypted **EFS** cert cache for the ephemeral Fargate
+  gateway (its ACME cache must survive restarts or LE rate-limits bite) behind a non-root EFS
+  access point; least-priv `GetSecretValue` grants for the gateway exec role + Core; the
+  gateway task now serves `-acme-domain` (with `health_check_grace_period` for the blocking
+  first issuance) and harbor-side vars/outputs. **Remaining (operator/follow-up):** Cloudflare
+  DNS + WAF (operator-owned); wiring the genesis bootstrap to pass `-acme-domain` + the token
+  to harbor's core-api/admin-api (terraform grant is in place; bootstrap change tracked). Collect
+  + the lighthouse UDP NLB are unchanged.
+- **Phase 6 — Images.** ✅ **Done** — both prod Fargate images are **distroless, shell-less,
+  nonroot** (`gcr.io/distroless/static-debian12:nonroot`, uid 65532) per **ADR 0006**: gateway
+  reads its material from `$NCP_GW_*` env (no entrypoint shell); the lighthouse uses the new
+  static `cmd/nebula-boot` shim (renders config + exec's nebula). The demo tree stays alpine.
+  **Remaining:** ADR 0006 Phase 3 supply-chain hardening (digest-pin the base, `IMMUTABLE` ECR
+  tags + lifecycle policy, pin `platform_version`).
 - **Phase 7 — Obs/DR.** `/metrics`+`/healthz`+`/readyz` on core-api/admin/gateway; ship
   EC2-harbor logs to CloudWatch; SNS alarms (wire `signer.OnAlarm`, breaker trips,
   audit-verify failures); Aurora PITR + final-snapshot + deletion-protection; KMS

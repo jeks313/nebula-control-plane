@@ -33,6 +33,19 @@ import (
 // version is overridden at build time via -ldflags "-X main.version=...".
 var version = "dev"
 
+// Secret-material env vars (ADR 0006): a shell-less distroless container reads its keys
+// and certs straight from these Secrets-Manager-injected vars, so no entrypoint shell is
+// needed to materialize files. Each takes precedence over its matching -flag <file>, which
+// remains for systemd / dev. PEM vars hold the literal PEM; key vars hold base64url.
+const (
+	envHMACKey      = "NCP_GW_HMAC_KEY_B64"
+	envHMACKeyPrev  = "NCP_GW_HMAC_KEY_PREV_B64"
+	envQueueKey     = "NCP_GW_QUEUE_KEY_B64"
+	envCollectCert  = "NCP_GW_COLLECT_CERT_PEM"
+	envCollectKey   = "NCP_GW_COLLECT_KEY_PEM"
+	envHarborClient = "NCP_GW_HARBOR_CLIENT_PEM"
+)
+
 func main() {
 	if len(os.Args) >= 2 && (os.Args[1] == "version" || os.Args[1] == "--version" || os.Args[1] == "-v") {
 		fmt.Printf("gateway %s\n", version)
@@ -45,12 +58,12 @@ func main() {
 
 	fs := flag.NewFlagSet("gateway", flag.ExitOnError)
 	addr := fs.String("addr", ":8443", "listen address")
-	keyPath := fs.String("hmac-key", "", "path to the primary nonce HMAC key (base64url, >=16 bytes)")
-	prevPath := fs.String("hmac-key-prev", "", "optional previous nonce key for rotation overlap")
+	keyPath := fs.String("hmac-key", "", "path to the primary nonce HMAC key (base64url, >=16 bytes); or set $"+envHMACKey)
+	prevPath := fs.String("hmac-key-prev", "", "optional previous nonce key for rotation overlap; or set $"+envHMACKeyPrev)
 	rps := fs.Float64("rate", 5, "edge rate limit (requests/sec per IP and per key)")
 	burst := fs.Int("burst", 20, "edge rate-limit burst")
 	queueDSN := fs.String("queue-dsn", "", "durable queue SQLite DSN (default: in-memory dev queue)")
-	queueKeyPath := fs.String("queue-key", "", "gateway<->Core queue HMAC key (base64url, >=16 bytes)")
+	queueKeyPath := fs.String("queue-key", "", "gateway<->Core queue HMAC key (base64url, >=16 bytes); or set $"+envQueueKey)
 	tlsCert := fs.String("tls-cert", "", "TLS certificate PEM (serve HTTPS — required on this public endpoint unless -acme-domain or -insecure)")
 	tlsKey := fs.String("tls-key", "", "TLS private key PEM (with -tls-cert)")
 	insecure := fs.Bool("insecure", false, "serve plain HTTP on this PUBLIC endpoint (only when TLS is terminated by a trusted proxy)")
@@ -63,9 +76,9 @@ func main() {
 	// mTLS API so Harbor PULLS from this gateway's local queue (the gateway is then
 	// off-mesh and initiates nothing). Empty = co-located mode (Core drains directly).
 	collectAddr := fs.String("collect-addr", "", "Harbor-facing collect API address (mTLS; e.g. :9443). Empty = co-located mode")
-	collectCert := fs.String("collect-cert", "", "gateway's collect server cert PEM (self-signed; its leaf is pinned in Harbor's gateway registry)")
-	collectKey := fs.String("collect-key", "", "gateway's collect server key PEM")
-	harborClientCert := fs.String("harbor-client-cert", "", "Harbor's pinned client cert PEM — the only client allowed to drain this gateway")
+	collectCert := fs.String("collect-cert", "", "gateway's collect server cert PEM (self-signed; its leaf is pinned in Harbor's gateway registry); or set $"+envCollectCert)
+	collectKey := fs.String("collect-key", "", "gateway's collect server key PEM; or set $"+envCollectKey)
+	harborClientCert := fs.String("harbor-client-cert", "", "Harbor's pinned client cert PEM — the only client allowed to drain this gateway; or set $"+envHarborClient)
 	_ = fs.Parse(os.Args[1:])
 	log := clilog.Setup(clilog.Options{Format: *logFormat, Level: *logLevel})
 	// The enroll endpoint is public, so demand an explicit transport posture (P8: fail
@@ -84,7 +97,17 @@ func main() {
 		fatalf("refusing to serve the public enroll endpoint over plaintext; provide -acme-domain (Let's Encrypt), -tls-cert/-tls-key, or -insecure if TLS is terminated by a trusted proxy")
 	}
 
-	keys, err := loadKeys(*keyPath, *prevPath)
+	// Resolve secret material env-first (a shell-less distroless container gets it as
+	// Secrets-Manager-injected env vars; systemd / dev still use the -flag <file> paths).
+	hmacB64, err := materialString(envHMACKey, *keyPath)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	prevB64, err := materialString(envHMACKeyPrev, *prevPath)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	keys, err := loadKeys(hmacB64, prevB64)
 	if err != nil {
 		fatalf("%v", err)
 	}
@@ -93,7 +116,11 @@ func main() {
 		fatalf("%v", err)
 	}
 
-	q, err := openQueue(*queueDSN, *queueKeyPath)
+	queueKeyB64, err := materialString(envQueueKey, *queueKeyPath)
+	if err != nil {
+		fatalf("%v", err)
+	}
+	q, err := openQueue(*queueDSN, queueKeyB64)
 	if err != nil {
 		fatalf("%v", err)
 	}
@@ -143,7 +170,19 @@ func main() {
 
 	var wg sync.WaitGroup // background servers, joined on shutdown so we never exit mid-drain
 	if *collectAddr != "" {
-		startCollect(ctx, &wg, log, q, *collectAddr, *collectCert, *collectKey, *harborClientCert)
+		collectCertPEM, err := materialString(envCollectCert, *collectCert)
+		if err != nil {
+			fatalf("%v", err)
+		}
+		collectKeyPEM, err := materialString(envCollectKey, *collectKey)
+		if err != nil {
+			fatalf("%v", err)
+		}
+		harborPEM, err := materialString(envHarborClient, *harborClientCert)
+		if err != nil {
+			fatalf("%v", err)
+		}
+		startCollect(ctx, &wg, log, q, *collectAddr, []byte(collectCertPEM), []byte(collectKeyPEM), []byte(harborPEM))
 	}
 
 	log.Info("gateway listening", "addr", *addr, "scheme", httpserve.SchemeFor(srv, *tlsCert, *tlsKey), "version", version, "access", "public/credential-less")
@@ -158,21 +197,17 @@ func main() {
 // pulls candidates from this gateway's LOCAL durable queue and pushes results
 // back. It requires the durable queue (claim/ack/put-result) and a leaf-pinned
 // mTLS pair (the gateway's own server cert + Harbor's pinned client cert).
-func startCollect(ctx context.Context, wg *sync.WaitGroup, log *slog.Logger, q queue.Queue, addr, certPath, keyPath, harborCertPath string) {
+func startCollect(ctx context.Context, wg *sync.WaitGroup, log *slog.Logger, q queue.Queue, addr string, gwCertPEM, gwKeyPEM, harborPEM []byte) {
 	dq, ok := q.(*queue.Durable)
 	if !ok {
 		fatalf("-collect-addr requires the durable queue (-queue-dsn); the in-memory dev queue cannot be collected")
 	}
-	if certPath == "" || keyPath == "" || harborCertPath == "" {
-		fatalf("-collect-addr requires -collect-cert, -collect-key and -harbor-client-cert")
+	if len(gwCertPEM) == 0 || len(gwKeyPEM) == 0 || len(harborPEM) == 0 {
+		fatalf("-collect-addr requires the collect cert, key and Harbor client cert (-collect-cert/-collect-key/-harbor-client-cert or $%s/$%s/$%s)", envCollectCert, envCollectKey, envHarborClient)
 	}
-	gwCert, err := tls.LoadX509KeyPair(certPath, keyPath)
+	gwCert, err := tls.X509KeyPair(gwCertPEM, gwKeyPEM)
 	if err != nil {
 		fatalf("collect server cert: %v", err)
-	}
-	harborPEM, err := os.ReadFile(harborCertPath)
-	if err != nil {
-		fatalf("read -harbor-client-cert: %v", err)
 	}
 	harborPin, err := collect.PinFromCertPEM(harborPEM)
 	if err != nil {
@@ -212,27 +247,25 @@ func closeQueue(q queue.Queue) {
 	}
 }
 
-// loadKeys reads the primary (and optional previous) nonce key. For dev
-// convenience, if no -hmac-key is given an ephemeral key is generated (warned);
-// note that restarting then invalidates outstanding nonces. Production wires the
-// key from secrets management (2.10).
-func loadKeys(keyPath, prevPath string) ([][]byte, error) {
-	var keys [][]byte
-	if keyPath == "" {
+// loadKeys decodes the primary (and optional previous) nonce key from already-resolved
+// base64url material (env var or file contents). For dev convenience, an empty primary
+// yields an ephemeral key (warned) — restarting then invalidates outstanding nonces.
+func loadKeys(primaryB64, prevB64 string) ([][]byte, error) {
+	if primaryB64 == "" {
 		eph := make([]byte, 32)
 		if _, err := rand.Read(eph); err != nil {
 			return nil, err
 		}
-		slog.Warn("gateway: no -hmac-key; using an ephemeral key (dev only) — restart invalidates outstanding nonces")
+		slog.Warn("gateway: no nonce key; using an ephemeral key (dev only) — restart invalidates outstanding nonces")
 		return [][]byte{eph}, nil
 	}
-	k, err := readKey(keyPath)
+	k, err := decodeKey(primaryB64)
 	if err != nil {
 		return nil, err
 	}
-	keys = append(keys, k)
-	if prevPath != "" {
-		p, err := readKey(prevPath)
+	keys := [][]byte{k}
+	if prevB64 != "" {
+		p, err := decodeKey(prevB64)
 		if err != nil {
 			return nil, err
 		}
@@ -244,29 +277,44 @@ func loadKeys(keyPath, prevPath string) ([][]byte, error) {
 // openQueue returns the durable queue when -queue-dsn is set, else the in-memory
 // dev queue. The durable queue is the gateway's only persistent dependency — and
 // it is queue-only (no CA/devices/audit), preserving least privilege (P3).
-func openQueue(dsn, keyPath string) (queue.Queue, error) {
+// queueKeyB64 is the already-resolved base64url queue key (env or file).
+func openQueue(dsn, queueKeyB64 string) (queue.Queue, error) {
 	if dsn == "" {
 		slog.Warn("gateway: no -queue-dsn; using an in-memory queue (dev only) — enrollments are not durable")
 		return queue.NewMemory(), nil
 	}
-	if keyPath == "" {
-		return nil, fmt.Errorf("-queue-dsn requires -queue-key")
+	if queueKeyB64 == "" {
+		return nil, fmt.Errorf("-queue-dsn requires a queue key (-queue-key or $%s)", envQueueKey)
 	}
-	key, err := readKey(keyPath)
+	key, err := decodeKey(queueKeyB64)
 	if err != nil {
 		return nil, err
 	}
 	return queue.OpenDurable(queue.DurableConfig{DSN: dsn, Key: key})
 }
 
-func readKey(path string) ([]byte, error) {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read key %s: %w", path, err)
+// materialString resolves secret material env-first: the env var if set (a shell-less
+// distroless container gets Secrets-Manager values injected directly), else the contents
+// of path. Returns "" when neither is set.
+func materialString(env, path string) (string, error) {
+	if v := os.Getenv(env); v != "" {
+		return v, nil
 	}
-	k, err := base64.RawURLEncoding.DecodeString(trimSpace(string(raw)))
+	if path != "" {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("read %s: %w", path, err)
+		}
+		return string(b), nil
+	}
+	return "", nil
+}
+
+// decodeKey decodes a base64url (raw, unpadded) key, tolerating surrounding whitespace.
+func decodeKey(b64 string) ([]byte, error) {
+	k, err := base64.RawURLEncoding.DecodeString(trimSpace(b64))
 	if err != nil {
-		return nil, fmt.Errorf("key %s is not base64url: %w", path, err)
+		return nil, fmt.Errorf("key is not base64url: %w", err)
 	}
 	return k, nil
 }
