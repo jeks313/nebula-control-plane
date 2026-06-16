@@ -67,3 +67,10 @@ func (b *breaker) reset(_ context.Context) error {
 
 // limit returns the configured ceiling.
 func (b *breaker) limit() int { return b.max }
+
+// isOpen reports whether the breaker is latched open.
+func (b *breaker) isOpen(_ context.Context) (bool, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.open, nil
+}

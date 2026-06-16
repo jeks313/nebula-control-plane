@@ -115,6 +115,22 @@ func (b *SQLBreaker) acquire(ctx context.Context) (allowed, justTripped bool, er
 	return allowed, justTripped, nil
 }
 
+// isOpen reads the shared latch row — the authoritative fleet-wide open state.
+func (b *SQLBreaker) isOpen(ctx context.Context) (bool, error) {
+	if b.max <= 0 {
+		return false, nil // no ceiling configured -> never open
+	}
+	var row signerBreakerRow
+	switch err := b.db.WithContext(ctx).Where("lane = ?", b.lane).First(&row).Error; {
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		return false, nil
+	case err != nil:
+		return false, err
+	default:
+		return row.Open, nil
+	}
+}
+
 func (b *SQLBreaker) reset(ctx context.Context) error {
 	return b.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if e := tx.Where("lane = ?", b.lane).Delete(&signerIssuance{}).Error; e != nil {
