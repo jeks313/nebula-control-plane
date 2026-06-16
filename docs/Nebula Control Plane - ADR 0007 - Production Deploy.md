@@ -160,11 +160,14 @@ Ordered so each phase de-risks the next; KMS + Aurora are the foundation.
     binary from the GitHub tarball, uploads under `pilot|nebula/<ver>/<name>-<os>-<arch>`, and
     prints the `harbor … add`/`release` commands. `BucketOwnerEnforced`, versioned, AES256, TLS-
     only; the public-access-block deliberately allows the public-read policy (the lone public
-    bucket in the stack). Outputs: `artifacts_bucket` + `{version}`-token URL templates. Caveat:
-    a release generation now carries a binary **per `(goos, goarch)`** (the pilot reports its
-    `runtime.GOOS/GOARCH`; Core stamps each host its own arch's artifact), so one staged
-    generation serves a mixed-arch fleet — `harbor nebula add` + `add-artifact -gen N` then
-    `release -gen N`. `fmt`/`validate` clean.
+    bucket in the stack). Outputs: `artifacts_bucket` + `{version}`-token URL templates.
+    Per-arch: a release generation now carries a binary **per `(goos, goarch)`** (the pilot
+    reports its `runtime.GOOS/GOARCH`; Core stamps each host its own arch's artifact), so one
+    staged generation serves a mixed-arch fleet — `harbor nebula add` + `add-artifact -gen N`
+    then `release -gen N`. **Arch affinity**: `release` (CLI + admin API) stages only hosts whose
+    arch the generation ships (`ServableFleet`, resolving each host's arch like `coreapi.device()`
+    — latest issued enrollment, id DESC) and reports the rest, so an unshipped-arch host can't
+    strand the rollout into an observe-window auto-rollback. `fmt`/`validate` clean.
   - Other `app/` layers: **edge** pivoted to per-component ACME/Let's-Encrypt (Phase 5 `acme.tf`,
     no ALB/ACM/WAF); **obs** landed in Phase 7. So the originally-listed remaining layers are done.
 - **Phase 3 — IdP (Entra SAML).** Configure the existing SAML SP per the **runbook**;
