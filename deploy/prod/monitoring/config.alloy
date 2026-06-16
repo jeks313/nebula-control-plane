@@ -1,0 +1,39 @@
+// Grafana Alloy config (ADR 0007 Phase 7c) — runs ON the harbor (EC2) node, tails the systemd
+// journal (where core-api/admin-api/collect/nebula run via `systemd-run --collect`) and pushes
+// to Loki on the monitoring node. Alloy is the supported successor to promtail (which Grafana
+// moved to LTS/deprecated in 2025). The Fargate gateway/lighthouse already ship via awslogs.
+//
+// REFERENCE: deploy.sh renders the live copy with the monitoring node's private IP as the Loki
+// endpoint (http://<monitoring-private-ip>:3100/loki/api/v1/push) — over the VPC, SG-locked to
+// the harbor node.
+
+loki.relabel "journal" {
+	forward_to = []
+
+	// Promote useful journald fields to labels so you can filter by service in Grafana.
+	rule {
+		source_labels = ["__journal__systemd_unit"]
+		target_label  = "unit"
+	}
+	rule {
+		source_labels = ["__journal_priority_keyword"]
+		target_label  = "level"
+	}
+}
+
+loki.source.journal "harbor" {
+	max_age       = "12h"
+	path          = "/var/log/journal"
+	relabel_rules = loki.relabel.journal.rules
+	labels        = {
+		job  = "systemd-journal",
+		host = "harbor",
+	}
+	forward_to = [loki.write.default.receiver]
+}
+
+loki.write "default" {
+	endpoint {
+		url = "http://MONITORING_PRIVATE_IP:3100/loki/api/v1/push"
+	}
+}

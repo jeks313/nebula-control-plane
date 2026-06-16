@@ -35,6 +35,18 @@ services:
     ports:
       - "9093:9093"
 
+  loki:
+    image: docker.io/grafana/loki:3.3.2
+    restart: unless-stopped
+    command:
+      - -config.file=/etc/loki/loki-config.yml
+    volumes:
+      - ./loki-config.yml:/etc/loki/loki-config.yml:ro,Z
+      - loki-data:/loki
+    ports:
+      # Harbor's Grafana Alloy pushes here over the VPC (SG-restricted to the harbor node).
+      - "3100:3100"
+
   grafana:
     image: docker.io/grafana/grafana:11.4.0
     restart: unless-stopped
@@ -53,3 +65,4 @@ volumes:
   prometheus-data:
   alertmanager-data:
   grafana-data:
+  loki-data:

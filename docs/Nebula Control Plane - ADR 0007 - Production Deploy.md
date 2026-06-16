@@ -231,9 +231,12 @@ Ordered so each phase de-risks the next; KMS + Aurora are the foundation.
     (enrolls it keyless via aws-sigv4, renders prometheus.yml for the real targets/scheme, runs
     the stack) complete it. A real Alertmanager receiver (Slack/email/PagerDuty) is wired
     out-of-band; the Grafana password lands in a `0600 .env`, not on a command line.
-  - **7c — Log aggregation (Loki): TODO.** Ship the EC2-harbor logs (journald) to **Loki**
-    alongside the Prometheus stack (promtail/grafana-agent → Loki; a Grafana datasource); the
-    Fargate gateway/lighthouse already ship via the awslogs driver.
+  - **7c — Log aggregation (Loki): ✅ DONE.** A **Loki** container alongside the Prometheus
+    stack + a Grafana Loki datasource; **Grafana Alloy** (promtail's supported successor) on
+    the harbor node tails journald and pushes to Loki over the VPC (SG-locked: monitoring
+    ingress 3100 ← harbor; harbor egress 3100 → client tier). `deploy.sh` installs Alloy +
+    renders its endpoint. The Fargate gateway/lighthouse already ship via awslogs. (Future
+    hardening: ship over the overlay instead of the VPC — needs a nebula-policy inbound rule.)
   - **7d — DR terraform: TODO.** KMS multi-Region replica keys; export the hash-chained audit
     to an S3 Object-Lock bucket; raise log retention + non-zero secret recovery windows.
 
