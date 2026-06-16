@@ -182,18 +182,38 @@ variable "gateway_domain" {
     condition     = var.gateway_domain == "" || var.gateway_runtime == "fargate"
     error_message = "gateway_domain requires gateway_runtime=fargate — auto-TLS is wired only on the Fargate gateway. For the EC2 gateway, terminate TLS upstream or use -tls-cert."
   }
+
+  validation {
+    # The bootstrap interpolates this into shell + an ACME hostname; constrain to a hostname
+    # charset so a stray space/metacharacter can't break the command or inject.
+    condition     = var.gateway_domain == "" || can(regex("^[a-zA-Z0-9.-]+$", var.gateway_domain))
+    error_message = "gateway_domain must be a bare hostname (letters, digits, dots, hyphens)."
+  }
 }
 
 variable "harbor_domain" {
   description = "DNS name harbor's core-api + console serve (e.g. harbor.mesh.example.com, an A record to Core's overlay IP). When set, Core's role is granted read on the Cloudflare DNS token so it can obtain LE certs via ACME DNS-01 (the bootstrap passes -acme-domain)."
   type        = string
   default     = ""
+
+  validation {
+    # The bootstrap interpolates this into shell + an ACME hostname; constrain to a hostname
+    # charset so a stray space/metacharacter can't break the command or inject.
+    condition     = var.harbor_domain == "" || can(regex("^[a-zA-Z0-9.-]+$", var.harbor_domain))
+    error_message = "harbor_domain must be a bare hostname (letters, digits, dots, hyphens)."
+  }
 }
 
 variable "acme_email" {
   description = "ACME account email for Let's Encrypt. Empty = an anonymous LE account (valid, but you get NO cert-expiry warnings or account-recovery mail) — SET THIS for a production auto-renewing cert."
   type        = string
   default     = ""
+
+  validation {
+    # Also interpolated into the bootstrap shell; reject spaces/metacharacters.
+    condition     = var.acme_email == "" || can(regex("^[^[:space:]@]+@[^[:space:]@]+$", var.acme_email))
+    error_message = "acme_email must look like an email address (no spaces)."
+  }
 }
 
 variable "acme_staging" {

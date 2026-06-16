@@ -138,10 +138,25 @@ output "rds_kms_key_arn" {
   value       = aws_kms_key.rds.arn
 }
 
-# ── Edge TLS (ACME) — consumed by the bootstrap to populate the Cloudflare token ──
+# ── Edge TLS (ACME) — consumed by the bootstrap to wire harbor's auto-TLS ──
 output "cloudflare_token_secret_arn" {
   description = "Secrets Manager ARN of the scoped Cloudflare DNS token (empty unless gateway_domain or harbor_domain is set). Populate it out-of-band: `aws secretsmanager put-secret-value --secret-id <arn> --secret-string <token>`. Created with a placeholder; ignore_changes keeps TF from clobbering the real value."
   value       = one(aws_secretsmanager_secret.cloudflare_token[*].arn)
+}
+
+output "harbor_domain" {
+  description = "DNS name harbor's core-api + console serve their own Let's Encrypt cert for (empty = harbor stays plain HTTP on the overlay IP). The genesis bootstrap reads this to wire -acme-domain; operators must resolve it to Core's overlay IP for mesh members."
+  value       = var.harbor_domain
+}
+
+output "acme_email" {
+  description = "ACME account email (passed to harbor's -acme-email by the bootstrap when harbor_domain is set)."
+  value       = var.acme_email
+}
+
+output "acme_staging" {
+  description = "Whether harbor uses the Let's Encrypt STAGING CA (bootstrap passes -acme-staging when true)."
+  value       = var.acme_staging
 }
 
 output "gateway_acme_efs_id" {

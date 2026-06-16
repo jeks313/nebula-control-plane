@@ -72,9 +72,22 @@ GATEWAY_RUNTIME="$(val '.gateway_runtime.value')"; GATEWAY_RUNTIME="${GATEWAY_RU
 LIGHTHOUSE_RUNTIME="$(val '.lighthouse_runtime.value')"; LIGHTHOUSE_RUNTIME="${LIGHTHOUSE_RUNTIME:-ec2}"
 NAME_PREFIX="$(val '.name_prefix.value')"; NAME_PREFIX="${NAME_PREFIX:-ncp}"
 TF_REGION="$(val '.region.value')"
+# Harbor edge TLS (ADR 0007 Phase 5): when harbor_domain is set, core-api + the console obtain
+# their OWN Let's Encrypt cert via ACME DNS-01 and serve HTTPS; clients then reach Harbor by
+# that hostname (operators must resolve it to Harbor's overlay IP for mesh members). Empty =
+# plain HTTP on the overlay IP (unchanged default).
+HARBOR_DOMAIN="$(val '.harbor_domain.value')"
+ACME_EMAIL="$(val '.acme_email.value')"
+ACME_STAGING="$(val '.acme_staging.value')"          # "true" when staging; else "" (jq's // collapses bool false to empty)
+CF_SECRET_ARN="$(val '.cloudflare_token_secret_arn.value')"
+if [[ -n "$HARBOR_DOMAIN" ]]; then
+  CORE_URL="https://$HARBOR_DOMAIN:$CORE_PORT"; ADMIN_URL="https://$HARBOR_DOMAIN:$ADMIN_PORT"
+else
+  CORE_URL="http://$HARBOR_OVERLAY:$CORE_PORT"; ADMIN_URL="http://$HARBOR_OVERLAY:$ADMIN_PORT"
+fi
 echo "    lighthouse=$LH_IP  harbor=$HB_IP  gateway=${GW_IP:-<fargate>}  client=$CL_IP"
 echo "    lighthouse underlay=$LH_ADDR  enroll=$GW_URL  collect=$GW_COLLECT  harbor-overlay=$HARBOR_OVERLAY"
-echo "    runtimes: gateway=$GATEWAY_RUNTIME  lighthouse=$LIGHTHOUSE_RUNTIME"
+echo "    runtimes: gateway=$GATEWAY_RUNTIME  lighthouse=$LIGHTHOUSE_RUNTIME  harbor-tls=${HARBOR_DOMAIN:+ACME:$HARBOR_DOMAIN}${HARBOR_DOMAIN:-plain-http}"
 
 # Any Fargate component (gateway and/or the SPIKE lighthouse) needs the AWS CLI + a
 # container engine locally (build/push the image, populate the config secret, force the
@@ -84,6 +97,12 @@ if [[ "$GATEWAY_RUNTIME" == "fargate" || "$LIGHTHOUSE_RUNTIME" == "fargate" ]]; 
   command -v aws >/dev/null || { echo "missing tool (a *_runtime=fargate): aws" >&2; exit 1; }
   command -v "${CONTAINER_ENGINE:-podman}" >/dev/null || command -v docker >/dev/null || {
     echo "missing container engine (a *_runtime=fargate): install podman or docker, or set CONTAINER_ENGINE" >&2; exit 1; }
+fi
+# harbor_domain set => we fetch the scoped Cloudflare token from Secrets Manager to wire
+# harbor's ACME, which needs aws + a populated (non-placeholder) token secret.
+if [[ -n "$HARBOR_DOMAIN" ]]; then
+  command -v aws >/dev/null || { echo "missing tool (harbor_domain set, fetches the Cloudflare DNS token): aws" >&2; exit 1; }
+  [[ -n "$CF_SECRET_ARN" ]] || { echo "harbor_domain set but the cloudflare_token_secret_arn output is empty — re-apply the app stack" >&2; exit 1; }
 fi
 # SPIKE: lighthouse_runtime=fargate generates the lighthouse host key OFF-box (here) and
 # injects it via Secrets Manager (vs the EC2 path where it never leaves the node). The
@@ -346,6 +365,26 @@ echo "==> [harbor] create the imac join key"
 IMAC_KEY="$(rsh "$HB_IP" "harbor joinkey create -dsn ~/ncp/harbor.db -name imac -groups laptops 2>/dev/null | grep -o 'njk_[A-Za-z0-9_-]*' || true")"
 
 # ── 8. harbor: core-api (renew/heartbeat) + admin console (mock-IdP) ─────────
+# Edge TLS: when harbor_domain is set, fetch the scoped Cloudflare token (Secrets Manager)
+# and deliver it to the box as a 0600 file (piped over ssh stdin — never on a command line),
+# prep the ACME cert cache (~/ncp/acme, on the CMK-encrypted root EBS so it survives reboots),
+# and build the shared -acme-* flags for core-api + admin-api. Both processes share the cache
+# dir + domain; certmagic coordinates issuance/renewal across them via storage locks.
+ACME_FLAGS=""
+if [[ -n "$HARBOR_DOMAIN" ]]; then
+  echo "==> [harbor] deliver the Cloudflare DNS token + prep the ACME cert cache (~/ncp/acme)"
+  CF_TOKEN="$(aws secretsmanager get-secret-value --region "$TF_REGION" --secret-id "$CF_SECRET_ARN" --query SecretString --output text)"
+  [[ -n "$CF_TOKEN" && "$CF_TOKEN" != "REPLACE_WITH_SCOPED_CLOUDFLARE_DNS_TOKEN" ]] \
+    || { echo "FATAL: Cloudflare token secret is empty/placeholder — populate it first: aws secretsmanager put-secret-value --region $TF_REGION --secret-id $CF_SECRET_ARN --secret-string <scoped-Zone.DNS:Edit-token>" >&2; exit 1; }
+  # Write to the SAME literal path the -acme-cloudflare-token-file flag uses (so they can't
+  # diverge), and chmod 600 explicitly — `cat >` truncates but does not re-permission an
+  # existing file, so a re-run must not leave a looser mode on this credential.
+  printf '%s' "$CF_TOKEN" | rsh "$HB_IP" "umask 077; mkdir -p /home/$SSH_USER/ncp/acme; cat > /home/$SSH_USER/ncp/cf-token && chmod 600 /home/$SSH_USER/ncp/cf-token"
+  ACME_FLAGS="-acme-domain $HARBOR_DOMAIN -acme-cloudflare-token-file /home/$SSH_USER/ncp/cf-token -acme-cache /home/$SSH_USER/ncp/acme"
+  [[ -n "$ACME_EMAIL" ]] && ACME_FLAGS="$ACME_FLAGS -acme-email $ACME_EMAIL"
+  [[ "$ACME_STAGING" == "true" ]] && ACME_FLAGS="$ACME_FLAGS -acme-staging"
+  echo "    harbor will serve HTTPS for $HARBOR_DOMAIN (core-api :$CORE_PORT + console :$ADMIN_PORT) via Let's Encrypt$( [[ "$ACME_STAGING" == "true" ]] && echo ' [STAGING CA]')"
+fi
 echo "==> [harbor] start core-api + admin console on the overlay ($HARBOR_OVERLAY, mesh-only)"
 rsh "$HB_IP" "set -e
   cd ~/ncp
@@ -361,16 +400,30 @@ rsh "$HB_IP" "set -e
   sudo systemd-run --uid=$SSH_USER --gid=$SSH_USER --unit ncp-core --collect /usr/local/bin/harbor core-api \
     -dsn \$DSN -ca-cert \$G/ca.crt -ca-key \$G/ca.key -config-key \$G/config-signing.key \
     -pool '$POOL' -lighthouse '$LH' -host-cert /etc/nebula/host.crt \
-    -addr $HARBOR_OVERLAY:$CORE_PORT >/dev/null
+    -addr $HARBOR_OVERLAY:$CORE_PORT${ACME_FLAGS:+ $ACME_FLAGS} >/dev/null
   # admin console: issuance mode (so it can approve enrollments) + dev mock-IdP login.
   sudo systemd-run --uid=$SSH_USER --gid=$SSH_USER --unit ncp-admin --collect /usr/local/bin/harbor admin-api \
     -dsn \$DSN -ca-cert \$G/ca.crt -ca-key \$G/ca.key -config-key \$G/config-signing.key \
     -hmac-key ~/ncp/hmac.b64 -queue-dsn \$QDSN -queue-key ~/ncp/queue.b64 -pool '$POOL' \
     -addr $HARBOR_OVERLAY:$ADMIN_PORT -mock-idp -mock-idp-addr $HARBOR_OVERLAY:$MOCK_IDP_PORT \
-    -base-url http://$HARBOR_OVERLAY:$ADMIN_PORT -environment development >/dev/null
+    -base-url $ADMIN_URL -environment development${ACME_FLAGS:+ $ACME_FLAGS} >/dev/null
   echo ok"
 cp "$WORK/config-signing.pub" "$ROOT/deploy/prod/terraform/app/config-signing.pub"  # gitignored; the pin for clients
 echo "    core-api + admin console up"
+
+# Client-facing hints adapt to harbor's TLS posture (computed CORE_URL/ADMIN_URL above).
+if [[ -n "$HARBOR_DOMAIN" ]]; then
+  HARBOR_TLS_NOTE="  [HTTPS via Let's Encrypt for $HARBOR_DOMAIN — operators must resolve it to $HARBOR_OVERLAY for mesh members]"
+  TUNNEL_NOTE="   NOTE: harbor serves the LE cert for $HARBOR_DOMAIN, so map it to 127.0.0.1 (e.g. /etc/hosts) and browse $ADMIN_URL through the tunnel (the cert won't match the raw overlay IP)."
+  # Leading newline so the DEFAULT (empty) path leaves the cloud-client block byte-identical.
+  CLIENT_DNS_NOTE="
+   # NOTE: -core is https://$HARBOR_DOMAIN — the client must resolve $HARBOR_DOMAIN to $HARBOR_OVERLAY first
+   #       (DNS, or: echo '$HARBOR_OVERLAY $HARBOR_DOMAIN' | sudo tee -a /etc/hosts) or supervise can't renew over HTTPS."
+else
+  HARBOR_TLS_NOTE=""
+  TUNNEL_NOTE="   then browse $ADMIN_URL through the tunnel."
+  CLIENT_DNS_NOTE=""
+fi
 
 cat <<EOF
 
@@ -382,7 +435,7 @@ cat <<EOF
                      initiates nothing, no mesh identity (ADR 0005). In-VPC clients use the
                      INTERNAL enroll URL (a public NLB isn't reachable from inside the VPC).
  Lighthouse        : $LH_OVERLAY @ $LH_ADDR  (pool $POOL)
- Harbor (mesh)     : $HARBOR_OVERLAY  — core-api :$CORE_PORT, console :$ADMIN_PORT (mesh-only)
+ Harbor (mesh)     : $HARBOR_OVERLAY  — core-api :$CORE_PORT, console :$ADMIN_PORT (mesh-only)$HARBOR_TLS_NOTE
  Config-signing pin: deploy/prod/terraform/app/config-signing.pub  (give this to clients)
  Cloud-trust       : account $ACCOUNT / role $ROLE -> groups [workloads], auto-issue
 
@@ -393,8 +446,8 @@ cat <<EOF
      'sudo pilot enroll -dir /etc/nebula -gateway $GW_URL_INTERNAL -aws-sigv4 -region $REGION \\
         -config-pub /tmp/config-signing.pub -name aws-client && \\
       sudo systemd-run --unit ncp-nebula --collect pilot supervise -dir /etc/nebula \\
-        -config /etc/nebula/config.yml -core http://$HARBOR_OVERLAY:$CORE_PORT -config-pub /tmp/config-signing.pub'
-   # auto-issued (account is trusted, auto_issue=true) — no join key involved.
+        -config /etc/nebula/config.yml -core $CORE_URL -config-pub /tmp/config-signing.pub'
+   # auto-issued (account is trusted, auto_issue=true) — no join key involved.$CLIENT_DNS_NOTE
 
  Enroll the OFF-CLOUD iMac — join key, MANUAL approval (uses the PUBLIC enroll URL):
    imac join secret: ${IMAC_KEY:-<existed already; re-create with: harbor joinkey create -name imac -groups laptops>}
@@ -412,11 +465,11 @@ cat <<EOF
 
  Open the ADMIN CONSOLE (mesh-only — reach it from an enrolled mesh member, e.g.
  the iMac once it has joined, in a browser):
-     http://$HARBOR_OVERLAY:$ADMIN_PORT    (mock-IdP login; approve enrollments, see
+     $ADMIN_URL    (mock-IdP login; approve enrollments, see
                                             fleet health, policy, cloud-trust, etc.)
    Off-mesh convenience (out-of-band admin path): SSH-tunnel both ports —
      ssh -i $SSH_KEY -L $ADMIN_PORT:$HARBOR_OVERLAY:$ADMIN_PORT -L $MOCK_IDP_PORT:$HARBOR_OVERLAY:$MOCK_IDP_PORT $SSH_USER@$HB_IP
-   then browse http://$HARBOR_OVERLAY:$ADMIN_PORT through the tunnel.
+$TUNNEL_NOTE
 
  Verify: from any joined node,  ping $LH_OVERLAY  and  ping $HARBOR_OVERLAY ;
          the cloud client should appear in the console's fleet dashboard (heartbeat).
