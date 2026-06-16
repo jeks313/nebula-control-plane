@@ -143,7 +143,8 @@ auto-issue) → **off-mesh gateway** (ADR 0005: leaf-pinned mTLS minted on each 
 gateway serves public enroll + a Harbor-only collect port over a local queue) +
 **`harbor gateway add`** + **`harbor collect`** (Harbor pulls + issues + pushes results
 back) + imac join key → **core-api** (renew/heartbeat, boot-verifies its control-plane
-cert) + **admin console** (mock-IdP), both bound to Harbor's overlay IP (mesh-only).
+cert) + **admin console** (dev **mock-IdP** by default; set the `SAML_*` env vars for real Entra
+SSO in production — see the SAML runbook), both bound to Harbor's overlay IP (mesh-only).
 
 It prints the gateway URL, the **config-signing pin** (`config-signing.pub`), the imac
 join secret, and the exact enroll commands: the **cloud client joins keyless via
@@ -163,7 +164,7 @@ nebula data plane (handshakes succeed, pings don't). This was hit and fixed live
 - A **dedicated VPC** (`vpc_cidr`, default `10.99.0.0/16`) + Internet Gateway + a public route table, with **four per-tier /24 subnets** (control/edge/mesh/client). *(This replaces the earlier single-default-subnet layout — `terraform apply` over an old deployment recreates the topology: it destroys the default-VPC nodes and builds the new VPC.)*
 - `t3.micro` EC2 nodes (Amazon Linux 2023), encrypted root volume, IMDSv2-only, one per tier subnet, with Elastic IPs — **3 by default** (lighthouse, harbor, client) plus the gateway when `gateway_runtime=ec2` / minus the lighthouse when `lighthouse_runtime=fargate`.
 - For `gateway_runtime=fargate` (default): an **ECS Fargate gateway** — ECR repo, ECS service in the edge subnet, an NLB, a Secrets Manager config secret, a least-privilege task role, CloudWatch logs (`gateway_fargate.tf`). `lighthouse_runtime=fargate` adds the analogous serverless lighthouse with a **UDP NLB + pinned Elastic IP** (`lighthouse_fargate.tf`, spike).
-- Role-split security groups with **locked egress** (the gateway may egress only bootstrap + DNS — no path into harbor/mesh; harbor/lighthouse/client to mesh UDP + bootstrap), plus a restrictive **NACL on the edge (gateway) subnet** (defense-in-depth: no UDP egress except DNS). Only the lighthouse UDP + the gateway's enroll TCP face the internet; the gateway's collect port is reachable only from harbor's SG (the NLB SG enforces this in Fargate mode); core-api (8444), console (443), mock-IdP (8446) are overlay-only, in no SG.
+- Role-split security groups with **locked egress** (the gateway may egress only bootstrap + DNS — no path into harbor/mesh; harbor/lighthouse/client to mesh UDP + bootstrap), plus a restrictive **NACL on the edge (gateway) subnet** (defense-in-depth: no UDP egress except DNS). Only the lighthouse UDP + the gateway's enroll TCP face the internet; the gateway's collect port is reachable only from harbor's SG (the NLB SG enforces this in Fargate mode); core-api (8444), console (443), mock-IdP (8446, dev fallback only — absent once real SAML is wired) are overlay-only, in no SG.
 - An EC2 key pair from your `~/.ssh/absolute.pub`.
 - A permission-less IAM role + instance profile (enough for `sts:GetCallerIdentity`).
 
