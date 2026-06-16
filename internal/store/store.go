@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/glebarez/sqlite"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -30,7 +32,19 @@ type Config struct {
 	MaxOpenConns    int
 	MaxIdleConns    int
 	ConnMaxLifetime time.Duration
+
+	// Credentials, when set (postgres only), resolves the username+password at connection
+	// time instead of reading them from the DSN. Open then uses a pgx connector that calls
+	// it BEFORE EACH physical connection, so a rotated secret (e.g. Aurora's RDS-managed
+	// master credential) is picked up automatically — no password ever sits in the DSN, on
+	// argv, or on disk. With it set, DSN must carry only host/port/dbname/params (no userinfo).
+	Credentials CredentialFunc
 }
+
+// CredentialFunc resolves the Postgres login (username, password) on demand. See
+// Config.Credentials. It is called once per new physical connection, so implementations
+// should cache with a short TTL to avoid hammering the secret store under connection storms.
+type CredentialFunc func(ctx context.Context) (user, password string, err error)
 
 // DefaultSQLiteDSN returns a sensible local-dev DSN for a real on-disk file:
 // foreign keys on, a busy timeout so brief write contention waits instead of
@@ -52,12 +66,22 @@ type Store struct {
 // Open connects using the configured dialect. The schema must already be
 // migrated (see internal/store/migrate).
 func Open(cfg Config) (*Store, error) {
-	var dialector gorm.Dialector
+	var (
+		dialector gorm.Dialector
+		err       error
+	)
 	switch cfg.Driver {
 	case "sqlite":
 		dialector = sqlite.Open(cfg.DSN)
 	case "postgres":
-		dialector = postgres.Open(cfg.DSN)
+		if cfg.Credentials != nil {
+			// Resolve user/pass per-connection (rotating secret); password never in the DSN.
+			if dialector, err = postgresRotating(cfg.DSN, cfg.Credentials); err != nil {
+				return nil, err
+			}
+		} else {
+			dialector = postgres.Open(cfg.DSN)
+		}
 	default:
 		return nil, fmt.Errorf("store: unsupported driver %q (want sqlite|postgres)", cfg.Driver)
 	}
@@ -105,6 +129,28 @@ func Open(cfg Config) (*Store, error) {
 		sqlDB.SetConnMaxLifetime(life)
 	}
 	return &Store{DB: db}, nil
+}
+
+// postgresRotating builds a GORM Postgres dialector whose connections resolve their
+// credentials from cred BEFORE EACH physical connect (pgx BeforeConnect hook). A rotated
+// password is therefore picked up on the next new connection (bounded by ConnMaxLifetime)
+// without a restart, and the password never lives in the DSN string. dsn must carry only
+// host/port/dbname/params — any userinfo in it is overridden by cred.
+func postgresRotating(dsn string, cred CredentialFunc) (gorm.Dialector, error) {
+	connConfig, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("store: parse postgres dsn: %w", err)
+	}
+	sqlDB := stdlib.OpenDB(*connConfig, stdlib.OptionBeforeConnect(func(ctx context.Context, cc *pgx.ConnConfig) error {
+		user, password, err := cred(ctx)
+		if err != nil {
+			return fmt.Errorf("store: resolve postgres credentials: %w", err)
+		}
+		cc.User = user
+		cc.Password = password
+		return nil
+	}))
+	return postgres.New(postgres.Config{Conn: sqlDB}), nil
 }
 
 // IsPostgres reports whether db is backed by Postgres (vs SQLite). It gates the

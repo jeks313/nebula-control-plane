@@ -21,6 +21,7 @@ package integration
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -252,6 +253,75 @@ func TestPostgresDialect(t *testing.T) {
 
 		if _, _, err := rel.ServableFleet(ctx, 9999, ips); err == nil {
 			t.Error("ServableFleet on an unknown generation should error")
+		}
+	})
+
+	// Rotation-safe credentials: with Config.Credentials set, the password lives ONLY in the
+	// provider (in prod: an Aurora RDS-managed secret fetched via the instance role) and is
+	// resolved BEFORE EACH connection — never in the DSN, on argv, or on disk. Prove the
+	// mechanism: correct creds connect; a wrong provider value makes a NEW connection fail
+	// (so resolution is genuinely per-connect, not baked in at Open); rotating the role's
+	// password + the provider in lock-step restores connectivity with no restart.
+	t.Run("credential_rotation_no_static_password", func(t *testing.T) {
+		admin := pgOpen(t) // superuser store (DSN creds) used only to manage the rotato role
+		// A dedicated login role we can rotate without disturbing the DSN's superuser. CREATE
+		// ROLE is cluster-level, unaffected by pgOpen's schema reset.
+		if err := admin.DB.Exec(`DROP ROLE IF EXISTS rotato`).Error; err != nil {
+			t.Fatalf("pre-clean role: %v", err)
+		}
+		if err := admin.DB.Exec(`CREATE ROLE rotato LOGIN PASSWORD 'p1'`).Error; err != nil {
+			t.Fatalf("create role: %v", err)
+		}
+		t.Cleanup(func() { admin.DB.Exec(`DROP ROLE IF EXISTS rotato`) })
+
+		// Passwordless DSN (host/port/dbname/params only) — the provider supplies the login.
+		base, err := url.Parse(os.Getenv(envPostgresDSN))
+		if err != nil {
+			t.Fatalf("parse DSN: %v", err)
+		}
+		base.User = nil
+		pwlessDSN := base.String()
+		if strings.Contains(pwlessDSN, "@") {
+			t.Fatalf("passwordless DSN still carries userinfo: %q", pwlessDSN)
+		}
+
+		// Mutable provider standing in for the Secrets Manager fetch (guarded — BeforeConnect
+		// may run from multiple pool goroutines).
+		var mu sync.Mutex
+		curUser, curPass := "rotato", "p1"
+		cred := func(context.Context) (string, string, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			return curUser, curPass, nil
+		}
+		set := func(u, p string) { mu.Lock(); curUser, curPass = u, p; mu.Unlock() }
+
+		// ConnMaxLifetime≈0 => every Ping opens a fresh physical connection => the provider is
+		// consulted each time, so a credential change is observed immediately.
+		s, err := store.Open(store.Config{
+			Driver: "postgres", DSN: pwlessDSN, Credentials: cred, ConnMaxLifetime: time.Nanosecond,
+		})
+		if err != nil {
+			t.Fatalf("open with credential provider: %v", err)
+		}
+		t.Cleanup(func() { s.Close() })
+
+		if err := s.Ping(ctx); err != nil {
+			t.Fatalf("ping with correct creds (p1): %v", err)
+		}
+		// Wrong password => a new connection must fail. This is the load-bearing assertion: it
+		// would PASS (wrongly) if the password had been captured into the DSN at Open time.
+		set("rotato", "wrong")
+		if err := s.Ping(ctx); err == nil {
+			t.Fatal("ping must FAIL after the provider returns a wrong password (proves per-connection credential resolution)")
+		}
+		// Rotate role + provider in lock-step => connectivity restored, no restart.
+		if err := admin.DB.Exec(`ALTER ROLE rotato PASSWORD 'p2'`).Error; err != nil {
+			t.Fatalf("rotate role password: %v", err)
+		}
+		set("rotato", "p2")
+		if err := s.Ping(ctx); err != nil {
+			t.Fatalf("ping after rotation to p2 (rotated secret should be picked up): %v", err)
 		}
 	})
 }

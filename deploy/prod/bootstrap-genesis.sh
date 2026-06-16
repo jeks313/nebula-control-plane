@@ -48,6 +48,7 @@ HARBOR_OVERLAY="${HARBOR_OVERLAY:-10.44.0.2}"   # Harbor's own mesh address (con
 CORE_PORT="${CORE_PORT:-8444}"                   # core-api (renew/heartbeat), mesh-only (machine-facing; stays off 443)
 ADMIN_PORT="${ADMIN_PORT:-443}"                  # admin console, mesh-only (default 443 => clean https URLs over the overlay; still NOT public)
 MOCK_IDP_PORT="${MOCK_IDP_PORT:-8446}"           # dev mock-IdP for the console login
+DB_BACKEND="${DB_BACKEND:-sqlite}"               # sqlite (local file on harbor) | aurora (managed Postgres; rotating creds via Secrets Manager, no static password)
 
 for t in terraform jq go ssh scp openssl; do command -v "$t" >/dev/null || { echo "missing tool: $t" >&2; exit 1; }; done
 [[ -f "$SSH_KEY" ]] || { echo "ssh private key not found: $SSH_KEY (set SSH_KEY=...)" >&2; exit 1; }
@@ -104,6 +105,32 @@ else
   APPROVE_BACKEND="-ca-key ~/ncp/genesis/ca.key -config-key ~/ncp/genesis/config-signing.key"
   TRUST_BACKEND_DESC="software (keys in ~/ncp/genesis on the harbor node)"
 fi
+# Data backend (ADR 0007): SQLite on the harbor node by default; opt into Aurora with
+# DB_BACKEND=aurora. For Aurora, Core resolves the login from the RDS-managed (ROTATING)
+# secret via its instance role, refreshed per-connection — so NO static password is ever in
+# the DSN, on argv, or on disk (the laptop never sees it either). One flag set is shared by
+# EVERY harbor invocation (migrate/genesis/cloudtrust/gateway/collect/joinkey/core-api/admin-api)
+# so they all hit the same database. The DSN is single-quoted so the remote shell keeps the
+# '?'/'&' query chars literal (no globbing/splitting).
+if [[ "$DB_BACKEND" == "aurora" || "$DB_BACKEND" == "postgres" ]]; then
+  DB_HOST="$(val '.db_cluster_endpoint.value')"
+  DB_PORT="$(val '.db_port.value')"; DB_PORT="${DB_PORT:-5432}"
+  DB_NAME="$(val '.db_name.value')"
+  DB_SECRET_ARN="$(val '.db_master_secret_arn.value')"
+  [[ -n "$DB_HOST" && -n "$DB_NAME" && -n "$DB_SECRET_ARN" ]] \
+    || { echo "FATAL: DB_BACKEND=$DB_BACKEND but the data-layer outputs are empty (db_cluster_endpoint/db_name/db_master_secret_arn). Apply the app stack's data layer (Aurora) first." >&2; exit 1; }
+  HARBOR_DB_FLAGS="-driver postgres -dsn 'postgres://$DB_HOST:$DB_PORT/$DB_NAME?sslmode=require' -db-secret-arn '$DB_SECRET_ARN'${TF_REGION:+ -db-secret-region '$TF_REGION'}"
+  # Display variant for the printed enroll-approve hint, which is wrapped in single quotes
+  # (deferring expansion to the box's shell) — so it must carry NO inner single quotes. The
+  # DSN/ARN have no spaces, and the '?' can't glob-match a real file, so leaving them unquoted
+  # is safe here.
+  HARBOR_DB_FLAGS_HINT="-driver postgres -dsn postgres://$DB_HOST:$DB_PORT/$DB_NAME?sslmode=require -db-secret-arn $DB_SECRET_ARN${TF_REGION:+ -db-secret-region $TF_REGION}"
+  DB_BACKEND_DESC="Aurora PostgreSQL @ $DB_HOST:$DB_PORT/$DB_NAME (rotating creds via Secrets Manager; no static password)"
+else
+  HARBOR_DB_FLAGS="-dsn ~/ncp/harbor.db"        # remote tilde expands to the harbor user's home
+  HARBOR_DB_FLAGS_HINT="$HARBOR_DB_FLAGS"
+  DB_BACKEND_DESC="SQLite (~/ncp/harbor.db on the harbor node)"
+fi
 # Harbor edge TLS (ADR 0007 Phase 5): when harbor_domain is set, core-api + the console obtain
 # their OWN Let's Encrypt cert via ACME DNS-01 and serve HTTPS; clients then reach Harbor by
 # that hostname (operators must resolve it to Harbor's overlay IP for mesh members). Empty =
@@ -121,6 +148,7 @@ echo "    lighthouse=$LH_IP  harbor=$HB_IP  gateway=${GW_IP:-<fargate>}  client=
 echo "    lighthouse underlay=$LH_ADDR  enroll=$GW_URL  collect=$GW_COLLECT  harbor-overlay=$HARBOR_OVERLAY"
 echo "    runtimes: gateway=$GATEWAY_RUNTIME  lighthouse=$LIGHTHOUSE_RUNTIME  harbor-tls=${HARBOR_DOMAIN:+ACME:$HARBOR_DOMAIN}${HARBOR_DOMAIN:-plain-http}"
 echo "    trust-root signing: $TRUST_BACKEND_DESC"
+echo "    data backend: $DB_BACKEND_DESC"
 
 # Any Fargate component (gateway and/or the SPIKE lighthouse) needs the AWS CLI + a
 # container engine locally (build/push the image, populate the config secret, force the
@@ -222,9 +250,8 @@ rcp "$WORK/lh-host.pub" "$SSH_USER@$HB_IP:/tmp/lh-host.pub"
 rcp "$WORK/hb-host.pub" "$SSH_USER@$HB_IP:/tmp/hb-host.pub"
 rsh "$HB_IP" "set -e
   mkdir -p ~/ncp
-  DSN=~/ncp/harbor.db
-  harbor migrate up -dsn \$DSN >/dev/null
-  harbor genesis -dsn \$DSN -out ~/ncp/genesis${GENESIS_BACKEND:+ $GENESIS_BACKEND} \
+  harbor migrate up $HARBOR_DB_FLAGS >/dev/null
+  harbor genesis $HARBOR_DB_FLAGS -out ~/ncp/genesis${GENESIS_BACKEND:+ $GENESIS_BACKEND} \
     -operator-a alice -operator-b bob -pool '$POOL' \
     -lighthouse-pub /tmp/lh-host.pub -lighthouse-ip '$LH_OVERLAY' -lighthouse-addr '$LH_ADDR' \
     -core-pub /tmp/hb-host.pub -core-ip '$HARBOR_OVERLAY' -core-name harbor-core >/dev/null
@@ -299,7 +326,7 @@ rsh "$HB_IP" "set -e
   ]
 }
 JSON
-  harbor cloudtrust publish -dsn ~/ncp/harbor.db -config ~/ncp/cloudtrust.json \
+  harbor cloudtrust publish $HARBOR_DB_FLAGS -config ~/ncp/cloudtrust.json \
     -operator-a alice -operator-b bob >/dev/null
   echo ok"
 echo "    cloud-trust published (account $ACCOUNT -> [workloads], auto-issue)"
@@ -378,19 +405,19 @@ echo "==> [harbor] register the gateway + start the pull collector"
 rcp "$WORK/gw-collect.crt" "$SSH_USER@$HB_IP:/tmp/gw-collect.crt"
 rsh "$HB_IP" "set -e
   cd ~/ncp
-  DSN=~/ncp/harbor.db; G=~/ncp/genesis
+  G=~/ncp/genesis
   install -m0644 /tmp/gw-collect.crt gw-collect.crt; rm -f /tmp/gw-collect.crt
   # Idempotent register: add only if this URL isn't already listed, then VERIFY it is —
   # do NOT swallow a failed registration (a collector with zero gateways drains nothing).
-  if ! harbor gateway list -dsn \$DSN 2>/dev/null | grep -Fq '$GW_COLLECT'; then
-    harbor gateway add -dsn \$DSN -name gw1 -url '$GW_COLLECT' -cert ~/ncp/gw-collect.crt -actor alice
+  if ! harbor gateway list $HARBOR_DB_FLAGS 2>/dev/null | grep -Fq '$GW_COLLECT'; then
+    harbor gateway add $HARBOR_DB_FLAGS -name gw1 -url '$GW_COLLECT' -cert ~/ncp/gw-collect.crt -actor alice
   fi
-  harbor gateway list -dsn \$DSN 2>/dev/null | grep -Fq '$GW_COLLECT' \
+  harbor gateway list $HARBOR_DB_FLAGS 2>/dev/null | grep -Fq '$GW_COLLECT' \
     || { echo 'FATAL: gateway gw1 ($GW_COLLECT) not registered with harbor — the collector would pull nothing' >&2; exit 1; }
   sudo systemctl reset-failed ncp-collect ncp-core ncp-admin 2>/dev/null || true
-  # Run AS ec2-user so harbor.db stays ec2-user-owned (CLI/console can write results).
+  # Run AS ec2-user (owns ~/ncp; on the SQLite backend this keeps harbor.db writable by the CLI/console).
   sudo systemd-run --uid=$SSH_USER --gid=$SSH_USER --unit ncp-collect --collect /usr/local/bin/harbor collect -pool '$POOL' \
-    -dsn \$DSN -ca-cert \$G/ca.crt $SIGN_BACKEND \
+    $HARBOR_DB_FLAGS -ca-cert \$G/ca.crt $SIGN_BACKEND \
     -hmac-key ~/ncp/hmac.b64 -lighthouse '$LH' -cloudtrust-db \
     -client-cert ~/ncp/harbor-collect.crt -client-key ~/ncp/harbor-collect.key >/dev/null
   echo registered"
@@ -398,7 +425,7 @@ echo "    gateway registered + collector pulling (attestation enabled)"
 
 # imac (off-cloud, no AWS identity) joins via a join key with manual approval.
 echo "==> [harbor] create the imac join key"
-IMAC_KEY="$(rsh "$HB_IP" "harbor joinkey create -dsn ~/ncp/harbor.db -name imac -groups laptops 2>/dev/null | grep -o 'njk_[A-Za-z0-9_-]*' || true")"
+IMAC_KEY="$(rsh "$HB_IP" "harbor joinkey create $HARBOR_DB_FLAGS -name imac -groups laptops 2>/dev/null | grep -o 'njk_[A-Za-z0-9_-]*' || true")"
 
 # ── 8. harbor: core-api (renew/heartbeat) + admin console (SAML or mock-IdP) ─
 # Edge TLS: when harbor_domain is set, fetch the scoped Cloudflare token (Secrets Manager)
@@ -486,10 +513,10 @@ if [[ "$ADMIN_PORT" -lt 1024 ]]; then
   ADMIN_CAP=" -p AmbientCapabilities=CAP_NET_BIND_SERVICE"
   TUNNEL_PRIV_NOTE="   (the tunnel binds local $ADMIN_PORT, a privileged port — prefix the ssh with 'sudo', or just browse from an on-mesh member: no tunnel needed)"
 fi
-# Postgres connection-pool tuning for core-api (harbor's -db-* flags / store.go). The harbor box
-# runs on SQLite by default (~/ncp/harbor.db), which IGNORES these — they take effect once harbor
-# is pointed at Aurora (a postgres -dsn). Unset => harbor's built-in defaults (20 open / 5 idle /
-# 30m lifetime). Tune so (Cores × max-open) stays under Aurora's max_connections:
+# Postgres connection-pool tuning for core-api (harbor's -db-* flags / store.go). Effective only
+# on the Aurora backend (DB_BACKEND=aurora); SQLite is single-writer and IGNORES these. Unset =>
+# harbor's built-in defaults (20 open / 5 idle / 30m lifetime). Tune so (Cores × max-open) stays
+# under Aurora's max_connections:
 #   DB_MAX_OPEN_CONNS   DB_MAX_IDLE_CONNS   DB_CONN_MAX_LIFETIME (a Go duration, e.g. 30m)
 DB_POOL_FLAGS=""
 [[ -n "${DB_MAX_OPEN_CONNS:-}" ]]    && DB_POOL_FLAGS="$DB_POOL_FLAGS -db-max-open-conns $DB_MAX_OPEN_CONNS"
@@ -498,7 +525,7 @@ DB_POOL_FLAGS=""
 echo "==> [harbor] start core-api + admin console on the overlay ($HARBOR_OVERLAY, mesh-only)"
 rsh "$HB_IP" "set -e
   cd ~/ncp
-  DSN=~/ncp/harbor.db; QDSN=~/ncp/queue.db; G=~/ncp/genesis
+  QDSN=~/ncp/queue.db; G=~/ncp/genesis
   # core-api runs as $SSH_USER but -host-cert lives in /etc/nebula (root, mode 0700 from
   # pilot init); make the dir traversable so it can read the 0644 host.crt (host.key
   # stays 0600 root). Without this core-api crashes at boot with 'permission denied'.
@@ -508,13 +535,13 @@ rsh "$HB_IP" "set -e
   umask 077; [ -f ~/ncp/queue.b64 ] || openssl rand 32 | basenc --base64url | tr -d '=' > ~/ncp/queue.b64
   # core-api: renew + heartbeat over the mesh, verifying its own control-plane cert at boot.
   sudo systemd-run --uid=$SSH_USER --gid=$SSH_USER --unit ncp-core --collect /usr/local/bin/harbor core-api \
-    -dsn \$DSN -ca-cert \$G/ca.crt $SIGN_BACKEND \
+    $HARBOR_DB_FLAGS -ca-cert \$G/ca.crt $SIGN_BACKEND \
     -pool '$POOL' -lighthouse '$LH' -host-cert /etc/nebula/host.crt \
     -addr $HARBOR_OVERLAY:$CORE_PORT$DB_POOL_FLAGS${ACME_FLAGS:+ $ACME_FLAGS} >/dev/null
   # admin console: issuance mode (so it can approve enrollments) + SAML/mock IdP. $ADMIN_CAP grants
   # CAP_NET_BIND_SERVICE when the console is on a privileged port (default 443).
   sudo systemd-run --uid=$SSH_USER --gid=$SSH_USER$ADMIN_CAP --unit ncp-admin --collect /usr/local/bin/harbor admin-api \
-    -dsn \$DSN -ca-cert \$G/ca.crt $SIGN_BACKEND \
+    $HARBOR_DB_FLAGS -ca-cert \$G/ca.crt $SIGN_BACKEND \
     -hmac-key ~/ncp/hmac.b64 -queue-dsn \$QDSN -queue-key ~/ncp/queue.b64 -pool '$POOL' \
     -addr $HARBOR_OVERLAY:$ADMIN_PORT -base-url $ADMIN_URL \
     $IDP_FLAGS${ACME_FLAGS:+ $ACME_FLAGS} >/dev/null
@@ -567,8 +594,8 @@ cat <<EOF
      -config-pub deploy/prod/terraform/app/config-signing.pub -name imac
    # approve it in the CONSOLE (below) or via CLI:
    ssh -i $SSH_KEY $SSH_USER@$HB_IP \\
-     'EID=\$(harbor enroll pending -dsn ~/ncp/harbor.db | awk "/imac/{print \\\$1}"); \\
-      harbor enroll approve \$EID -approver alice -dsn ~/ncp/harbor.db \\
+     'EID=\$(harbor enroll pending $HARBOR_DB_FLAGS_HINT | awk "/imac/{print \\\$1}"); \\
+      harbor enroll approve \$EID -approver alice $HARBOR_DB_FLAGS_HINT \\
         -ca-cert ~/ncp/genesis/ca.crt $APPROVE_BACKEND \\
         -hmac-key ~/ncp/hmac.b64 -queue-dsn ~/ncp/queue.db -queue-key ~/ncp/queue.b64 \\
         -pool $POOL -lighthouse "$LH"'

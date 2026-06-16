@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jeks313/nebula-control-plane/internal/dbsecret"
 	"github.com/jeks313/nebula-control-plane/internal/fleet"
 	"github.com/jeks313/nebula-control-plane/internal/ipam"
 	"github.com/jeks313/nebula-control-plane/internal/joinkey"
@@ -152,7 +153,9 @@ backend flags (ca-init, issue-cert):
 db flags default to a local SQLite file (./harbor.db). Set -driver postgres
 -dsn "postgres://user:pass@host/db?sslmode=require" for production. Tune the
 Postgres pool with -db-max-open-conns / -db-max-idle-conns / -db-conn-max-lifetime
-(each 0 = built-in default).
+(each 0 = built-in default). For a rotating Aurora credential, pass -db-secret-arn
+(AWS Secrets Manager) with a PASSWORDLESS -dsn "postgres://host:5432/harbor?sslmode=require":
+the login is resolved per-connection, so no password sits in the DSN or on argv.
 `)
 }
 
@@ -166,6 +169,8 @@ var dbPool struct {
 	maxOpen         *int
 	maxIdle         *int
 	connMaxLifetime *time.Duration
+	secretARN       *string
+	secretRegion    *string
 }
 
 // dbFlags adds -driver/-dsn (and the Postgres pool-tuning flags) to a flagset and
@@ -178,6 +183,10 @@ func dbFlags(fs *flag.FlagSet) (*string, *string) {
 	dbPool.maxOpen = fs.Int("db-max-open-conns", 0, "postgres: max open connections (0 = default 20)")
 	dbPool.maxIdle = fs.Int("db-max-idle-conns", 0, "postgres: max idle connections (0 = default 5)")
 	dbPool.connMaxLifetime = fs.Duration("db-conn-max-lifetime", 0, "postgres: max connection lifetime, e.g. 30m (0 = default 30m)")
+	// Resolve the DB login from a (rotating) AWS Secrets Manager secret instead of the DSN, per
+	// connection — so no password is ever in the DSN/argv. Use with a passwordless postgres -dsn.
+	dbPool.secretARN = fs.String("db-secret-arn", "", "postgres: Secrets Manager ARN of the rotating DB credential (passwordless -dsn)")
+	dbPool.secretRegion = fs.String("db-secret-region", "", "postgres: region for -db-secret-arn (default: instance/SDK region)")
 	return driver, dsn
 }
 
@@ -512,6 +521,14 @@ func openStore(driver, dsn string) *store.Store {
 		cfg.MaxOpenConns = *dbPool.maxOpen
 		cfg.MaxIdleConns = *dbPool.maxIdle
 		cfg.ConnMaxLifetime = *dbPool.connMaxLifetime
+	}
+	if driver == "postgres" && dbPool.secretARN != nil && *dbPool.secretARN != "" {
+		// Resolve the (rotating) DB login from Secrets Manager per-connection — no password in the DSN.
+		cred, err := dbsecret.New(context.Background(), dbsecret.Config{SecretARN: *dbPool.secretARN, Region: *dbPool.secretRegion})
+		if err != nil {
+			fatalf("db credentials: %v", err)
+		}
+		cfg.Credentials = cred
 	}
 	s, err := store.Open(cfg)
 	if err != nil {

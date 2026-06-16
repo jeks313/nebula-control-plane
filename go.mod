@@ -7,6 +7,7 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.42.0
 	github.com/aws/aws-sdk-go-v2/config v1.32.25
 	github.com/aws/aws-sdk-go-v2/service/kms v1.53.4
+	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.42.3
 	github.com/caddyserver/certmagic v0.25.3
 	github.com/coreos/go-oidc/v3 v3.18.0
 	github.com/crewjam/saml v0.5.1
@@ -14,6 +15,7 @@ require (
 	github.com/glebarez/sqlite v1.11.0
 	github.com/go-gormigrate/gormigrate/v2 v2.1.6
 	github.com/go-jose/go-jose/v4 v4.1.4
+	github.com/jackc/pgx/v5 v5.10.0
 	github.com/libdns/cloudflare v0.2.2
 	github.com/mattermost/xml-roundtrip-validator v0.1.0
 	github.com/prometheus/client_golang v1.23.2
@@ -51,7 +53,6 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
-	github.com/jackc/pgx/v5 v5.10.0 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/jinzhu/inflection v1.0.0 // indirect
 	github.com/jinzhu/now v1.1.5 // indirect
