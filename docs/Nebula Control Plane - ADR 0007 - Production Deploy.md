@@ -177,10 +177,13 @@ Ordered so each phase de-risks the next; KMS + Aurora are the foundation.
   gateway (its ACME cache must survive restarts or LE rate-limits bite) behind a non-root EFS
   access point; least-priv `GetSecretValue` grants for the gateway exec role + Core; the
   gateway task now serves `-acme-domain` (with `health_check_grace_period` for the blocking
-  first issuance) and harbor-side vars/outputs. **Remaining (operator/follow-up):** Cloudflare
-  DNS + WAF (operator-owned); wiring the genesis bootstrap to pass `-acme-domain` + the token
-  to harbor's core-api/admin-api (terraform grant is in place; bootstrap change tracked). Collect
-  + the lighthouse UDP NLB are unchanged.
+  first issuance) and harbor-side vars/outputs. The genesis bootstrap (`bootstrap-genesis.sh`)
+  now wires harbor too: when `harbor_domain` is set it fetches the scoped Cloudflare token
+  (Secrets Manager), delivers it to the box as a `0600` file over ssh stdin, and passes
+  `-acme-domain`/`-acme-cloudflare-token-file`/`-acme-cache` to core-api + admin-api (sharing a
+  persistent cert cache), flipping the printed client `-core`/console URLs to `https://<harbor_domain>`.
+  **Remaining (operator-owned):** Cloudflare DNS + WAF, and the DNS record resolving
+  `harbor_domain` → Core's overlay IP for mesh members. Collect + the lighthouse UDP NLB are unchanged.
 - **Phase 6 — Images.** ✅ **Done** — both prod Fargate images are **distroless, shell-less,
   nonroot** (`gcr.io/distroless/static-debian12:nonroot`, uid 65532) per **ADR 0006**: gateway
   reads its material from `$NCP_GW_*` env (no entrypoint shell); the lighthouse uses the new
