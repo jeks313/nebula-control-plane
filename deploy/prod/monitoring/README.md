@@ -36,9 +36,16 @@ overlay IP), drops this dir, and runs `podman compose up -d`.
 ## Access
 
 The UIs (Prometheus 9090, Alertmanager 9093, Grafana 3000) are **not public** — the
-monitoring node's security group exposes them only to the mesh / SSH. Reach Grafana from an
-enrolled mesh member, or SSH-tunnel `-L 3000:<monitoring-overlay>:3000`. Set the Grafana
-admin password out-of-band via `GF_ADMIN_PASSWORD` (never commit it).
+monitoring node's security group allows only SSH + Nebula UDP (no UI ingress), and the
+containers bind on the node's localhost. Reach them via an SSH tunnel to the node:
+
+```
+ssh -i <key> -L 3000:localhost:3000 -L 9090:localhost:9090 -L 9093:localhost:9093 ec2-user@<monitoring-ip>
+# then http://localhost:3000 (Grafana), :9090 (Prometheus), :9093 (Alertmanager)
+```
+
+Set the Grafana admin password out-of-band via `GF_ADMIN_PASSWORD` before running `deploy.sh`
+(it lands in a `0600 /opt/ncp-monitoring/.env` on the node, never on a command line or in git).
 
 ## Wire a real alert receiver
 

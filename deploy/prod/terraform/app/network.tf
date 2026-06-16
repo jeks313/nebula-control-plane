@@ -53,6 +53,7 @@ locals {
     gateway    = "edge"
     lighthouse = "mesh"
     client     = "client"
+    monitoring = "client" # a cloud mesh member, like the client
   }
 }
 

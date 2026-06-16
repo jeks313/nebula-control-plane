@@ -221,18 +221,19 @@ Ordered so each phase de-risks the next; KMS + Aurora are the foundation.
     cadence so an idle Core stays fleet-truthful) + `ncp_signer_breaker_trips_total`; a periodic
     audit verifier (`internal/auditverify`) exporting `ncp_audit_verify_{runs,failures,tampered}_total`
     + `_rows`/`_last_success_seconds`, joined on shutdown.
-  - **7b — Alarms: self-hosted Prometheus + Alertmanager + Grafana (operator's choice).**
+  - **7b — Alarms: self-hosted Prometheus + Alertmanager + Grafana (operator's choice). ✅ DONE.**
     A dedicated **mesh-member** monitoring EC2 node scrapes the control plane's `/metrics`
-    (mesh-only core-api/admin-api over the overlay; lighthouse; optionally the gateway obs
-    port over the VPC) and alerts on the 7a metrics. ✅ Config in `deploy/prod/monitoring/`
-    (prometheus.yml + alerts.yml: breaker open/trips, audit tampered/fail/stale, target down;
-    alertmanager.yml with a **placeholder** receiver; compose + Grafana datasource).
-    **Pending (part 2):** the monitoring-node terraform (instance + SG scrape rules) + the
-    bootstrap step that enrolls it, renders prometheus.yml, and brings the stack up. A real
-    Alertmanager receiver (Slack/email/PagerDuty) is wired out-of-band.
-  - **7c — Log aggregation: TODO.** Ship the EC2-harbor logs (journald) to a central store
-    (CloudWatch, or Loki alongside the Prometheus stack — TBD); the Fargate gateway/lighthouse
-    already ship via the awslogs driver.
+    (mesh-only core-api/admin-api by overlay IP — HTTPS validated via SNI when auto-TLS is on;
+    plus the lighthouse) and alerts on the 7a metrics. Config in `deploy/prod/monitoring/`
+    (alerts.yml: breaker open/trips, audit tampered/fail/stale, target down; alertmanager.yml
+    with a **placeholder** receiver; compose + Grafana datasource). The monitoring-node
+    terraform (instance + `monitoring` SG, mesh member, UIs SSH-tunnel-only) + `deploy.sh`
+    (enrolls it keyless via aws-sigv4, renders prometheus.yml for the real targets/scheme, runs
+    the stack) complete it. A real Alertmanager receiver (Slack/email/PagerDuty) is wired
+    out-of-band; the Grafana password lands in a `0600 .env`, not on a command line.
+  - **7c — Log aggregation (Loki): TODO.** Ship the EC2-harbor logs (journald) to **Loki**
+    alongside the Prometheus stack (promtail/grafana-agent → Loki; a Grafana datasource); the
+    Fargate gateway/lighthouse already ship via the awslogs driver.
   - **7d — DR terraform: TODO.** KMS multi-Region replica keys; export the hash-chained audit
     to an S3 Object-Lock bucket; raise log retention + non-zero secret recovery windows.
 

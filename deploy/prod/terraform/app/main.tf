@@ -244,6 +244,61 @@ resource "aws_security_group" "client" {
   }
 }
 
+# The monitoring node (ADR 0007 Phase 7b): a mesh member running Prometheus +
+# Alertmanager + Grafana. It scrapes the control plane's /metrics OUTBOUND over the overlay
+# (mesh-only core-api/admin-api + the lighthouse), so it needs no inbound mesh exposure here;
+# the UIs are reached via SSH tunnel. SG mirrors the client: SSH + Nebula UDP, locked egress.
+resource "aws_security_group" "monitoring" {
+  name_prefix = "${var.name_prefix}-monitoring-"
+  description = "Monitoring node (Prometheus/Alertmanager/Grafana): admin SSH + Nebula UDP; scrapes the control plane over the overlay. UIs via SSH tunnel, not exposed."
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    description = "SSH from you (also the tunnel for the Prometheus/Alertmanager/Grafana UIs)"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = [var.allowed_ssh_cidr]
+  }
+  ingress {
+    description = "Nebula overlay (mesh member)"
+    from_port   = var.nebula_port
+    to_port     = var.nebula_port
+    protocol    = "udp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  egress {
+    description = "Nebula data plane + DNS (UDP) — the scrape traffic to mesh-only targets rides this tunnel"
+    from_port   = 0
+    to_port     = 65535
+    protocol    = "udp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  egress {
+    description = "Enroll to the gateway (in-VPC via the edge subnet)"
+    from_port   = var.gateway_port
+    to_port     = var.gateway_port
+    protocol    = "tcp"
+    cidr_blocks = [local.tier_cidr["edge"]]
+  }
+  egress {
+    description = "Bootstrap + container image fetch (https/http)"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  egress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
 # ── Instance IAM role ───────────────────────────────────────────────────────
 # Permission-less: enough for sts:GetCallerIdentity (M5 sigv4 attestation). Add a
 # DescribeInstances policy to the harbor role only if/when you wire 5.3.
@@ -270,8 +325,9 @@ resource "aws_iam_instance_profile" "node" {
 # ── Nodes ───────────────────────────────────────────────────────────────────
 locals {
   base_nodes = {
-    harbor = { role = "harbor", eip = true }  # control-plane mesh node — routes core-api over the overlay, needs a real TUN
-    client = { role = "client", eip = false } # cloud test member
+    harbor     = { role = "harbor", eip = true }      # control-plane mesh node — routes core-api over the overlay, needs a real TUN
+    client     = { role = "client", eip = false }     # cloud test member
+    monitoring = { role = "monitoring", eip = false } # mesh member running Prometheus/Alertmanager/Grafana (ADR 0007 Phase 7b)
   }
   # The lighthouse and gateway are EC2 nodes only under their "ec2" runtime; under
   # "fargate" each becomes a serverless container (lighthouse_fargate.tf /
@@ -284,6 +340,7 @@ locals {
     harbor     = aws_security_group.harbor.id
     gateway    = aws_security_group.gateway.id # used by the EC2 node when present
     client     = aws_security_group.client.id
+    monitoring = aws_security_group.monitoring.id
   }
 }
 
