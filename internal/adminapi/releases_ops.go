@@ -179,9 +179,30 @@ func (s *Server) handleReleaseRolloutStart(w http.ResponseWriter, r *http.Reques
 		writeProblem(w, http.StatusBadRequest, "no hosts", "no live hosts to roll out to")
 		return
 	}
+	// Arch affinity: stage only hosts whose arch this generation ships (per-arch URL support). A
+	// host whose arch is missing would never converge and would observe-window-roll-back the whole
+	// rollout, so it is excluded here rather than stranded.
+	var servable []string
+	switch lane {
+	case rollout.LaneNebula:
+		servable, _, err = s.cfg.NebulaReleases.ServableFleet(ctx, b.Gen, ips)
+	case rollout.LanePilot:
+		servable, _, err = s.cfg.PilotReleases.ServableFleet(ctx, b.Gen, ips)
+	default:
+		servable = ips
+	}
+	if err != nil {
+		s.fail(w, r, "arch-servability check failed", err)
+		return
+	}
+	if len(servable) == 0 {
+		writeProblem(w, http.StatusBadRequest, "no servable hosts",
+			fmt.Sprintf("none of the %d live host(s) run an arch shipped by %s gen %d — register the missing arch with add-artifact first", len(ips), kind, b.Gen))
+		return
+	}
 	rr, err := s.cfg.Rollout.Start(ctx, rollout.StartConfig{
 		Lane: lane, Description: fmt.Sprintf("%s %s (gen %d)", kind, version, b.Gen),
-		TargetVersion: b.Gen, PrevVersion: prev, Hosts: ips,
+		TargetVersion: b.Gen, PrevVersion: prev, Hosts: servable,
 		CanarySize: b.CanarySize, WaveSize: b.WaveSize,
 		Observe: releaseDur(b.ObserveSeconds, 10*time.Minute), MissingAfter: releaseDur(b.MissingAfterSeconds, 3*time.Minute),
 		Actor: id.Principal,

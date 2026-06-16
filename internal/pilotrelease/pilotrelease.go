@@ -165,6 +165,69 @@ func (s *Store) Artifacts(ctx context.Context, gen int) ([]Artifact, error) {
 	return as, nil
 }
 
+// ExcludedHost is a fleet host left out of a rollout because the generation does not ship its
+// architecture (the arch the host reported on its enrollment row).
+type ExcludedHost struct {
+	OverlayIP string
+	GOOS      string
+	GOARCH    string
+}
+
+// ServableFleet partitions fleet overlay IPs into the hosts this generation can serve and the
+// hosts it cannot, BY ARCH (the mirror of nebularelease.ServableFleet — see it for the rationale).
+// A host with no recorded arch resolves to the linux/amd64 default; `ips` order is preserved.
+func (s *Store) ServableFleet(ctx context.Context, gen int, ips []string) (servable []string, excluded []ExcludedHost, err error) {
+	r, found := s.Get(ctx, gen)
+	if !found {
+		return nil, nil, fmt.Errorf("pilotrelease: servable fleet: no such generation %d", gen)
+	}
+	set := map[[2]string]bool{}
+	dgoos, dgoarch := normArch(r.GOOS, r.GOARCH)
+	set[[2]string{dgoos, dgoarch}] = true
+	arts, err := s.Artifacts(ctx, gen)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, a := range arts {
+		g, h := normArch(a.GOOS, a.GOARCH)
+		set[[2]string{g, h}] = true
+	}
+	archOf := map[string][2]string{}
+	if len(ips) > 0 {
+		var rows []struct {
+			OverlayIP string `gorm:"column:overlay_ip"`
+			GOOS      string `gorm:"column:goos"`
+			GOARCH    string `gorm:"column:goarch"`
+		}
+		// Authoritative arch = the host's LATEST issued enrollment, by id DESC + first-wins —
+		// the same row coreapi.device() picks (see nebularelease.ServableFleet for the rationale).
+		if e := s.db.WithContext(ctx).Table("enrollments").Select("overlay_ip, goos, goarch").
+			Where("overlay_ip IN ? AND status = ?", ips, "issued").Order("id DESC").Scan(&rows).Error; e != nil {
+			return nil, nil, fmt.Errorf("pilotrelease: servable fleet: read host arch: %w", e)
+		}
+		for _, rw := range rows { // id DESC => the FIRST row seen per IP is its latest issued enrollment
+			if _, seen := archOf[rw.OverlayIP]; seen {
+				continue
+			}
+			g, h := normArch(rw.GOOS, rw.GOARCH)
+			archOf[rw.OverlayIP] = [2]string{g, h}
+		}
+	}
+	dflt := [2]string{DefaultGOOS, DefaultGOARCH}
+	for _, ip := range ips {
+		a, ok := archOf[ip]
+		if !ok {
+			a = dflt
+		}
+		if set[a] {
+			servable = append(servable, ip)
+		} else {
+			excluded = append(excluded, ExcludedHost{OverlayIP: ip, GOOS: a[0], GOARCH: a[1]})
+		}
+	}
+	return servable, excluded, nil
+}
+
 // List returns all releases, newest generation first.
 func (s *Store) List(ctx context.Context) ([]Release, error) {
 	var rs []Release
