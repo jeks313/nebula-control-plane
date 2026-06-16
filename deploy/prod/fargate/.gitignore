@@ -1,2 +1,3 @@
-# the staged binary built by build-push.sh (not committed)
+# the static binaries staged by build-push.sh (not committed)
 gateway
+nebula-boot

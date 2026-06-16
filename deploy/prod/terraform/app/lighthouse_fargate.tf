@@ -202,7 +202,7 @@ resource "aws_lb_target_group" "lighthouse" {
   preserve_client_ip = true # CRITICAL: the lighthouse observes hosts' real underlay addresses
 
   # UDP target groups require a non-UDP health check; use nebula's prometheus stats
-  # TCP port (the entrypoint enables it, internal only).
+  # TCP port (the nebula-boot shim's rendered config enables it, internal only).
   health_check {
     protocol = "TCP"
     port     = tostring(var.lighthouse_stats_port)
@@ -239,20 +239,22 @@ resource "aws_ecs_task_definition" "lighthouse" {
     name      = "lighthouse"
     image     = local.lighthouse_image
     essential = true
-    # nebula has no kernel/privilege needs with tun.disabled — a plain Fargate task.
+    # tun.disabled => no TUN, no privilege; runs as the distroless nonroot user.
+    user = "65532"
     portMappings = [
       { containerPort = var.nebula_port, protocol = "udp" },
       { containerPort = var.lighthouse_stats_port, protocol = "tcp" }, # health check only
     ]
     environment = [
-      { name = "NEBULA_PORT", value = tostring(var.nebula_port) },
-      { name = "NCP_STATS_PORT", value = tostring(var.lighthouse_stats_port) },
+      { name = "NCP_LH_NEBULA_PORT", value = tostring(var.nebula_port) },
+      { name = "NCP_LH_STATS_PORT", value = tostring(var.lighthouse_stats_port) },
     ]
-    # Injected from Secrets Manager; the entrypoint writes each to a file + renders config.yml.
+    # Injected from Secrets Manager; the cmd/nebula-boot shim reads each from its env var,
+    # writes the cert files + renders config.yml, then exec's nebula (no shell entrypoint).
     secrets = [
-      { name = "CA_CRT_PEM", valueFrom = "${aws_secretsmanager_secret.lighthouse[0].arn}:ca_crt_pem::" },
-      { name = "HOST_CRT_PEM", valueFrom = "${aws_secretsmanager_secret.lighthouse[0].arn}:host_crt_pem::" },
-      { name = "HOST_KEY_PEM", valueFrom = "${aws_secretsmanager_secret.lighthouse[0].arn}:host_key_pem::" },
+      { name = "NCP_LH_CA_CRT_PEM", valueFrom = "${aws_secretsmanager_secret.lighthouse[0].arn}:ca_crt_pem::" },
+      { name = "NCP_LH_HOST_CRT_PEM", valueFrom = "${aws_secretsmanager_secret.lighthouse[0].arn}:host_crt_pem::" },
+      { name = "NCP_LH_HOST_KEY_PEM", valueFrom = "${aws_secretsmanager_secret.lighthouse[0].arn}:host_key_pem::" },
     ]
     logConfiguration = {
       logDriver = "awslogs"

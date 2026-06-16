@@ -30,8 +30,8 @@ resource "aws_cloudwatch_log_group" "gateway" {
 }
 
 # The gateway's runtime config (nonce HMAC key + leaf-pinned mTLS material), created
-# empty here and populated out-of-band by the genesis bootstrap. ECS injects each
-# JSON field as an env var the container's entrypoint materializes to a file.
+# empty here and populated out-of-band by the genesis bootstrap. ECS injects each JSON
+# field as an NCP_GW_* env var the shell-less gateway binary reads directly (no entrypoint).
 resource "aws_secretsmanager_secret" "gateway" {
   count                   = local.gw_fargate
   name                    = "${var.name_prefix}-gateway-config"
@@ -193,6 +193,19 @@ resource "aws_security_group" "gateway_task" {
     protocol    = "udp"
     cidr_blocks = ["0.0.0.0/0"]
   }
+  # NFS to the ACME cert-cache EFS — only when auto-TLS is on. Targets the edge subnet
+  # CIDR (the mount target lives there), not the EFS SG, so the two SGs don't reference
+  # each other (cycle); the EFS SG already source-matches this task SG on ingress.
+  dynamic "egress" {
+    for_each = local.gateway_acme == 1 ? [1] : []
+    content {
+      description = "NFS to the ACME cert-cache EFS (edge subnet)"
+      from_port   = 2049
+      to_port     = 2049
+      protocol    = "tcp"
+      cidr_blocks = [local.tier_cidr["edge"]]
+    }
+  }
   lifecycle {
     create_before_destroy = true
   }
@@ -301,22 +314,45 @@ resource "aws_ecs_task_definition" "gateway" {
     name      = "gateway"
     image     = local.gateway_image
     essential = true
+    user      = "65532" # distroless nonroot; matches the EFS access point's enforced uid (acme.tf)
     portMappings = [
       { containerPort = var.gateway_port, protocol = "tcp" },
       { containerPort = var.collect_port, protocol = "tcp" },
     ]
-    environment = [
-      { name = "NCP_GW_PORT", value = tostring(var.gateway_port) },
-      { name = "NCP_COLLECT_PORT", value = tostring(var.collect_port) },
-    ]
-    # Injected from Secrets Manager; the entrypoint writes each to a file.
-    secrets = [
-      { name = "HMAC_KEY_B64", valueFrom = "${aws_secretsmanager_secret.gateway[0].arn}:hmac_key_b64::" },
-      { name = "QUEUE_KEY_B64", valueFrom = "${aws_secretsmanager_secret.gateway[0].arn}:queue_key_b64::" },
-      { name = "COLLECT_CERT_PEM", valueFrom = "${aws_secretsmanager_secret.gateway[0].arn}:collect_cert_pem::" },
-      { name = "COLLECT_KEY_PEM", valueFrom = "${aws_secretsmanager_secret.gateway[0].arn}:collect_key_pem::" },
-      { name = "HARBOR_CLIENT_PEM", valueFrom = "${aws_secretsmanager_secret.gateway[0].arn}:harbor_client_pem::" },
-    ]
+    # Operational (non-secret) flags — the shell-less distroless binary gets them as `command`
+    # args. Enroll TLS posture: auto-TLS (the gateway's own Let's Encrypt cert via ACME DNS-01)
+    # when a domain is set, else -insecure (plain HTTP behind the L4 NLB).
+    command = concat(
+      [
+        "-addr", "0.0.0.0:${var.gateway_port}",
+        "-collect-addr", "0.0.0.0:${var.collect_port}",
+        "-queue-dsn", "/tmp/queue.db?_pragma=busy_timeout(5000)",
+      ],
+      local.gateway_acme == 1 ? concat(
+        ["-acme-domain", var.gateway_domain, "-acme-cache", "/var/lib/gateway/acme"],
+        var.acme_email != "" ? ["-acme-email", var.acme_email] : [],
+        var.acme_staging ? ["-acme-staging"] : []
+      ) : ["-insecure"]
+    )
+    # Secret MATERIAL from Secrets Manager — the binary reads each straight from its env var
+    # (no shell to materialize files). The Cloudflare token (auto-TLS only) is the whole secret
+    # value -> the plain env var internal/autotls reads.
+    secrets = concat(
+      [
+        { name = "NCP_GW_HMAC_KEY_B64", valueFrom = "${aws_secretsmanager_secret.gateway[0].arn}:hmac_key_b64::" },
+        { name = "NCP_GW_QUEUE_KEY_B64", valueFrom = "${aws_secretsmanager_secret.gateway[0].arn}:queue_key_b64::" },
+        { name = "NCP_GW_COLLECT_CERT_PEM", valueFrom = "${aws_secretsmanager_secret.gateway[0].arn}:collect_cert_pem::" },
+        { name = "NCP_GW_COLLECT_KEY_PEM", valueFrom = "${aws_secretsmanager_secret.gateway[0].arn}:collect_key_pem::" },
+        { name = "NCP_GW_HARBOR_CLIENT_PEM", valueFrom = "${aws_secretsmanager_secret.gateway[0].arn}:harbor_client_pem::" },
+      ],
+      local.gateway_acme == 1 ? [
+        { name = "NCP_ACME_CLOUDFLARE_TOKEN", valueFrom = aws_secretsmanager_secret.cloudflare_token[0].arn },
+      ] : []
+    )
+    # The auto-renewing cert cache (durable across task restarts) — the EFS volume below.
+    mountPoints = local.gateway_acme == 1 ? [
+      { sourceVolume = "acme", containerPath = "/var/lib/gateway/acme", readOnly = false },
+    ] : []
     logConfiguration = {
       logDriver = "awslogs"
       options = {
@@ -326,6 +362,26 @@ resource "aws_ecs_task_definition" "gateway" {
       }
     }
   }])
+
+  # EFS-backed ACME cert cache, mounted at /var/lib/gateway/acme (auto-TLS only). Transit
+  # encryption forces TLS for the NFS mount; the EFS is CMK-encrypted at rest; and the access
+  # point enforces the container's non-root uid (65532) so the cache is writable without root.
+  # (With an access point, root_directory must be "/" — the access point's /acme path applies.)
+  dynamic "volume" {
+    for_each = local.gateway_acme == 1 ? [1] : []
+    content {
+      name = "acme"
+      efs_volume_configuration {
+        file_system_id     = aws_efs_file_system.gateway_acme[0].id
+        transit_encryption = "ENABLED"
+        root_directory     = "/"
+        authorization_config {
+          access_point_id = aws_efs_access_point.gateway_acme[0].id
+          iam             = "DISABLED" # NFS reachability is gated by the EFS SG (task-SG-only)
+        }
+      }
+    }
+  }
 }
 
 resource "aws_ecs_service" "gateway" {
@@ -335,6 +391,12 @@ resource "aws_ecs_service" "gateway" {
   task_definition = aws_ecs_task_definition.gateway[0].arn
   desired_count   = 1
   launch_type     = "FARGATE"
+
+  # Auto-TLS makes the first boot slow + mount-ordered:
+  #  • the gateway BLOCKS on the first Let's Encrypt issuance (DNS-01 TXT propagation + LE
+  #    validation — tens of seconds on a cold EFS cache) before it opens the enroll port, so
+  #    give NLB health checks room before ECS recycles the task (default grace is 0).
+  health_check_grace_period_seconds = local.gateway_acme == 1 ? 300 : null
 
   network_configuration {
     subnets          = [aws_subnet.tier["edge"].id]
@@ -356,5 +418,11 @@ resource "aws_ecs_service" "gateway" {
     container_name   = "gateway"
     container_port   = var.collect_port
   }
-  depends_on = [aws_lb_listener.enroll, aws_lb_listener.enroll_internal, aws_lb_listener.collect]
+  # The mount target must be `available` before the service schedules a task, or the first
+  # Fargate task fails to mount the cert cache (ECS retries, but it churns the rollout). The
+  # counted ref is [] when auto-TLS is off, so this is a no-op then.
+  depends_on = [
+    aws_lb_listener.enroll, aws_lb_listener.enroll_internal, aws_lb_listener.collect,
+    aws_efs_mount_target.gateway_acme,
+  ]
 }

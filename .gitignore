@@ -9,6 +9,7 @@ coverage*
 /pilot
 /pilot.exe
 /gateway
+/nebula-boot
 
 # ADR 0003 Phase 2: the embedded nebula asset is fetched at build time
 # (`make embed-nebula`), platform-specific, ~8 MB gzipped — never committed.

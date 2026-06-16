@@ -56,6 +56,31 @@ resource "aws_iam_role_policy" "core_db_secret" {
   policy      = data.aws_iam_policy_document.core_db_secret.json
 }
 
+# Read the scoped Cloudflare DNS token so Core CAN obtain its own Let's Encrypt cert via
+# ACME DNS-01 (harbor terminates TLS for core-api + console — autotls/internal). Granted
+# only when harbor_domain is set; the secret is created in acme.tf (harbor_domain != ""
+# implies local.acme_token == 1, so the secret exists).
+#
+# GRANT-ONLY for now: this hands Core the read permission, but the genesis bootstrap
+# (deploy/prod/bootstrap-genesis.sh) does NOT yet export $NCP_ACME_CLOUDFLARE_TOKEN or pass
+# -acme-domain to core-api/admin-api — so setting harbor_domain provisions the secret + grant
+# but harbor keeps its current transport until that bootstrap wiring lands (tracked in ADR
+# 0007). NB: admin-api fatals under -environment=production without in-process TLS, so the
+# bootstrap change must add -acme-domain in the same step it flips harbor to production.
+resource "aws_iam_role_policy" "core_acme_token" {
+  count       = var.harbor_domain != "" ? 1 : 0
+  name_prefix = "acme-token-"
+  role        = aws_iam_role.core.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["secretsmanager:GetSecretValue"]
+      Resource = [aws_secretsmanager_secret.cloudflare_token[0].arn]
+    }]
+  })
+}
+
 # ── EBS root-volume encryption (all nodes) ───────────────────────────────────
 # The instances already set root_block_device.encrypted=true (main.tf); pin a customer-
 # managed CMK so the at-rest key is controlled/rotated/audited like the Aurora + trust-root

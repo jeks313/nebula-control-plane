@@ -34,13 +34,21 @@ output "lighthouse_ecr_repo" {
 }
 
 output "gateway_url" {
-  description = "PUBLIC enrollment URL for OFF-CLOUD clients (the iMac). EC2: the node's public IP; Fargate: the internet-facing NLB's DNS name. (In-VPC clients must use gateway_url_internal — a public NLB is not reachable from inside the VPC by DNS.)"
-  value       = var.gateway_runtime == "fargate" ? "http://${one(aws_lb.gateway[*].dns_name)}:${var.gateway_port}" : "http://${lookup(local.public_ip, "gateway", "")}:${var.gateway_port}"
+  description = "PUBLIC enrollment URL for OFF-CLOUD clients (the iMac). With gateway_domain set the gateway terminates HTTPS (Let's Encrypt), so clients MUST connect by that name (operator points DNS/Cloudflare at the public NLB); else http to the internet-facing NLB (EC2: the node's public IP). In-VPC clients use gateway_url_internal."
+  value = (
+    var.gateway_domain != "" ? "https://${var.gateway_domain}:${var.gateway_port}" :
+    var.gateway_runtime == "fargate" ? "http://${one(aws_lb.gateway[*].dns_name)}:${var.gateway_port}" :
+    "http://${lookup(local.public_ip, "gateway", "")}:${var.gateway_port}"
+  )
 }
 
 output "gateway_url_internal" {
-  description = "IN-VPC enrollment URL (e.g. the cloud client). EC2: same as the node (private); Fargate: the INTERNAL NLB's private DNS name."
-  value       = var.gateway_runtime == "fargate" ? "http://${one(aws_lb.gateway_internal[*].dns_name)}:${var.gateway_port}" : "http://${try(aws_instance.node["gateway"].private_ip, "")}:${var.gateway_port}"
+  description = "IN-VPC enrollment URL (e.g. the cloud client). With gateway_domain set, connect by that name (split-horizon DNS must resolve it to the INTERNAL NLB, since the gateway serves a cert for that hostname); else http to the internal NLB (EC2: the node's private IP)."
+  value = (
+    var.gateway_domain != "" ? "https://${var.gateway_domain}:${var.gateway_port}" :
+    var.gateway_runtime == "fargate" ? "http://${one(aws_lb.gateway_internal[*].dns_name)}:${var.gateway_port}" :
+    "http://${try(aws_instance.node["gateway"].private_ip, "")}:${var.gateway_port}"
+  )
 }
 
 output "gateway_collect_addr" {
@@ -128,4 +136,15 @@ output "db_security_group_id" {
 output "rds_kms_key_arn" {
   description = "CMK encrypting Aurora storage + the master secret."
   value       = aws_kms_key.rds.arn
+}
+
+# ── Edge TLS (ACME) — consumed by the bootstrap to populate the Cloudflare token ──
+output "cloudflare_token_secret_arn" {
+  description = "Secrets Manager ARN of the scoped Cloudflare DNS token (empty unless gateway_domain or harbor_domain is set). Populate it out-of-band: `aws secretsmanager put-secret-value --secret-id <arn> --secret-string <token>`. Created with a placeholder; ignore_changes keeps TF from clobbering the real value."
+  value       = one(aws_secretsmanager_secret.cloudflare_token[*].arn)
+}
+
+output "gateway_acme_efs_id" {
+  description = "EFS file system backing the Fargate gateway's ACME cert cache (empty unless the Fargate gateway has auto-TLS on)."
+  value       = one(aws_efs_file_system.gateway_acme[*].id)
 }
