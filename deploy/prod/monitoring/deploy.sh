@@ -17,8 +17,10 @@
 # genesis bootstrap notes) — the dynamic internal-NLB IP can't be pinned here. Without a mesh
 # domain everything resolves automatically (NLB DNS + overlay IP), no operator DNS needed.
 #
-# Reach the UIs after deploy (SSH to the node, forward to its localhost where the containers bind):
-#   ssh -i <key> -L 3000:localhost:3000 -L 9090:localhost:9090 -L 9093:localhost:9093 ec2-user@<monitoring-ip>
+# Reach the UIs after deploy — the node is PRIVATE (no public IP), so SSH rides SSM Session Manager
+# (forward its localhost ports through the tunnel):
+#   ssh -o ProxyCommand='aws ssm start-session --target <id> --document-name AWS-StartSSHSession --parameters portNumber=%p' \
+#       -i <key> -L 3000:localhost:3000 -L 9090:localhost:9090 -L 9093:localhost:9093 ec2-user@<monitoring-instance-id>
 # Set a real Grafana password: export GF_ADMIN_PASSWORD=… before running (else "changeme").
 set -euo pipefail
 
@@ -36,26 +38,30 @@ CORE_PORT="${CORE_PORT:-8444}"
 ADMIN_PORT="${ADMIN_PORT:-443}" # MUST match bootstrap-genesis.sh's ADMIN_PORT default (the console moved to 443); else the admin-api scrape target is a dead port
 LH_STATS_PORT="${LH_STATS_PORT:-8080}"
 
-for t in terraform jq go ssh scp; do command -v "$t" >/dev/null || { echo "missing tool: $t" >&2; exit 1; }; done
+for t in terraform jq go ssh scp aws session-manager-plugin; do command -v "$t" >/dev/null || { echo "missing tool: $t" >&2; exit 1; }; done
 [[ -f "$SSH_KEY" ]] || { echo "ssh key not found: $SSH_KEY (set SSH_KEY=...)" >&2; exit 1; }
 [[ -f "$PIN" ]] || { echo "config-signing pin not found: $PIN — run deploy/prod/bootstrap-genesis.sh first" >&2; exit 1; }
 [[ "${GF_ADMIN_PASSWORD:-changeme}" != "changeme" ]] || echo "WARNING: GF_ADMIN_PASSWORD not set — Grafana admin password will be 'changeme'. Set it + re-run for production." >&2
 
-SSH_OPTS=(-i "$SSH_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o BatchMode=yes)
+SSH_OPTS=(-i "$SSH_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=30 -o ServerAliveInterval=15 -o BatchMode=yes)
 rsh() { local h="$1"; shift; ssh "${SSH_OPTS[@]}" "$SSH_USER@$h" "$@"; }
 rcp() { scp "${SSH_OPTS[@]}" "$@"; }
 
 echo "==> reading terraform outputs"
 OUT="$(terraform -chdir="$TFDIR" output -json)"
 val() { jq -r "$1 // \"\"" <<<"$OUT"; }
-MON_IP="$(val '.public_ips.value.monitoring')"
+MON_ID="$(val '.instance_ids.value.monitoring')" # SSH/scp target over SSM (the node is private, no public IP)
 MON_PRIV="$(val '.monitoring_private_ip.value')"
-HB_IP="$(val '.public_ips.value.harbor')"
+HB_ID="$(val '.instance_ids.value.harbor')"
 GW_URL_INTERNAL="$(val '.gateway_url_internal.value')"
 TF_REGION="$(val '.region.value')"
+# SSH/scp to the (now private) monitoring + harbor nodes ride SSM Session Manager — append the
+# ProxyCommand now that the region is known; rsh/rcp target INSTANCE IDs (MON_ID/HB_ID).
+SSM_PROXY="ProxyCommand=aws ssm start-session --target %h --document-name AWS-StartSSHSession --parameters portNumber=%p${TF_REGION:+ --region $TF_REGION}"
+SSH_OPTS+=(-o "$SSM_PROXY")
 HARBOR_DOMAIN="$(val '.harbor_domain.value')"
 ALLOY_VERSION="${ALLOY_VERSION:-1.5.1}" # Grafana Alloy (promtail's supported successor); bump at github.com/grafana/alloy/releases
-[[ -n "$MON_IP" ]] || { echo "no monitoring node IP in outputs — apply the app stack (it now includes the monitoring node)" >&2; exit 1; }
+[[ -n "$MON_ID" ]] || { echo "no monitoring node instance ID in outputs — apply the app stack (it includes the monitoring node)" >&2; exit 1; }
 [[ -n "$GW_URL_INTERNAL" ]] || { echo "no gateway_url_internal output — apply the app stack first" >&2; exit 1; }
 
 # Harbor serves HTTPS for its mesh domain when auto-TLS is on; then pilot reaches it by name
@@ -70,26 +76,26 @@ else
   CORE_URL_HOST="$HARBOR_OVERLAY"
   TLS_BLOCK=""
 fi
-echo "    monitoring=$MON_IP region=$TF_REGION  scrape: $SCHEME harbor=$HARBOR_OVERLAY (core :$CORE_PORT, admin :$ADMIN_PORT) lighthouse=$LH_OVERLAY:$LH_STATS_PORT"
+echo "    monitoring=$MON_ID region=$TF_REGION  scrape: $SCHEME harbor=$HARBOR_OVERLAY (core :$CORE_PORT, admin :$ADMIN_PORT) lighthouse=$LH_OVERLAY:$LH_STATS_PORT"
 
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 
 # ── 1. install pilot on the monitoring node ─────────────────────────────────
 echo "==> building pilot (linux/amd64) + installing on the monitoring node"
 (cd "$ROOT" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "$WORK/pilot" ./cmd/pilot)
-rcp "$WORK/pilot" "$SSH_USER@$MON_IP:/tmp/pilot"
-rcp "$PIN" "$SSH_USER@$MON_IP:/tmp/config-signing.pub"
-rsh "$MON_IP" 'sudo install -m0755 /tmp/pilot /usr/local/bin/pilot && rm -f /tmp/pilot'
+rcp "$WORK/pilot" "$SSH_USER@$MON_ID:/tmp/pilot"
+rcp "$PIN" "$SSH_USER@$MON_ID:/tmp/config-signing.pub"
+rsh "$MON_ID" 'sudo install -m0755 /tmp/pilot /usr/local/bin/pilot && rm -f /tmp/pilot'
 
 # Map the harbor name -> its (fixed) overlay IP so pilot supervise can reach core-api by name
 # when auto-TLS is on. (Prometheus validates by SNI instead, so it needs no entry.)
 if [[ -n "$HARBOR_DOMAIN" ]]; then
-  rsh "$MON_IP" "grep -qF '$HARBOR_OVERLAY $HARBOR_DOMAIN' /etc/hosts || echo '$HARBOR_OVERLAY $HARBOR_DOMAIN' | sudo tee -a /etc/hosts >/dev/null"
+  rsh "$MON_ID" "grep -qF '$HARBOR_OVERLAY $HARBOR_DOMAIN' /etc/hosts || echo '$HARBOR_OVERLAY $HARBOR_DOMAIN' | sudo tee -a /etc/hosts >/dev/null"
 fi
 
 # ── 2. enroll (keyless aws-sigv4, auto-issued via cloud-trust) + supervise ──
 echo "==> enrolling the monitoring node + supervising nebula"
-rsh "$MON_IP" "set -e
+rsh "$MON_ID" "set -e
   sudo pilot enroll -dir /etc/nebula -gateway '$GW_URL_INTERNAL' -aws-sigv4 -region '$TF_REGION' \
     -config-pub /tmp/config-signing.pub -name monitoring
   sudo systemctl reset-failed ncp-nebula 2>/dev/null || true
@@ -128,9 +134,9 @@ YAML
 
 # ── 4. deploy the stack (podman-compose) ────────────────────────────────────
 echo "==> installing podman + bringing up Prometheus/Alertmanager/Grafana"
-rcp "$HERE/alerts.yml" "$HERE/alertmanager.yml" "$HERE/loki-config.yml" "$HERE/compose.yml" "$WORK/prometheus.yml" "$SSH_USER@$MON_IP:/tmp/"
-rcp -r "$HERE/grafana" "$SSH_USER@$MON_IP:/tmp/grafana"
-rsh "$MON_IP" "set -e
+rcp "$HERE/alerts.yml" "$HERE/alertmanager.yml" "$HERE/loki-config.yml" "$HERE/compose.yml" "$WORK/prometheus.yml" "$SSH_USER@$MON_ID:/tmp/"
+rcp -r "$HERE/grafana" "$SSH_USER@$MON_ID:/tmp/grafana"
+rsh "$MON_ID" "set -e
   sudo dnf install -y podman python3-pip >/dev/null
   command -v podman-compose >/dev/null 2>&1 || sudo pip3 install --quiet podman-compose
   sudo install -d -o $SSH_USER -g $SSH_USER /opt/ncp-monitoring
@@ -139,18 +145,18 @@ rsh "$MON_IP" "set -e
   echo staged"
 # Grafana admin password as a 0600 .env (podman-compose substitutes \${GF_ADMIN_PASSWORD} from
 # it) — piped over ssh stdin so the secret never lands on a command line / in the node's ps.
-printf 'GF_ADMIN_PASSWORD=%s\n' "${GF_ADMIN_PASSWORD:-changeme}" | rsh "$MON_IP" 'umask 077; cat > /opt/ncp-monitoring/.env'
-rsh "$MON_IP" 'cd /opt/ncp-monitoring && podman-compose up -d && echo up'
+printf 'GF_ADMIN_PASSWORD=%s\n' "${GF_ADMIN_PASSWORD:-changeme}" | rsh "$MON_ID" 'umask 077; cat > /opt/ncp-monitoring/.env'
+rsh "$MON_ID" 'cd /opt/ncp-monitoring && podman-compose up -d && echo up'
 
 # ── 5. ship harbor's journald logs to Loki (Grafana Alloy on the harbor node, Phase 7c) ──
 # Alloy (promtail's supported successor) tails the systemd journal (core-api/admin-api/collect/
 # nebula run via systemd-run --collect) and pushes to Loki over the VPC (SG-locked). The Fargate
 # components already ship via awslogs. Skipped if the harbor node isn't an output.
-if [[ -n "$HB_IP" && -n "$MON_PRIV" ]]; then
+if [[ -n "$HB_ID" && -n "$MON_PRIV" ]]; then
   echo "==> installing Grafana Alloy on harbor -> Loki ($MON_PRIV:3100)"
   sed "s#http://MONITORING_PRIVATE_IP:3100#http://$MON_PRIV:3100#" "$HERE/config.alloy" > "$WORK/config.alloy"
-  rcp "$WORK/config.alloy" "$SSH_USER@$HB_IP:/tmp/config.alloy"
-  rsh "$HB_IP" "set -e
+  rcp "$WORK/config.alloy" "$SSH_USER@$HB_ID:/tmp/config.alloy"
+  rsh "$HB_ID" "set -e
     # persistent journal so Alloy reads more than the current boot
     sudo mkdir -p /var/log/journal && sudo systemctl restart systemd-journald
     if ! command -v alloy >/dev/null; then
@@ -175,10 +181,10 @@ cat <<EOF
 ────────────────────────────────────────────────────────────────────────────
  MONITORING STACK UP (Prometheus + Alertmanager + Grafana)
 ────────────────────────────────────────────────────────────────────────────
- Node            : $MON_IP (mesh member, group:workloads)
+ Node            : $MON_ID (${MON_PRIV:-private}; mesh member, group:workloads)
  Scrapes         : core-api/admin-api $SCHEME at $HARBOR_OVERLAY:{$CORE_PORT,$ADMIN_PORT}, lighthouse $LH_OVERLAY:$LH_STATS_PORT (over the overlay)
  Logs            : harbor journald -> Grafana Alloy -> Loki ($MON_PRIV:3100). Query in Grafana (Loki datasource); the Fargate gateway/lighthouse ship via awslogs.
- Reach the UIs   : ssh -i $SSH_KEY -L 3000:localhost:3000 -L 9090:localhost:9090 -L 9093:localhost:9093 $SSH_USER@$MON_IP
+ Reach the UIs   : ssh -i $SSH_KEY -o "$SSM_PROXY" -L 3000:localhost:3000 -L 9090:localhost:9090 -L 9093:localhost:9093 $SSH_USER@$MON_ID
                    then http://localhost:3000 (Grafana), :9090 (Prometheus), :9093 (Alertmanager)
  Alert delivery  : PLACEHOLDER (null receiver) — wire a real Slack/email/PagerDuty receiver in
                    /opt/ncp-monitoring/alertmanager.yml on the node, then: podman-compose restart alertmanager
