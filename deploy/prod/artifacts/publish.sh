@@ -61,7 +61,7 @@ publish_pilot() {
   key="pilot/${ver}/pilot-${PLAT}"
   bin="$TMP/pilot"
   echo "==> building pilot ${ver} (${PLAT}, cgo-free)"
-  (cd "$ROOT" && GOOS="$GOOS" GOARCH="$GOARCH" CGO_ENABLED=0 go build -trimpath -o "$bin" ./cmd/pilot)
+  (cd "$ROOT" && GOOS="$GOOS" GOARCH="$GOARCH" CGO_ENABLED=0 go build -trimpath -ldflags "-X main.version=${ver}" -o "$bin" ./cmd/pilot)
   sha="$(sha256_of "$bin")"
   upload "$bin" "$key"
   echo

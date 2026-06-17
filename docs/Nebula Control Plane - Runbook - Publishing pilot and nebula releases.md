@@ -19,6 +19,28 @@ binary to a running mesh, and how it reaches the fleet. No assumed knowledge.
   URL **matching its reported arch**; pilot downloads the raw binary, checks the sha256, then
   swaps + re-execs itself (pilot) or restarts nebula (nebula).
 
+## Versioning & the one-command release (`release-pilot.sh`)
+
+The repo-root **`VERSION`** file is the single source of truth (currently `0.1.0`). Every build —
+the genesis bootstrap, `publish.sh`, and the Fargate gateway image — stamps `main.version` from it
+via `-ldflags`, so `pilot version` (and harbor/gateway) report the real version, **not `dev`**.
+
+**Cut a pilot release in one command** (laptop, AWS creds set) — it builds + publishes the
+version-stamped binary for every fleet arch and prints the register/release lines:
+
+```bash
+deploy/prod/artifacts/release-pilot.sh            # version from VERSION
+# or pin explicitly:
+deploy/prod/artifacts/release-pilot.sh 0.1.0
+```
+
+To **bump**: edit `VERSION` (e.g. `0.1.0` → `0.1.1`), `git commit` + `git tag v0.1.1`, then run
+`release-pilot.sh`. The arch list (default `linux/amd64` + `darwin/arm64`) is at the top of the
+script — extend it as the fleet grows. nebula is slackhq's prebuilt binary, published separately
+(`publish.sh nebula <slackhq-version>`) on its own cadence.
+
+Steps 1–3 below are the underlying manual flow; `release-pilot.sh` automates step 1 across arches.
+
 ## Prerequisites
 
 - The artifacts bucket exists: `artifacts_bucket_name` set in `deploy/prod/terraform/app/terraform.tfvars`

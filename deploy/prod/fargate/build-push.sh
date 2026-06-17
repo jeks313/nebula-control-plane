@@ -37,9 +37,10 @@ echo "==> ECR login ($ENGINE): $REGISTRY"
 aws ecr get-login-password --region "$REGION" | "$ENGINE" login --username AWS --password-stdin "$REGISTRY"
 
 command -v go >/dev/null || { echo "missing tool: go" >&2; exit 1; }
+VER="$(cat "$ROOT/VERSION" 2>/dev/null || echo dev)" # stamp main.version (else "dev")
 if [[ "$COMPONENT" == "gateway" ]]; then
-  echo "==> building static gateway (linux/amd64, cgo-free)"
-  (cd "$ROOT" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -o "$HERE/gateway" ./cmd/gateway)
+  echo "==> building static gateway $VER (linux/amd64, cgo-free)"
+  (cd "$ROOT" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-X main.version=$VER" -o "$HERE/gateway" ./cmd/gateway)
   "$ENGINE" build --platform linux/amd64 -t "$REPO:latest" -f "$HERE/Dockerfile" "$HERE"
   rm -f "$HERE/gateway"
 else
