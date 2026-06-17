@@ -61,6 +61,20 @@ services:
     ports:
       - "3000:3000"
 
+  # Host metrics for the monitoring node itself (CPU/mem/disk/net) — host network so it binds
+  # the node's :9100 (Prometheus scrapes it at the node's private IP). Closes the "monitoring
+  # node is self-blind" gap from the coverage audit.
+  node-exporter:
+    image: docker.io/prom/node-exporter:v1.8.2
+    restart: unless-stopped
+    network_mode: host
+    pid: host
+    command:
+      - --path.rootfs=/host
+      - --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)
+    volumes:
+      - /:/host:ro,rslave
+
 volumes:
   prometheus-data:
   alertmanager-data:

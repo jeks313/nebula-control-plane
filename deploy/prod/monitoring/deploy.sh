@@ -53,6 +53,8 @@ val() { jq -r "$1 // \"\"" <<<"$OUT"; }
 MON_ID="$(val '.instance_ids.value.monitoring')" # SSH/scp target over SSM (the node is private, no public IP)
 MON_PRIV="$(val '.monitoring_private_ip.value')"
 HB_ID="$(val '.instance_ids.value.harbor')"
+LH_ID="$(val '.instance_ids.value.lighthouse')"             # EC2 lighthouse (empty when lighthouse_runtime=fargate)
+LIGHTHOUSE_RUNTIME="$(val '.lighthouse_runtime.value')"; LIGHTHOUSE_RUNTIME="${LIGHTHOUSE_RUNTIME:-ec2}"
 GW_URL_INTERNAL="$(val '.gateway_url_internal.value')"
 TF_REGION="$(val '.region.value')"
 # SSH/scp to the (now private) monitoring + harbor nodes ride SSM Session Manager — append the
@@ -130,6 +132,12 @@ scrape_configs:
   - job_name: lighthouse
     static_configs:
       - targets: ["$LH_OVERLAY:$LH_STATS_PORT"]
+  - job_name: harbor-nebula
+    static_configs:
+      - targets: ["$HARBOR_OVERLAY:$LH_STATS_PORT"]
+  - job_name: node
+    static_configs:
+      - targets: ["$MON_PRIV:9100"]
 YAML
 
 # ── 4. deploy the stack (docker compose) ────────────────────────────────────
@@ -156,15 +164,19 @@ rsh "$MON_ID" "set -e
 printf 'GF_ADMIN_PASSWORD=%s\n' "${GF_ADMIN_PASSWORD:-changeme}" | rsh "$MON_ID" 'umask 077; cat > /opt/ncp-monitoring/.env'
 rsh "$MON_ID" 'cd /opt/ncp-monitoring && sudo docker compose up -d && echo up'
 
-# ── 5. ship harbor's journald logs to Loki (Grafana Alloy on the harbor node, Phase 7c) ──
+# ── 5. ship each EC2 node's journald to Loki (Grafana Alloy, Phase 7c) ──
 # Alloy (promtail's supported successor) tails the systemd journal (core-api/admin-api/collect/
-# nebula run via systemd-run --collect) and pushes to Loki over the VPC (SG-locked). The Fargate
-# components already ship via awslogs. Skipped if the harbor node isn't an output.
-if [[ -n "$HB_ID" && -n "$MON_PRIV" ]]; then
-  echo "==> installing Grafana Alloy on harbor -> Loki ($MON_PRIV:3100)"
-  sed "s#http://MONITORING_PRIVATE_IP:3100#http://$MON_PRIV:3100#" "$HERE/config.alloy" > "$WORK/config.alloy"
-  rcp "$WORK/config.alloy" "$SSH_USER@$HB_ID:/tmp/config.alloy"
-  rsh "$HB_ID" "set -e
+# nebula/docker/pilot run via systemd-run --collect / systemd) and pushes to Loki over the VPC
+# (SG-locked). Installed on every EC2 node: harbor, the monitoring node itself (so the stack isn't
+# self-blind), and the EC2 lighthouse. The Fargate gateway/lighthouse ship via awslogs (CloudWatch
+# -> Loki is a separate FireLens change). The cloud client is intentionally NOT shipped here yet.
+install_alloy() { # install_alloy <instance-id> <host-label>
+  local id="$1" label="$2"
+  echo "==> installing Grafana Alloy on $label ($id) -> Loki ($MON_PRIV:3100)"
+  sed -e "s#http://MONITORING_PRIVATE_IP:3100#http://$MON_PRIV:3100#" -e "s#NCP_HOST_LABEL#$label#g" \
+    "$HERE/config.alloy" > "$WORK/config.alloy.$label"
+  rcp "$WORK/config.alloy.$label" "$SSH_USER@$id:/tmp/config.alloy"
+  rsh "$id" "set -e
     # persistent journal so Alloy reads more than the current boot
     sudo mkdir -p /var/log/journal && sudo systemctl restart systemd-journald
     if ! command -v alloy >/dev/null; then
@@ -180,8 +192,13 @@ if [[ -n "$HB_ID" && -n "$MON_PRIV" ]]; then
     sudo systemd-run --unit ncp-alloy --collect /usr/local/bin/alloy run \
       --server.http.listen-addr=127.0.0.1:12345 --storage.path=/var/lib/alloy /etc/alloy/config.alloy >/dev/null
     echo alloy-up"
+}
+if [[ -n "$MON_PRIV" ]]; then
+  [[ -n "$HB_ID" ]] && install_alloy "$HB_ID" harbor
+  install_alloy "$MON_ID" monitoring
+  [[ "$LIGHTHOUSE_RUNTIME" == "ec2" && -n "$LH_ID" ]] && install_alloy "$LH_ID" lighthouse
 else
-  echo "==> skipping harbor log shipping (no harbor / monitoring-private-ip output)"
+  echo "==> skipping log shipping (no monitoring-private-ip output)"
 fi
 
 cat <<EOF

@@ -32,6 +32,15 @@ tun:
   disabled: false
   dev: {{ .TunDev }}
   mtu: {{ .MTU }}
+{{- if .StatsPort }}
+stats:
+  type: prometheus
+  listen: 0.0.0.0:{{ .StatsPort }}
+  path: /metrics
+  namespace: nebula
+  subsystem: {{ .StatsSubsystem }}
+  interval: 10s
+{{- end }}
 logging:
   level: {{ .LogLevel }}
   format: {{ .LogFormat }}
@@ -51,4 +60,9 @@ firewall:
     - port: {{ .Port }}
       proto: {{ .Proto }}
       {{ .SelectorYAML }}
+{{- end }}
+{{- if .StatsPort }}
+    - port: {{ .StatsPort }}
+      proto: tcp
+      host: any
 {{- end }}

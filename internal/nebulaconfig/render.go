@@ -83,6 +83,12 @@ type Values struct {
 	TunDev string `yaml:"tun_dev"`
 	MTU    int    `yaml:"mtu"`
 
+	// Prometheus stats: nebula's built-in /metrics listener (data-plane metrics — handshakes,
+	// tunnels, tx/rx). StatsPort 0 disables it. Bound on 0.0.0.0 but reachable only over the
+	// overlay (the node SGs don't open it on the underlay), so it's mesh-only like core-api.
+	StatsPort      int    `yaml:"stats_port"`
+	StatsSubsystem string `yaml:"stats_subsystem"`
+
 	LogLevel  string `yaml:"log_level"`
 	LogFormat string `yaml:"log_format"`
 
@@ -125,6 +131,12 @@ func (v *Values) Defaults() {
 	}
 	if v.MTU == 0 {
 		v.MTU = 1300
+	}
+	if v.StatsPort == 0 {
+		v.StatsPort = 8080 // nebula prometheus /metrics (same port the Fargate lighthouse uses)
+	}
+	if v.StatsSubsystem == "" {
+		v.StatsSubsystem = "node"
 	}
 	if v.LogLevel == "" {
 		v.LogLevel = "info"
