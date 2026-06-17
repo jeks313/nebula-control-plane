@@ -16,13 +16,13 @@ terraform {
   # `terraform init`. Until then the app uses local state (gitignored). The foundation
   # stack must be applied FIRST (this stack reads its remote state — see remote_state.tf).
   #
-  # backend "s3" {
-  #   bucket       = "REPLACE-with-foundation's-state_bucket"
-  #   key          = "nebula-control-plane/app.tfstate"
-  #   region       = "ca-central-1"
-  #   encrypt      = true
-  #   use_lockfile = true
-  # }
+  backend "s3" {
+    bucket       = "ncp-tfstate-123456789012"
+    key          = "nebula-control-plane/app.tfstate"
+    region       = "ca-central-1"
+    encrypt      = true
+    use_lockfile = true
+  }
 }
 
 # Credentials are intentionally NOT configured here. The AWS provider picks them
