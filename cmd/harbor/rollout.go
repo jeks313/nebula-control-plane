@@ -182,6 +182,7 @@ func cmdRollout(args []string) {
 	missingAfter := fs.Duration("missing-after", 3*time.Minute, "heartbeat silence beyond this => host is down")
 	desc := fs.String("desc", "", "rollout description")
 	actor := fs.String("actor", "operator", "admin identity for the audit trail")
+	lane := fs.String("lane", "all", "rollout lane (status/step/abort): all|policy|pilot|nebula|blocklist")
 	_ = fs.Parse(args[1:])
 
 	s := openStore(*driver, *dsn)
@@ -209,37 +210,68 @@ func cmdRollout(args []string) {
 		if err != nil {
 			fatalf("rollout step: %v", err)
 		}
-		printRolloutStatus(ctx, eng)
+		printRolloutStatus(ctx, eng, *lane)
 		if !changed {
 			fmt.Println("(no state change)")
 		}
 	case "status":
-		printRolloutStatus(ctx, eng)
+		printRolloutStatus(ctx, eng, *lane)
 	case "abort":
-		if err := eng.Abort(ctx, *actor); err != nil {
-			fatalf("rollout abort: %v", err)
+		abortLane := *lane
+		if abortLane == "all" {
+			abortLane = rollout.LanePolicy // abort defaults to the policy lane
 		}
-		fmt.Println("rollout aborted — touched hosts will revert to prev")
+		var aerr error
+		if abortLane == rollout.LanePolicy {
+			aerr = eng.Abort(ctx, *actor)
+		} else {
+			aerr = eng.AbortLane(ctx, abortLane, *actor)
+		}
+		if aerr != nil {
+			fatalf("rollout abort: %v", aerr)
+		}
+		fmt.Printf("rollout aborted (lane %s) — touched hosts will revert to prev\n", abortLane)
 	default:
 		fatalf("rollout: unknown subcommand %q", sub)
 	}
 }
 
-func printRolloutStatus(ctx context.Context, eng *rollout.Engine) {
-	r, hosts, err := eng.Status(ctx)
-	if err != nil {
-		if errors.Is(err, rollout.ErrNone) {
-			fmt.Println("no rollouts")
-			return
+// printRolloutStatus prints the rollout(s) for the selected lane. lane "all" walks every lane and
+// prints each that has a rollout (the default — so a pilot/nebula/blocklist rollout is visible, not
+// just the policy lane). A specific lane prints that one, or "[lane] no rollout".
+func printRolloutStatus(ctx context.Context, eng *rollout.Engine, lane string) {
+	lanes := []string{rollout.LanePolicy, rollout.LaneBlocklist, rollout.LaneNebula, rollout.LanePilot}
+	if lane != "all" {
+		switch lane {
+		case rollout.LanePolicy, rollout.LaneBlocklist, rollout.LaneNebula, rollout.LanePilot:
+			lanes = []string{lane}
+		default:
+			fatalf("rollout: unknown -lane %q (want all|policy|pilot|nebula|blocklist)", lane)
 		}
-		fatalf("rollout status: %v", err)
 	}
-	fmt.Printf("rollout #%d: %s  %d -> %d  active_wave=%d\n", r.ID, r.State, r.PrevVersion, r.TargetVersion, r.ActiveWave)
-	if r.Note != "" {
-		fmt.Printf("  note: %s\n", r.Note)
+	any := false
+	for _, l := range lanes {
+		r, hosts, err := eng.StatusLane(ctx, l)
+		if errors.Is(err, rollout.ErrNone) {
+			if lane != "all" {
+				fmt.Printf("[%s] no rollout\n", l)
+			}
+			continue
+		}
+		if err != nil {
+			fatalf("rollout status (%s): %v", l, err)
+		}
+		any = true
+		fmt.Printf("[%s] rollout #%d: %s  %d -> %d  active_wave=%d\n", l, r.ID, r.State, r.PrevVersion, r.TargetVersion, r.ActiveWave)
+		if r.Note != "" {
+			fmt.Printf("  note: %s\n", r.Note)
+		}
+		fmt.Printf("  %-16s %-5s %s\n", "OVERLAY_IP", "WAVE", "STATUS")
+		for _, h := range hosts {
+			fmt.Printf("  %-16s %-5d %s\n", h.OverlayIP, h.Wave, h.Status)
+		}
 	}
-	fmt.Printf("  %-16s %-5s %s\n", "OVERLAY_IP", "WAVE", "STATUS")
-	for _, h := range hosts {
-		fmt.Printf("  %-16s %-5d %s\n", h.OverlayIP, h.Wave, h.Status)
+	if !any && lane == "all" {
+		fmt.Println("no rollouts on any lane")
 	}
 }

@@ -122,9 +122,9 @@ usage:
   harbor blocklist status  [db flags]      blocklist-lane rollout convergence (7.1b)
   harbor rollout start     -target N -prev M -hosts ip1,ip2,... [-canary K]
                            [-wave-size W] [-min-healthy H] [-observe D] [-missing-after D] -actor A
-  harbor rollout step      [db flags]      force one evaluation (cron/ops)
-  harbor rollout status    [db flags]
-  harbor rollout abort     -actor A [db flags]
+  harbor rollout step      [-lane L] [db flags]      force one evaluation (cron/ops)
+  harbor rollout status    [-lane all|policy|pilot|nebula|blocklist] [db flags]   (default: all lanes)
+  harbor rollout abort     -actor A [-lane L] [db flags]
   harbor policy validate   <policy.txt>
   harbor policy compile    -groups a,b <policy.txt>   preview a host's firewall
   harbor policy propose    <policy.txt> -proposer A   open a dual-control publish (6.5)
