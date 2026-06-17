@@ -175,10 +175,11 @@ LH="$LH_OVERLAY=$LH_ADDR"
 
 # ── 0. build + distribute binaries ──────────────────────────────────────────
 if [[ "$SKIP_BUILD" -eq 0 ]]; then
-  echo "==> building harbor/pilot/gateway (linux/amd64, cgo-free)"
-  ( cd "$ROOT" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "$WORK/harbor" ./cmd/harbor \
-    && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "$WORK/pilot" ./cmd/pilot \
-    && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "$WORK/gateway" ./cmd/gateway )
+  VER="$(cat "$ROOT/VERSION" 2>/dev/null || echo dev)" # stamp main.version (else binaries report "dev")
+  echo "==> building harbor/pilot/gateway $VER (linux/amd64, cgo-free)"
+  ( cd "$ROOT" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "-X main.version=$VER" -o "$WORK/harbor" ./cmd/harbor \
+    && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "-X main.version=$VER" -o "$WORK/pilot" ./cmd/pilot \
+    && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "-X main.version=$VER" -o "$WORK/gateway" ./cmd/gateway )
   # harbor/client are always EC2; the lighthouse + gateway are EC2 nodes only under their
   # "ec2" runtime (under fargate each is a container — no VM to scp to).
   NODE_IPS=("$HB_IP" "$CL_IP")
