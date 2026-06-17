@@ -15,13 +15,13 @@ terraform {
   #      move foundation.tfstate into the bucket. From then on it is remote + locked.
   # The app stack uses the same bucket under a different key (app/versions.tf).
   #
-  # backend "s3" {
-  #   bucket       = "REPLACE-with-var.state_bucket_name"
-  #   key          = "nebula-control-plane/foundation.tfstate"
-  #   region       = "ca-central-1"
-  #   encrypt      = true
-  #   use_lockfile = true
-  # }
+  backend "s3" {
+    bucket       = "ncp-tfstate-308040853462"
+    key          = "nebula-control-plane/foundation.tfstate"
+    region       = "ca-central-1"
+    encrypt      = true
+    use_lockfile = true
+  }
 }
 
 # Credentials come from the environment / aws-vault — never hard-coded. See README.md.
