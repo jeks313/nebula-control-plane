@@ -127,23 +127,33 @@ harbor fleet           <DB FLAGS>
 
 ## Off-cloud install (the iMac) — first-time bootstrap of a node
 
-An off-cloud host has no AWS creds and no pre-installed binaries. It pulls them from the public
-bucket, then enrolls. (After it joins, governed self-updates from Step 3 apply normally.)
+An off-cloud host has no AWS creds and no pre-installed binaries. The **`install.sh`** at the bucket
+root does the whole download in one line — it detects the host's OS/arch, fetches the matching pilot
++ nebula + the config-signing pin, **sha256-verifies each against its `.sha256` sidecar (fail closed)**,
+installs to `/usr/local/bin`, and prints the enroll steps:
 
 ```bash
-B=https://ncp-artifacts-123456789012.s3.ca-central-1.amazonaws.com
-curl -fsSL "$B/pilot/<pilot-ver>/pilot-darwin-arm64"   -o /tmp/pilot
-curl -fsSL "$B/nebula/<nebula-ver>/nebula-darwin-arm64" -o /tmp/nebula
-# integrity (compare against the sha publish.sh printed):
-shasum -a 256 /tmp/pilot /tmp/nebula
-chmod +x /tmp/pilot /tmp/nebula && sudo mv /tmp/pilot /tmp/nebula /usr/local/bin/
-# pin: copy deploy/prod/terraform/app/config-signing.pub to the host (or curl "$B/config-signing.pub")
-sudo pilot enroll -dir ~/.nebula -gateway <public-gateway-url> -join-key <join-key> \
-  -config-pub config-signing.pub -name <node-name>
-# approve it (console, or `harbor enroll approve …` with DB flags), then re-run enroll to fetch the bundle,
-# then supervise:
-sudo pilot supervise -dir ~/.nebula -config ~/.nebula/config.yml -core <https-core-url> -config-pub config-signing.pub
+curl -fsSL https://ncp-artifacts-123456789012.s3.ca-central-1.amazonaws.com/install.sh | bash
 ```
+
+`release-pilot.sh` re-uploads `install.sh` on every release (defaulting it to the latest pilot
+version); override per-run with `NCP_PILOT_VERSION` / `NCP_NEBULA_VERSION` / `NCP_INSTALL_DIR`, etc.
+Source: `deploy/prod/artifacts/install.sh`. As with any `curl | bash`, read it first — the bucket is
+public-read + write-protected and every binary is sha-verified, but trust is yours to confirm.
+
+Then enroll (off-cloud = join key + manual approval), exactly as `install.sh` prints:
+
+```bash
+# 1) on harbor, mint a join key (with the DB flags): harbor joinkey create -name <node> -groups laptops <DB FLAGS>
+# 2) enroll:
+sudo pilot enroll -dir ~/.nebula -gateway https://poc-gateway.mesh.failsafe.net:8443 \
+  -join-key <njk_...> -config-pub ~/.nebula/config-signing.pub -name <node>
+# 3) approve (console, or `harbor enroll approve <id>` with DB flags), re-run the enroll, then:
+sudo pilot supervise -dir ~/.nebula -config ~/.nebula/config.yml \
+  -core https://poc-harbor.mesh.failsafe.net:8444 -config-pub ~/.nebula/config-signing.pub
+```
+
+After it joins, governed self-updates (Step 3) apply normally.
 
 ## Notes / gotchas
 

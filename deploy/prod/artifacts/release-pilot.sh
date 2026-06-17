@@ -28,6 +28,16 @@ for plat in "${PLATFORMS[@]}"; do
   GOOS="${plat%/*}" GOARCH="${plat#*/}" "$ROOT/deploy/prod/artifacts/publish.sh" pilot "$VER"
 done
 
+# Keep the bucket's off-cloud installer (install.sh, curl|bash) in sync — default its pilot version
+# to the one just released, so a fresh `curl … install.sh | bash` installs this release.
+BUCKET="$(terraform -chdir="$ROOT/deploy/prod/terraform/app" output -raw artifacts_bucket 2>/dev/null || true)"
+REGION="$(terraform -chdir="$ROOT/deploy/prod/terraform/app" output -raw region 2>/dev/null || echo ca-central-1)"
+if [[ -n "$BUCKET" && "$BUCKET" != "null" ]]; then
+  sed -E "s/^PILOT_VER=.*/PILOT_VER=\"\${NCP_PILOT_VERSION:-$VER}\"/" "$ROOT/deploy/prod/artifacts/install.sh" \
+    | aws s3 cp - "s3://$BUCKET/install.sh" --region "$REGION" --content-type text/x-shellscript --only-show-errors
+  echo "synced install.sh -> s3://$BUCKET/install.sh (pilot default $VER)"
+fi
+
 cat <<EOF
 ===================================================================
 pilot $VER built (version-stamped) + published for all platforms above.
