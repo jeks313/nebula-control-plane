@@ -58,11 +58,16 @@ func TestRenderNonLighthouse(t *testing.T) {
 
 	fw := m["firewall"].(map[string]any)
 	inbound := fw["inbound"].([]any)
-	if len(inbound) != 1 {
-		t.Fatalf("default inbound len = %d, want 1", len(inbound))
+	// Tight default (icmp only) PLUS the nebula stats port (tcp) so the /metrics endpoint is
+	// scrapeable over the overlay by the monitoring node — see Values.StatsPort / Defaults.
+	if len(inbound) != 2 {
+		t.Fatalf("default inbound len = %d, want 2 (icmp + stats port)", len(inbound))
 	}
 	if r := inbound[0].(map[string]any); r["proto"] != "icmp" {
-		t.Errorf("default inbound proto = %v, want icmp (tight default)", r["proto"])
+		t.Errorf("default inbound[0] proto = %v, want icmp (tight default)", r["proto"])
+	}
+	if r := inbound[1].(map[string]any); r["proto"] != "tcp" {
+		t.Errorf("default inbound[1] proto = %v, want tcp (nebula stats port)", r["proto"])
 	}
 }
 
