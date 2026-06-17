@@ -72,13 +72,8 @@ resource "aws_security_group" "harbor" {
   description = "Harbor: Nebula UDP (mesh node) + admin SSH. The enrollment gateway is now a SEPARATE off-mesh node (ADR 0005) - Harbor reaches OUT to it (egress) and PULLS; it is NOT exposed here. Core API (8444) is overlay-only, NOT here."
   vpc_id      = aws_vpc.main.id
 
-  ingress {
-    description = "SSH from you"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = [var.allowed_ssh_cidr]
-  }
+  # SSH ingress removed — harbor is private (no public IP); admin + the genesis bootstrap reach it
+  # via SSM Session Manager / SSH-over-SSM (the agent dials out to the SSM endpoints), needing no inbound :22.
   ingress {
     description = "Nebula overlay (Harbor is itself a mesh node)"
     from_port   = var.nebula_port
@@ -202,13 +197,7 @@ resource "aws_security_group" "client" {
   description = "Test client: admin SSH + Nebula UDP; no control-plane exposure."
   vpc_id      = aws_vpc.main.id
 
-  ingress {
-    description = "SSH from you"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = [var.allowed_ssh_cidr]
-  }
+  # SSH ingress removed — the client is private (no public IP); reach it via SSM (SSH-over-SSM).
   ingress {
     description = "Nebula overlay (mesh responder / hole-punch)"
     from_port   = var.nebula_port
@@ -260,13 +249,8 @@ resource "aws_security_group" "monitoring" {
   description = "Monitoring node (Prometheus/Alertmanager/Grafana): admin SSH + Nebula UDP; scrapes the control plane over the overlay. UIs via SSH tunnel, not exposed."
   vpc_id      = aws_vpc.main.id
 
-  ingress {
-    description = "SSH from you (also the tunnel for the Prometheus/Alertmanager/Grafana UIs)"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = [var.allowed_ssh_cidr]
-  }
+  # SSH ingress removed — monitoring is private (no public IP). Reach it via SSM (SSH-over-SSM); the
+  # Prometheus/Alertmanager/Grafana UIs tunnel over SSM too (aws ssm start-session port-forwarding).
   ingress {
     description = "Nebula overlay (mesh member)"
     from_port   = var.nebula_port
@@ -339,7 +323,7 @@ resource "aws_iam_instance_profile" "node" {
 # ── Nodes ───────────────────────────────────────────────────────────────────
 locals {
   base_nodes = {
-    harbor     = { role = "harbor", eip = true }      # control-plane mesh node — routes core-api over the overlay, needs a real TUN
+    harbor     = { role = "harbor", eip = false }     # control-plane mesh node, now PRIVATE (no public IP) — reached via SSM + the overlay
     client     = { role = "client", eip = false }     # cloud test member
     monitoring = { role = "monitoring", eip = false } # mesh member running Prometheus/Alertmanager/Grafana (ADR 0007 Phase 7b)
   }
@@ -368,8 +352,12 @@ resource "aws_instance" "node" {
   vpc_security_group_ids = [local.sg_for[each.key]]
   # Core (harbor) gets the elevated role (KMS sign + DB-secret read, compute.tf); every
   # other node keeps the minimal permission-less profile.
-  iam_instance_profile        = each.key == "harbor" ? aws_iam_instance_profile.core.name : aws_iam_instance_profile.node.name
-  associate_public_ip_address = true
+  iam_instance_profile = each.key == "harbor" ? aws_iam_instance_profile.core.name : aws_iam_instance_profile.node.name
+  # Public IP only for the public tiers (edge gateway NLB / mesh lighthouse). control + client are
+  # private. This is a launch-time attribute, so flipping harbor/client/monitoring to false REPLACES
+  # those instances (intended; the CA + config-signing keys are in KMS and the DB is Aurora, so the
+  # re-bootstrap re-derives only on-box state — enrolled members keep working).
+  associate_public_ip_address = contains(local.public_tiers, local.node_tier[each.key])
 
   user_data = templatefile("${path.module}/user_data.sh.tftpl", {
     role           = each.value.role

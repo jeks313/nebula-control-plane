@@ -4,9 +4,11 @@
 # single-default-subnet layout where all nodes shared one segment and SGs were the
 # only filter.
 #
-# Every tier is PUBLIC (each node needs a public IP for enroll / discovery / SSH),
-# so isolation is by SECURITY GROUP (stateful, authoritative) + NACL (stateless,
-# defense-in-depth) — not by routing.
+# The PUBLIC tiers (edge = gateway enroll NLB, mesh = lighthouse discovery anchor) keep a
+# public IP + IGW route. The PRIVATE tiers (control = harbor, client = test client +
+# monitoring) get NO public IP: AWS APIs ride VPC interface endpoints (vpc_endpoints.tf)
+# and residual egress (dnf/ACME) rides the NAT gateway below. Isolation is by SECURITY
+# GROUP (stateful, authoritative) + NACL (stateless, defense-in-depth) + routing.
 
 data "aws_availability_zones" "available" {
   state = "available"
@@ -39,6 +41,52 @@ resource "aws_route_table" "public" {
   tags = { Name = "${var.name_prefix}-public" }
 }
 
+# ── NAT gateway for the PRIVATE tiers (control, client) ──────────────────────
+# harbor/client/monitoring have no public IP, so this is their ONLY path to the public
+# internet: OS package updates (dnf), the first-boot nebula fetch (GitHub), and harbor's
+# Let's Encrypt ACME (DNS-01). AWS-API traffic does NOT use it — the interface endpoints
+# (vpc_endpoints.tf) + the S3 gateway endpoint keep that in-VPC. Single-AZ, like the tiers.
+#
+# The NAT gets its OWN public subnet — it must NOT sit in the edge subnet, whose restrictive
+# gateway NACL (below) silently DROPS the NAT's transit traffic on arbitrary outbound ports
+# (that NACL only admits the gateway's enroll/collect/ssh/ephemeral ports). A plain public
+# subnet with the VPC's default (permissive) NACL lets the NAT forward to any destination.
+resource "aws_subnet" "nat" {
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = cidrsubnet(var.vpc_cidr, 8, 5)
+  availability_zone = data.aws_availability_zones.available.names[0]
+  tags              = { Name = "${var.name_prefix}-nat" }
+}
+
+resource "aws_route_table_association" "nat" {
+  subnet_id      = aws_subnet.nat.id
+  route_table_id = aws_route_table.public.id # IGW route; default permissive NACL
+}
+
+resource "aws_eip" "nat" {
+  domain     = "vpc"
+  tags       = { Name = "${var.name_prefix}-nat" }
+  depends_on = [aws_internet_gateway.igw]
+}
+
+resource "aws_nat_gateway" "main" {
+  allocation_id = aws_eip.nat.id
+  subnet_id     = aws_subnet.nat.id
+  tags          = { Name = "${var.name_prefix}-nat" }
+  depends_on    = [aws_internet_gateway.igw]
+}
+
+# Private route table: 0.0.0.0/0 → NAT. The control + client subnets attach to this; the S3
+# gateway endpoint is added to it (network_hardening.tf) so S3 still stays in-VPC.
+resource "aws_route_table" "private" {
+  vpc_id = aws_vpc.main.id
+  route {
+    cidr_block     = "0.0.0.0/0"
+    nat_gateway_id = aws_nat_gateway.main.id
+  }
+  tags = { Name = "${var.name_prefix}-private" }
+}
+
 locals {
   # One /24 per tier (10.99.1/2/3/4.0/24 by default).
   tier_cidr = {
@@ -55,6 +103,10 @@ locals {
     client     = "client"
     monitoring = "client" # a cloud mesh member, like the client
   }
+  # Tiers that stay PUBLIC (auto-assign public IP + IGW route): edge hosts the gateway's
+  # internet-facing enroll NLB; mesh hosts the lighthouse, the public discovery anchor.
+  # control (harbor) + client (test client + monitoring) are PRIVATE — no public IP.
+  public_tiers = ["edge", "mesh"]
 }
 
 resource "aws_subnet" "tier" {
@@ -62,14 +114,14 @@ resource "aws_subnet" "tier" {
   vpc_id                  = aws_vpc.main.id
   cidr_block              = each.value
   availability_zone       = data.aws_availability_zones.available.names[0]
-  map_public_ip_on_launch = true
+  map_public_ip_on_launch = contains(local.public_tiers, each.key)
   tags                    = { Name = "${var.name_prefix}-${each.key}" }
 }
 
 resource "aws_route_table_association" "tier" {
   for_each       = aws_subnet.tier
   subnet_id      = each.value.id
-  route_table_id = aws_route_table.public.id
+  route_table_id = contains(local.public_tiers, each.key) ? aws_route_table.public.id : aws_route_table.private.id
 }
 
 # ── Edge (gateway) NACL — the L3 fence on the untrusted tier ─────────────────

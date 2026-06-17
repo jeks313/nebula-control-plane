@@ -29,11 +29,12 @@ import (
 // Flags is the shared `-acme-*` flag set, so the gateway, core-api, and console wire
 // auto-TLS identically.
 type Flags struct {
-	Domain  *string
-	Token   *string
-	Cache   *string
-	Email   *string
-	Staging *bool
+	Domain    *string
+	Token     *string
+	Cache     *string
+	Email     *string
+	Staging   *bool
+	Resolvers *string
 }
 
 // RegisterFlags adds the -acme-* flags to fs. defaultCache is the per-binary cert-storage
@@ -45,6 +46,12 @@ func RegisterFlags(fs *flag.FlagSet, defaultCache string) *Flags {
 		Cache:   fs.String("acme-cache", defaultCache, "directory to persist the ACME account + certs (MUST survive restarts)"),
 		Email:   fs.String("acme-email", "", "ACME account email (expiry/recovery notices)"),
 		Staging: fs.Bool("acme-staging", false, "use the Let's Encrypt STAGING CA (untrusted, no rate limits) for testing"),
+		// DNS-01 propagation-check resolvers. Defaults to PUBLIC resolvers, NOT the host's: when
+		// harbor runs in-VPC behind a split-horizon private zone (e.g. a Route53 private hosted zone
+		// shadowing the mesh domain), the VPC resolver can't see the Cloudflare-authoritative
+		// challenge TXT, so the check must reach the public authoritative NS via a public resolver.
+		// (LE DNS-01 records are public by definition, so a public resolver is always correct here.)
+		Resolvers: fs.String("acme-dns-resolvers", "1.1.1.1:53,8.8.8.8:53", "comma-separated DNS resolvers (host:port) for the ACME DNS-01 propagation check; empty = system resolver"),
 	}
 }
 
@@ -68,6 +75,7 @@ func (f *Flags) Apply(ctx context.Context, srv *http.Server) error {
 	tlsCfg, err := TLSConfig(ctx, Config{
 		Domains: []string{*f.Domain}, CloudflareToken: token,
 		Email: *f.Email, CacheDir: *f.Cache, Staging: *f.Staging,
+		DNSResolvers: splitResolvers(*f.Resolvers),
 	})
 	if err != nil {
 		return err
@@ -97,6 +105,18 @@ func Token(tokenFile string) (string, error) {
 	return "", nil
 }
 
+// splitResolvers parses a comma-separated resolver list ("1.1.1.1:53,8.8.8.8:53") into a slice,
+// trimming blanks. Empty input yields nil, so certmagic falls back to the system resolver.
+func splitResolvers(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // Config builds the auto-TLS manager.
 type Config struct {
 	// Domains are the hostnames to obtain + renew certificates for (>= 1).
@@ -113,6 +133,10 @@ type Config struct {
 	// Staging uses the Let's Encrypt STAGING CA (untrusted certs, no rate limits) for
 	// testing. Leave false for real, publicly-trusted certs.
 	Staging bool
+	// DNSResolvers overrides the resolvers (host:port) used for the DNS-01 propagation check.
+	// Empty uses the system resolver. Set PUBLIC resolvers when an in-VPC split-horizon private
+	// zone would otherwise shadow the public challenge TXT (see RegisterFlags for the why).
+	DNSResolvers []string
 }
 
 // TLSConfig provisions certificates for cfg.Domains (blocking until the first issuance) and
@@ -160,6 +184,9 @@ func TLSConfig(ctx context.Context, cfg Config) (*tls.Config, error) {
 			DNS01Solver: &certmagic.DNS01Solver{
 				DNSManager: certmagic.DNSManager{
 					DNSProvider: &cloudflare.Provider{APIToken: cfg.CloudflareToken},
+					// Check propagation via the configured (default: public) resolvers, so an in-VPC
+					// split-horizon private zone can't hide the public Cloudflare challenge TXT.
+					Resolvers: cfg.DNSResolvers,
 				},
 			},
 		}),

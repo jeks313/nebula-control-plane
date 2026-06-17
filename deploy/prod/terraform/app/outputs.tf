@@ -10,8 +10,12 @@ output "public_ips" {
 }
 
 output "ssh" {
-  description = "Ready-to-paste SSH commands (Amazon Linux user is ec2-user)."
-  value       = { for k, ip in local.public_ip : k => "ssh ec2-user@${ip}" }
+  description = "Ready-to-paste access commands (Amazon Linux user is ec2-user). PUBLIC nodes (the EC2 lighthouse) get a direct SSH; PRIVATE nodes (harbor/client/monitoring) have no public IP, so they get SSH-over-SSM by instance ID (needs the session-manager-plugin)."
+  value = { for k, n in aws_instance.node :
+    k => contains(local.public_tiers, local.node_tier[k])
+    ? "ssh ec2-user@${local.public_ip[k]}"
+    : "ssh -o ProxyCommand='aws ssm start-session --target %h --document-name AWS-StartSSHSession --parameters portNumber=%p --region ${var.region}' ec2-user@${n.id}"
+  }
 }
 
 output "instance_ids" {
@@ -112,6 +116,11 @@ output "config_signing_key_arn" {
 output "core_kms_sign_policy_arn" {
   description = "IAM policy (kms:Sign + GetPublicKey on both keys) attached to the Core role in the compute layer."
   value       = local.core_kms_sign_policy_arn
+}
+
+output "harbor_config_secret_arn" {
+  description = "Secrets Manager ARN of harbor's durable config bundle (CA cert + config-signing pin + harbor's nebula identity + the shared enrollment secrets). The genesis bootstrap populates it (put-secret-value); a destroyed/recreated harbor restores from it byte-identical. The CA + config-signing PRIVATE keys stay in KMS, never in this bundle."
+  value       = aws_secretsmanager_secret.harbor_config.arn
 }
 
 # ── Data layer (Aurora) — consumed by the compute layer to point Core at the DB ──

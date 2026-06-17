@@ -27,8 +27,9 @@
 # the exact enroll commands: the CLOUD client joins KEYLESS via aws-sigv4 attestation
 # (its IAM role); the off-cloud iMac joins via a join key with manual approval.
 #
-# Requires locally: terraform, jq, go, ssh, scp, openssl  (+ aws & a container engine
-# [podman or docker], and AWS creds in the env, when gateway_runtime=fargate).
+# Requires locally: terraform, jq, go, ssh, scp, openssl, aws, session-manager-plugin, and AWS
+# creds in the env (SSH/scp to the now-private nodes ride SSM Session Manager). Plus a container
+# engine [podman or docker] when gateway_runtime=fargate (build/push the Fargate image).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -37,6 +38,12 @@ SSH_KEY="${SSH_KEY:-$HOME/.ssh/absolute.pub}"   # public key selecting the agent
 SSH_USER="${SSH_USER:-ec2-user}"
 SKIP_BUILD=0
 [[ "${1:-}" == "--skip-build" ]] && SKIP_BUILD=1
+# MODE: genesis (default — the full first-time ceremony) | recover (a destroyed/recreated harbor:
+# skip the non-idempotent genesis + minting, RESTORE harbor's identity + config from the
+# ncp-harbor-config bundle in Secrets Manager, then start its services). In recover the lighthouse
+# + gateway are NOT touched — they keep running with config that still matches the restored harbor.
+MODE="${MODE:-genesis}"
+case "$MODE" in genesis | recover) ;; *) echo "MODE must be genesis|recover (got '$MODE')" >&2; exit 1 ;; esac
 
 # Overlay pool + reserved overlay IPs. IMPORTANT: do NOT use 100.64.0.0/10 (CGNAT)
 # if any host also runs Tailscale — its nftables anti-spoof rule silently drops that
@@ -50,10 +57,10 @@ ADMIN_PORT="${ADMIN_PORT:-443}"                  # admin console, mesh-only (def
 MOCK_IDP_PORT="${MOCK_IDP_PORT:-8446}"           # dev mock-IdP for the console login
 DB_BACKEND="${DB_BACKEND:-sqlite}"               # sqlite (local file on harbor) | aurora (managed Postgres; rotating creds via Secrets Manager, no static password)
 
-for t in terraform jq go ssh scp openssl; do command -v "$t" >/dev/null || { echo "missing tool: $t" >&2; exit 1; }; done
+for t in terraform jq go ssh scp openssl aws session-manager-plugin; do command -v "$t" >/dev/null || { echo "missing tool: $t" >&2; exit 1; }; done
 [[ -f "$SSH_KEY" ]] || { echo "ssh private key not found: $SSH_KEY (set SSH_KEY=...)" >&2; exit 1; }
 
-SSH_OPTS=(-i "$SSH_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o BatchMode=yes)
+SSH_OPTS=(-i "$SSH_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=30 -o ServerAliveInterval=15 -o BatchMode=yes)
 rsh() { local host="$1"; shift; ssh "${SSH_OPTS[@]}" "$SSH_USER@$host" "$@"; }
 rcp() { scp "${SSH_OPTS[@]}" "$@"; }
 # url_for SCHEME HOST PORT — build a URL, omitting the port when it's the scheme default (https:443,
@@ -75,6 +82,11 @@ LH_IP="$(val '.public_ips.value.lighthouse')"
 HB_IP="$(val '.public_ips.value.harbor')"
 GW_IP="$(val '.public_ips.value.gateway')"          # off-mesh gateway EC2 node (empty when gateway_runtime=fargate)
 CL_IP="$(val '.public_ips.value.client')"
+# Instance IDs — SSH/scp target these over SSM (the private nodes have no usable public IP).
+HB_ID="$(val '.instance_ids.value.harbor')"
+CL_ID="$(val '.instance_ids.value.client')"
+LH_ID="$(val '.instance_ids.value.lighthouse')" # empty when lighthouse_runtime=fargate
+GW_ID="$(val '.instance_ids.value.gateway')"     # empty when gateway_runtime=fargate
 LH_ADDR="$(val '.lighthouse_addr.value')"
 GW_URL="$(val '.gateway_url.value')"                # PUBLIC enroll URL (off-cloud clients; public NLB DNS / node IP)
 GW_URL_INTERNAL="$(val '.gateway_url_internal.value')" # IN-VPC enroll URL (cloud client; internal NLB DNS / node IP)
@@ -83,7 +95,13 @@ GW_COLLECT="$(val '.gateway_collect_addr.value')"   # gateway's Harbor-facing co
 GATEWAY_RUNTIME="$(val '.gateway_runtime.value')"; GATEWAY_RUNTIME="${GATEWAY_RUNTIME:-ec2}"
 LIGHTHOUSE_RUNTIME="$(val '.lighthouse_runtime.value')"; LIGHTHOUSE_RUNTIME="${LIGHTHOUSE_RUNTIME:-ec2}"
 NAME_PREFIX="$(val '.name_prefix.value')"; NAME_PREFIX="${NAME_PREFIX:-ncp}"
+HARBOR_CONFIG_ARN="$(val '.harbor_config_secret_arn.value')" # durable harbor identity+config bundle (Secrets Manager)
 TF_REGION="$(val '.region.value')"
+# SSH/scp to the nodes ride SSM Session Manager — the private nodes (harbor/client/monitoring) have
+# no public IP. Append the ProxyCommand now that the region is known; rsh/rcp target INSTANCE IDs
+# (HB_ID/CL_ID/LH_ID/GW_ID), and SSH key auth still happens over the SSM tunnel (the EC2 key pair).
+SSM_PROXY="ProxyCommand=aws ssm start-session --target %h --document-name AWS-StartSSHSession --parameters portNumber=%p${TF_REGION:+ --region $TF_REGION}"
+SSH_OPTS+=(-o "$SSM_PROXY")
 # Trust-root signing backend (ADR 0007 Phase 2): the foundation stack provisions two ECC_NIST_P256
 # KMS keys (CA + config-signing) and re-exports their ARNs. When present (always, in the prod app
 # stack), genesis + Core sign via AWS KMS and the CA/config-signing PRIVATE KEYS NEVER TOUCH DISK;
@@ -144,7 +162,7 @@ if [[ -n "$HARBOR_DOMAIN" ]]; then
 else
   CORE_URL="$(url_for http "$HARBOR_OVERLAY" "$CORE_PORT")"; ADMIN_URL="$(url_for http "$HARBOR_OVERLAY" "$ADMIN_PORT")"
 fi
-echo "    lighthouse=$LH_IP  harbor=$HB_IP  gateway=${GW_IP:-<fargate>}  client=$CL_IP"
+echo "    harbor=$HB_ID  client=$CL_ID  lighthouse=${LH_ID:-<fargate>}  gateway=${GW_ID:-<fargate>}  (instance IDs; private nodes reached via SSM)"
 echo "    lighthouse underlay=$LH_ADDR  enroll=$GW_URL  collect=$GW_COLLECT  harbor-overlay=$HARBOR_OVERLAY"
 echo "    runtimes: gateway=$GATEWAY_RUNTIME  lighthouse=$LIGHTHOUSE_RUNTIME  harbor-tls=${HARBOR_DOMAIN:+ACME:$HARBOR_DOMAIN}${HARBOR_DOMAIN:-plain-http}"
 echo "    trust-root signing: $TRUST_BACKEND_DESC"
@@ -181,23 +199,71 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
     && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "-X main.version=$VER" -o "$WORK/pilot" ./cmd/pilot \
     && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "-X main.version=$VER" -o "$WORK/gateway" ./cmd/gateway )
   # harbor/client are always EC2; the lighthouse + gateway are EC2 nodes only under their
-  # "ec2" runtime (under fargate each is a container — no VM to scp to).
-  NODE_IPS=("$HB_IP" "$CL_IP")
-  [[ "$LIGHTHOUSE_RUNTIME" == "ec2" && -n "$LH_IP" ]] && NODE_IPS+=("$LH_IP")
-  [[ "$GATEWAY_RUNTIME" == "ec2" && -n "$GW_IP" ]] && NODE_IPS+=("$GW_IP")
-  for ip in "${NODE_IPS[@]}"; do
-    echo "    -> $ip"
-    rcp "$WORK/harbor" "$WORK/pilot" "$WORK/gateway" "$SSH_USER@$ip:/tmp/"
-    rsh "$ip" 'sudo install -m0755 /tmp/harbor /tmp/pilot /tmp/gateway /usr/local/bin/ && rm -f /tmp/harbor /tmp/pilot /tmp/gateway'
+  # "ec2" runtime (under fargate each is a container — no VM to scp to). Target INSTANCE IDs:
+  # SSH/scp ride SSM, and the private nodes have no public IP.
+  if [[ "$MODE" == "recover" ]]; then
+    NODE_IDS=("$HB_ID") # recover: only the recreated harbor needs binaries (the others keep running)
+  else
+    NODE_IDS=("$HB_ID" "$CL_ID")
+    [[ "$LIGHTHOUSE_RUNTIME" == "ec2" && -n "$LH_ID" ]] && NODE_IDS+=("$LH_ID")
+    [[ "$GATEWAY_RUNTIME" == "ec2" && -n "$GW_ID" ]] && NODE_IDS+=("$GW_ID")
+  fi
+  for id in "${NODE_IDS[@]}"; do
+    echo "    -> $id"
+    rcp "$WORK/harbor" "$WORK/pilot" "$WORK/gateway" "$SSH_USER@$id:/tmp/"
+    rsh "$id" 'sudo install -m0755 /tmp/harbor /tmp/pilot /tmp/gateway /usr/local/bin/ && rm -f /tmp/harbor /tmp/pilot /tmp/gateway'
   done
 fi
 
-# ── 1. lighthouse: init ──────────────────────────────────────────────────────
-# EC2: init on the box (host key never leaves it). Fargate (spike): generate the keypair
-# HERE (off-box) — there is no node — and inject it via Secrets Manager in step 4.
-if [[ "$LIGHTHOUSE_RUNTIME" == "ec2" ]]; then
+if [[ "$MODE" == "recover" ]]; then
+  # ── recover: restore harbor's identity + config from the ncp-harbor-config bundle ──
+  # The genesis ceremony is NOT idempotent (duplicate CA-key name / lighthouse IP), and a fresh
+  # genesis would mint a NEW CA cert — a new fingerprint that breaks every enrolled member, since
+  # nebula pins the CA by its certificate fingerprint. So instead we restore harbor byte-identical
+  # from Secrets Manager (+ KMS keeps signing; Aurora keeps the genesis state). The lighthouse +
+  # gateway are untouched and still match the restored hmac / mTLS material.
+  echo "==> [recover] restoring harbor from ${NAME_PREFIX}-harbor-config (Secrets Manager)"
+  [[ -n "$HARBOR_CONFIG_ARN" ]] || { echo "FATAL: recover needs the harbor_config_secret_arn output (apply the app stack)" >&2; exit 1; }
+  BUNDLE="$(aws secretsmanager get-secret-value --region "$TF_REGION" --secret-id "$HARBOR_CONFIG_ARN" --query SecretString --output text)"
+  [[ -n "$BUNDLE" && "$(jq -r '.ca_crt_pem // ""' <<<"$BUNDLE")" != "" ]] \
+    || { echo "FATAL: ${NAME_PREFIX}-harbor-config is empty — run a MODE=genesis bootstrap first to populate it" >&2; exit 1; }
+  # Public artifacts also land in $WORK (downstream steps + the client pin read from there).
+  jq -r '.ca_crt_pem' <<<"$BUNDLE" >"$WORK/ca.crt"
+  jq -r '.config_signing_pub_pem' <<<"$BUNDLE" >"$WORK/config-signing.pub"
+  jq -r '.host_crt_pem' <<<"$BUNDLE" >"$WORK/harbor-core.crt"
+  jq -r '.harbor_collect_cert_pem' <<<"$BUNDLE" >"$WORK/harbor-collect.crt"
+  jq -r '.hmac_key_b64' <<<"$BUNDLE" | tr -d '\n' >"$WORK/hmac.b64"
+  jq -r '.gw_collect_cert_pem' <<<"$BUNDLE" >"$WORK/gw-collect.crt"
+  # Restore harbor's on-box files. Secrets ride ssh stdin (never argv); the nebula host key is
+  # root-owned 0600 in /etc/nebula, the rest live under ~/ncp owned by $SSH_USER.
+  jq -r '.host_key_pem' <<<"$BUNDLE" | rsh "$HB_ID" "sudo install -d -m0700 /etc/nebula && sudo tee /etc/nebula/host.key >/dev/null && sudo chmod 600 /etc/nebula/host.key"
+  jq -r '.host_crt_pem' <<<"$BUNDLE" | rsh "$HB_ID" "sudo tee /etc/nebula/host.crt >/dev/null && sudo chmod 644 /etc/nebula/host.crt"
+  jq -r '.ca_crt_pem' <<<"$BUNDLE" | rsh "$HB_ID" "sudo tee /etc/nebula/ca.crt >/dev/null && sudo chmod 644 /etc/nebula/ca.crt"
+  jq -r '.host_config_yml' <<<"$BUNDLE" | rsh "$HB_ID" "sudo tee /etc/nebula/config.yml >/dev/null && sudo chmod 644 /etc/nebula/config.yml"
+  rsh "$HB_ID" "umask 077; mkdir -p ~/ncp/genesis"
+  jq -r '.ca_crt_pem' <<<"$BUNDLE" | rsh "$HB_ID" "cat > ~/ncp/genesis/ca.crt"
+  jq -r '.config_signing_pub_pem' <<<"$BUNDLE" | rsh "$HB_ID" "cat > ~/ncp/genesis/config-signing.pub"
+  jq -r '.hmac_key_b64' <<<"$BUNDLE" | rsh "$HB_ID" "umask 077; tr -d '\n' > ~/ncp/hmac.b64"
+  jq -r '.harbor_collect_cert_pem' <<<"$BUNDLE" | rsh "$HB_ID" "umask 077; cat > ~/ncp/harbor-collect.crt"
+  jq -r '.harbor_collect_key_pem' <<<"$BUNDLE" | rsh "$HB_ID" "umask 077; cat > ~/ncp/harbor-collect.key && chmod 600 ~/ncp/harbor-collect.key"
+  jq -r '.queue_key_b64' <<<"$BUNDLE" | rsh "$HB_ID" "umask 077; tr -d '\n' > ~/ncp/queue.b64"
+  jq -r '.gw_collect_cert_pem' <<<"$BUNDLE" | rsh "$HB_ID" "umask 077; cat > ~/ncp/gw-collect.crt"
+  # Restore the ACME cert cache if the bundle carries one — harbor then reuses its existing LE cert
+  # (no re-issuance / no rate-limit risk). Empty = no cached cert; core/admin issue fresh on start.
+  ACMEB64="$(jq -r '.acme_cache_tgz_b64 // ""' <<<"$BUNDLE")"
+  if [[ -n "$ACMEB64" ]]; then
+    printf '%s' "$ACMEB64" | base64 -d | rsh "$HB_ID" "umask 077; mkdir -p ~/ncp && tar -xzf - -C ~/ncp" &&
+      echo "    restored the ACME cert cache (harbor reuses its existing LE cert; no re-issuance)"
+  fi
+  cp "$WORK/config-signing.pub" "$ROOT/deploy/prod/terraform/app/config-signing.pub" # the pin for clients
+  echo "    restored: ca.crt + config-signing pin + harbor identity (key/cert/config) + hmac + collect mTLS + queue key"
+else
+  # ── 1. lighthouse: init ──────────────────────────────────────────────────────
+  # EC2: init on the box (host key never leaves it). Fargate (spike): generate the keypair
+  # HERE (off-box) — there is no node — and inject it via Secrets Manager in step 4.
+  if [[ "$LIGHTHOUSE_RUNTIME" == "ec2" ]]; then
   echo "==> [lighthouse/ec2] pilot init -am-lighthouse"
-  rsh "$LH_IP" 'sudo pilot init -am-lighthouse -dir /etc/nebula >/dev/null && sudo cat /etc/nebula/host.pub' > "$WORK/lh-host.pub"
+  rsh "$LH_ID" 'sudo pilot init -am-lighthouse -dir /etc/nebula >/dev/null && sudo cat /etc/nebula/host.pub' > "$WORK/lh-host.pub"
 else
   echo "==> [lighthouse/fargate] generate lighthouse keypair off-box"
   "$WORK/pilot" init -am-lighthouse -dir "$WORK/lhkeys" >/dev/null
@@ -207,7 +273,7 @@ echo "    got lighthouse host pubkey"
 
 # ── 2. harbor: init its OWN mesh key, with the lighthouse in static_host_map ─
 echo "==> [harbor] pilot init (control-plane node key)"
-rsh "$HB_IP" "set -e
+rsh "$HB_ID" "set -e
   sudo tee /etc/nebula-values.yml >/dev/null <<YAML
 lighthouses:
   - overlay_ip: $LH_OVERLAY
@@ -223,7 +289,7 @@ echo "    got harbor host pubkey"
 # ping works, the HTTP call is dropped). Patch the firewall BEFORE nebula starts. The ports
 # follow CORE_PORT/ADMIN_PORT (passed as argv), so moving the console to 443 stays consistent.
 echo "==> [harbor] open nebula firewall for control-plane ports (core-api $CORE_PORT + console $ADMIN_PORT)"
-rsh "$HB_IP" 'sudo python3 - /etc/nebula/config.yml '"$CORE_PORT $ADMIN_PORT"' <<PY
+rsh "$HB_ID" 'sudo python3 - /etc/nebula/config.yml '"$CORE_PORT $ADMIN_PORT"' <<PY
 import sys
 p = sys.argv[1]
 ports = [int(a) for a in sys.argv[2:]]
@@ -247,9 +313,9 @@ PY'
 
 # ── 3. harbor: migrate + genesis (lighthouse + HARBOR control-plane certs) ───
 echo "==> [harbor] migrate + genesis (incl. -core-pub for Harbor's control-plane cert)"
-rcp "$WORK/lh-host.pub" "$SSH_USER@$HB_IP:/tmp/lh-host.pub"
-rcp "$WORK/hb-host.pub" "$SSH_USER@$HB_IP:/tmp/hb-host.pub"
-rsh "$HB_IP" "set -e
+rcp "$WORK/lh-host.pub" "$SSH_USER@$HB_ID:/tmp/lh-host.pub"
+rcp "$WORK/hb-host.pub" "$SSH_USER@$HB_ID:/tmp/hb-host.pub"
+rsh "$HB_ID" "set -e
   mkdir -p ~/ncp
   harbor migrate up $HARBOR_DB_FLAGS >/dev/null
   harbor genesis $HARBOR_DB_FLAGS -out ~/ncp/genesis${GENESIS_BACKEND:+ $GENESIS_BACKEND} \
@@ -257,18 +323,18 @@ rsh "$HB_IP" "set -e
     -lighthouse-pub /tmp/lh-host.pub -lighthouse-ip '$LH_OVERLAY' -lighthouse-addr '$LH_ADDR' \
     -core-pub /tmp/hb-host.pub -core-ip '$HARBOR_OVERLAY' -core-name harbor-core >/dev/null
   echo ok"
-rcp "$SSH_USER@$HB_IP:ncp/genesis/ca.crt"             "$WORK/ca.crt"
-rcp "$SSH_USER@$HB_IP:ncp/genesis/lighthouse-1.crt"   "$WORK/lighthouse-1.crt"
-rcp "$SSH_USER@$HB_IP:ncp/genesis/harbor-core.crt"    "$WORK/harbor-core.crt"
-rcp "$SSH_USER@$HB_IP:ncp/genesis/config-signing.pub" "$WORK/config-signing.pub"
+rcp "$SSH_USER@$HB_ID:ncp/genesis/ca.crt"             "$WORK/ca.crt"
+rcp "$SSH_USER@$HB_ID:ncp/genesis/lighthouse-1.crt"   "$WORK/lighthouse-1.crt"
+rcp "$SSH_USER@$HB_ID:ncp/genesis/harbor-core.crt"    "$WORK/harbor-core.crt"
+rcp "$SSH_USER@$HB_ID:ncp/genesis/config-signing.pub" "$WORK/config-signing.pub"
 echo "    genesis done; pulled ca.crt + lighthouse + harbor-core certs + config-signing pin"
 
 # ── 4. lighthouse: install issued cert + start ──────────────────────────────
 if [[ "$LIGHTHOUSE_RUNTIME" == "ec2" ]]; then
   echo "==> [lighthouse/ec2] install cert + start nebula"
-  rcp "$WORK/ca.crt"           "$SSH_USER@$LH_IP:/tmp/ca.crt"
-  rcp "$WORK/lighthouse-1.crt" "$SSH_USER@$LH_IP:/tmp/host.crt"
-  rsh "$LH_IP" 'set -e
+  rcp "$WORK/ca.crt"           "$SSH_USER@$LH_ID:/tmp/ca.crt"
+  rcp "$WORK/lighthouse-1.crt" "$SSH_USER@$LH_ID:/tmp/host.crt"
+  rsh "$LH_ID" 'set -e
     sudo install -m0644 /tmp/ca.crt   /etc/nebula/ca.crt
     sudo install -m0644 /tmp/host.crt /etc/nebula/host.crt
     rm -f /tmp/ca.crt /tmp/host.crt
@@ -290,13 +356,14 @@ else
   aws ecs update-service --region "$TF_REGION" \
     --cluster "${NAME_PREFIX}-lighthouse" --service "${NAME_PREFIX}-lighthouse" --force-new-deployment >/dev/null
   echo "    lighthouse image pushed, secret populated, ECS deployment forced (tun.disabled nebula behind the UDP NLB)"
-fi
+  fi
+fi # end MODE=genesis (steps 1-4); in recover, harbor was restored from the bundle above
 
 # ── 5. harbor: install control-plane cert + join the mesh ───────────────────
 echo "==> [harbor] install control-plane cert + start nebula (joins the mesh at $HARBOR_OVERLAY)"
-rcp "$WORK/ca.crt"          "$SSH_USER@$HB_IP:/tmp/ca.crt"
-rcp "$WORK/harbor-core.crt" "$SSH_USER@$HB_IP:/tmp/host.crt"
-rsh "$HB_IP" 'set -e
+rcp "$WORK/ca.crt"          "$SSH_USER@$HB_ID:/tmp/ca.crt"
+rcp "$WORK/harbor-core.crt" "$SSH_USER@$HB_ID:/tmp/host.crt"
+rsh "$HB_ID" 'set -e
   sudo install -m0644 /tmp/ca.crt   /etc/nebula/ca.crt
   sudo install -m0644 /tmp/host.crt /etc/nebula/host.crt
   rm -f /tmp/ca.crt /tmp/host.crt
@@ -305,8 +372,10 @@ rsh "$HB_IP" 'set -e
 echo "    harbor nebula running (control-plane node)"
 
 # ── 6. derive this account from the client's IMDS + publish cloud-trust ──────
+# Genesis only — on recover the cloud-trust config already lives in Aurora (it survived).
+if [[ "$MODE" != "recover" ]]; then
 echo "==> deriving AWS account/role/region from the client IMDS + publishing cloud-trust"
-IMDS="$(rsh "$CL_IP" 'set -e
+IMDS="$(rsh "$CL_ID" 'set -e
   T=$(curl -sX PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
   DOC=$(curl -s -H "X-aws-ec2-metadata-token: $T" http://169.254.169.254/latest/dynamic/instance-identity/document)
   ROLE=$(curl -s -H "X-aws-ec2-metadata-token: $T" http://169.254.169.254/latest/meta-data/iam/security-credentials/)
@@ -315,7 +384,7 @@ ACCOUNT="$(jq -r .accountId <<<"$(head -n1 <<<"$IMDS")")"
 REGION="$(jq -r .region    <<<"$(head -n1 <<<"$IMDS")")"
 ROLE="$(tail -n1 <<<"$IMDS")"
 echo "    account=$ACCOUNT region=$REGION role=$ROLE"
-rsh "$HB_IP" "set -e
+rsh "$HB_ID" "set -e
   cat > ~/ncp/cloudtrust.json <<JSON
 {
   \"default_groups\": [\"fleet\"],
@@ -331,6 +400,7 @@ JSON
     -operator-a alice -operator-b bob >/dev/null
   echo ok"
 echo "    cloud-trust published (account $ACCOUNT -> [workloads], auto-issue)"
+fi # end step 6 (genesis only)
 
 # ── 7. enrollment plane: OFF-MESH gateway node + Harbor's pull collector (ADR 0005) ─
 # The gateway is now a SEPARATE, off-mesh node: it serves the public enroll port and
@@ -340,21 +410,25 @@ echo "    cloud-trust published (account $ACCOUNT -> [workloads], auto-issue)"
 GW_PORT="${GW_URL##*:}"
 COLLECT_PORT="${GW_COLLECT##*:}"
 
+# Mint + push the gateway material — genesis only. On recover, harbor's hmac + collect mTLS were
+# restored from the bundle and the gateway/lighthouse are untouched (their config still matches),
+# so there is nothing to mint or re-push — we go straight to the (idempotent) register + collector start.
+if [[ "$MODE" != "recover" ]]; then
 echo "==> [harbor] mint the collector's client identity + the shared nonce key"
-rsh "$HB_IP" "set -e
+rsh "$HB_ID" "set -e
   cd ~/ncp; umask 077
   [ -f hmac.b64 ] || openssl rand 32 | basenc --base64url | tr -d '=' > hmac.b64
   [ -f harbor-collect.key ] || gateway collect-keygen -cn harbor-collector \
     -cert-out harbor-collect.crt -key-out harbor-collect.key >/dev/null
   echo ok"
-rcp "$SSH_USER@$HB_IP:ncp/harbor-collect.crt" "$WORK/harbor-collect.crt"  # Harbor's pinned client cert
-rcp "$SSH_USER@$HB_IP:ncp/hmac.b64"           "$WORK/hmac.b64"            # shared nonce key (gateway mints, Core verifies)
+rcp "$SSH_USER@$HB_ID:ncp/harbor-collect.crt" "$WORK/harbor-collect.crt"  # Harbor's pinned client cert
+rcp "$SSH_USER@$HB_ID:ncp/hmac.b64"           "$WORK/hmac.b64"            # shared nonce key (gateway mints, Core verifies)
 
 if [[ "$GATEWAY_RUNTIME" == "ec2" ]]; then
   echo "==> [gateway/ec2] mint server identity + start the off-mesh gateway (enroll :$GW_PORT, collect :$COLLECT_PORT)"
-  rcp "$WORK/harbor-collect.crt" "$SSH_USER@$GW_IP:/tmp/harbor-collect.crt"
-  rcp "$WORK/hmac.b64"           "$SSH_USER@$GW_IP:/tmp/hmac.b64"
-  rsh "$GW_IP" "set -e
+  rcp "$WORK/harbor-collect.crt" "$SSH_USER@$GW_ID:/tmp/harbor-collect.crt"
+  rcp "$WORK/hmac.b64"           "$SSH_USER@$GW_ID:/tmp/hmac.b64"
+  rsh "$GW_ID" "set -e
     sudo install -d -o $SSH_USER -g $SSH_USER -m0750 /opt/ncp-gw
     cd /opt/ncp-gw; umask 077
     [ -f gw-collect.key ] || gateway collect-keygen -cn gateway-1 -cert-out gw-collect.crt -key-out gw-collect.key >/dev/null
@@ -374,14 +448,14 @@ else
   # harbor — it has the gateway binary), build/push the image, populate the config
   # secret with the genesis material, and roll the ECS service onto it.
   echo "==> [gateway/fargate] mint server identity + queue key (on harbor)"
-  rsh "$HB_IP" "set -e
+  rsh "$HB_ID" "set -e
     cd ~/ncp; umask 077
     [ -f gw-collect.key ] || gateway collect-keygen -cn gateway-1 -cert-out gw-collect.crt -key-out gw-collect.key >/dev/null
     [ -f gw-qkey.b64 ] || openssl rand 32 | basenc --base64url | tr -d '=' > gw-qkey.b64
     echo ok"
-  rcp "$SSH_USER@$HB_IP:ncp/gw-collect.crt" "$WORK/gw-collect.crt"
-  rcp "$SSH_USER@$HB_IP:ncp/gw-collect.key" "$WORK/gw-collect.key"
-  rcp "$SSH_USER@$HB_IP:ncp/gw-qkey.b64"    "$WORK/gw-qkey.b64"
+  rcp "$SSH_USER@$HB_ID:ncp/gw-collect.crt" "$WORK/gw-collect.crt"
+  rcp "$SSH_USER@$HB_ID:ncp/gw-collect.key" "$WORK/gw-collect.key"
+  rcp "$SSH_USER@$HB_ID:ncp/gw-qkey.b64"    "$WORK/gw-qkey.b64"
 
   echo "==> [gateway/fargate] build + push the gateway image to ECR"
   bash "$ROOT/deploy/prod/fargate/build-push.sh" gateway
@@ -401,10 +475,11 @@ else
     --cluster "${NAME_PREFIX}-gateway" --service "${NAME_PREFIX}-gateway" --force-new-deployment >/dev/null
   echo "    gateway image pushed, secret populated, ECS deployment forced (off-mesh Fargate; NLB enroll + Harbor-only collect)"
 fi
+fi # end step 7 mint+gateway (genesis only)
 
 echo "==> [harbor] register the gateway + start the pull collector"
-rcp "$WORK/gw-collect.crt" "$SSH_USER@$HB_IP:/tmp/gw-collect.crt"
-rsh "$HB_IP" "set -e
+rcp "$WORK/gw-collect.crt" "$SSH_USER@$HB_ID:/tmp/gw-collect.crt"
+rsh "$HB_ID" "set -e
   cd ~/ncp
   G=~/ncp/genesis
   install -m0644 /tmp/gw-collect.crt gw-collect.crt; rm -f /tmp/gw-collect.crt
@@ -424,9 +499,13 @@ rsh "$HB_IP" "set -e
   echo registered"
 echo "    gateway registered + collector pulling (attestation enabled)"
 
-# imac (off-cloud, no AWS identity) joins via a join key with manual approval.
-echo "==> [harbor] create the imac join key"
-IMAC_KEY="$(rsh "$HB_IP" "harbor joinkey create $HARBOR_DB_FLAGS -name imac -groups laptops 2>/dev/null | grep -o 'njk_[A-Za-z0-9_-]*' || true")"
+# imac (off-cloud, no AWS identity) joins via a join key with manual approval. Genesis only — on
+# recover the imac's existing enrollment is unaffected (its cert validates against the same CA).
+IMAC_KEY=""
+if [[ "$MODE" != "recover" ]]; then
+  echo "==> [harbor] create the imac join key"
+  IMAC_KEY="$(rsh "$HB_ID" "harbor joinkey create $HARBOR_DB_FLAGS -name imac -groups laptops 2>/dev/null | grep -o 'njk_[A-Za-z0-9_-]*' || true")"
+fi
 
 # ── 8. harbor: core-api (renew/heartbeat) + admin console (SAML or mock-IdP) ─
 # Edge TLS: when harbor_domain is set, fetch the scoped Cloudflare token (Secrets Manager)
@@ -443,7 +522,7 @@ if [[ -n "$HARBOR_DOMAIN" ]]; then
   # Write to the SAME literal path the -acme-cloudflare-token-file flag uses (so they can't
   # diverge), and chmod 600 explicitly — `cat >` truncates but does not re-permission an
   # existing file, so a re-run must not leave a looser mode on this credential.
-  printf '%s' "$CF_TOKEN" | rsh "$HB_IP" "umask 077; mkdir -p /home/$SSH_USER/ncp/acme; cat > /home/$SSH_USER/ncp/cf-token && chmod 600 /home/$SSH_USER/ncp/cf-token"
+  printf '%s' "$CF_TOKEN" | rsh "$HB_ID" "umask 077; mkdir -p /home/$SSH_USER/ncp/acme; cat > /home/$SSH_USER/ncp/cf-token && chmod 600 /home/$SSH_USER/ncp/cf-token"
   ACME_FLAGS="-acme-domain $HARBOR_DOMAIN -acme-cloudflare-token-file /home/$SSH_USER/ncp/cf-token -acme-cache /home/$SSH_USER/ncp/acme"
   [[ -n "$ACME_EMAIL" ]] && ACME_FLAGS="$ACME_FLAGS -acme-email $ACME_EMAIL"
   [[ "$ACME_STAGING" == "true" ]] && ACME_FLAGS="$ACME_FLAGS -acme-staging"
@@ -469,14 +548,14 @@ if [[ -n "${SAML_METADATA_URL:-}" || -n "${SAML_METADATA_FILE:-}" ]]; then
   [[ -n "${SAML_SP_CERT_FILE:-}" && -f "${SAML_SP_CERT_FILE:-}" ]] || { echo "FATAL: SAML requested but SAML_SP_CERT_FILE is unset/missing (the SP signing cert PEM)" >&2; exit 1; }
   [[ -n "${SAML_ROLE_MAP:-}" ]] || { echo "FATAL: SAML requested but SAML_ROLE_MAP is unset (e.g. '<entra-admin-group-guid>=admin') — without it every SSO user lands as viewer" >&2; exit 1; }
   # Deliver the SP keypair (key 0600, cert 0644) — bytes preserved via ssh stdin, never argv.
-  rsh "$HB_IP" "umask 077; mkdir -p /home/$SSH_USER/ncp/saml; cat > /home/$SSH_USER/ncp/saml/sp.key && chmod 600 /home/$SSH_USER/ncp/saml/sp.key" < "$SAML_SP_KEY_FILE"
-  rsh "$HB_IP" "cat > /home/$SSH_USER/ncp/saml/sp.crt && chmod 644 /home/$SSH_USER/ncp/saml/sp.crt" < "$SAML_SP_CERT_FILE"
+  rsh "$HB_ID" "umask 077; mkdir -p /home/$SSH_USER/ncp/saml; cat > /home/$SSH_USER/ncp/saml/sp.key && chmod 600 /home/$SSH_USER/ncp/saml/sp.key" < "$SAML_SP_KEY_FILE"
+  rsh "$HB_ID" "cat > /home/$SSH_USER/ncp/saml/sp.crt && chmod 644 /home/$SSH_USER/ncp/saml/sp.crt" < "$SAML_SP_CERT_FILE"
   # URLs/role-map are single-quoted so the remote shell keeps ';', '&', '?' literal (not command/glob).
   IDP_FLAGS="-saml-sp-key /home/$SSH_USER/ncp/saml/sp.key -saml-sp-cert /home/$SSH_USER/ncp/saml/sp.crt -role-map '$SAML_ROLE_MAP' -environment production"
   if [[ -n "${SAML_METADATA_URL:-}" ]]; then
     IDP_FLAGS="$IDP_FLAGS -saml-idp-metadata-url '$SAML_METADATA_URL'"
   else
-    rsh "$HB_IP" "cat > /home/$SSH_USER/ncp/saml/idp-metadata.xml && chmod 644 /home/$SSH_USER/ncp/saml/idp-metadata.xml" < "$SAML_METADATA_FILE"
+    rsh "$HB_ID" "cat > /home/$SSH_USER/ncp/saml/idp-metadata.xml && chmod 644 /home/$SSH_USER/ncp/saml/idp-metadata.xml" < "$SAML_METADATA_FILE"
     IDP_FLAGS="$IDP_FLAGS -saml-idp-metadata-file /home/$SSH_USER/ncp/saml/idp-metadata.xml"
   fi
   [[ -n "${SAML_ENTITY_ID:-}" ]] && IDP_FLAGS="$IDP_FLAGS -saml-entity-id '$SAML_ENTITY_ID'"
@@ -524,7 +603,7 @@ DB_POOL_FLAGS=""
 [[ -n "${DB_MAX_IDLE_CONNS:-}" ]]    && DB_POOL_FLAGS="$DB_POOL_FLAGS -db-max-idle-conns $DB_MAX_IDLE_CONNS"
 [[ -n "${DB_CONN_MAX_LIFETIME:-}" ]] && DB_POOL_FLAGS="$DB_POOL_FLAGS -db-conn-max-lifetime $DB_CONN_MAX_LIFETIME"
 echo "==> [harbor] start core-api + admin console on the overlay ($HARBOR_OVERLAY, mesh-only)"
-rsh "$HB_IP" "set -e
+rsh "$HB_ID" "set -e
   cd ~/ncp
   QDSN=~/ncp/queue.db; G=~/ncp/genesis
   # core-api runs as $SSH_USER but -host-cert lives in /etc/nebula (root, mode 0700 from
@@ -551,6 +630,52 @@ cp "$WORK/config-signing.pub" "$ROOT/deploy/prod/terraform/app/config-signing.pu
 echo "    core-api + admin console up"
 [[ -n "$DB_POOL_FLAGS" ]] && echo "    core-api postgres pool:$DB_POOL_FLAGS (effective only when harbor runs on postgres)"
 
+# ── 9. snapshot harbor's recoverable identity + config to Secrets Manager ─────
+# Make harbor a cattle node (parity with the Fargate gateway/lighthouse, which already read
+# their config from Secrets Manager): persist its CA CERT (the public trust anchor — the CA
+# KEY stays in KMS), the config-signing pin, harbor's OWN nebula identity (key+cert+config),
+# and the shared enrollment secrets (the nonce HMAC + leaf-pinned harbor<->gateway mTLS) to
+# ncp-harbor-config. A destroyed/recreated harbor then restores byte-identical from Secrets
+# Manager + KMS + Aurora — no re-genesis, which would mint a NEW CA cert (new fingerprint) and
+# break every enrolled member, since nebula pins the CA by its certificate fingerprint. The
+# operator's creds write it here; harbor's instance role only reads (terraform). Re-runs just
+# refresh the snapshot (put-secret-value is idempotent).
+if [[ "$MODE" != "recover" && -n "$HARBOR_CONFIG_ARN" ]]; then
+  echo "==> [harbor] snapshot identity + config to ${NAME_PREFIX}-harbor-config (Secrets Manager)"
+  # Pull harbor's on-box material to $WORK. The private keys come back over ssh (sudo cat for the
+  # root-owned /etc/nebula key), never on argv — same posture as the Fargate gateway-secret assembly.
+  rsh "$HB_ID" 'sudo cat /etc/nebula/host.key'   > "$WORK/hb-host.key"
+  rsh "$HB_ID" 'sudo cat /etc/nebula/host.crt'   > "$WORK/hb-host.crt"
+  rsh "$HB_ID" 'sudo cat /etc/nebula/config.yml' > "$WORK/hb-config.yml"
+  rsh "$HB_ID" 'cat ~/ncp/harbor-collect.key'    > "$WORK/harbor-collect.key"
+  rsh "$HB_ID" 'cat ~/ncp/queue.b64'             > "$WORK/queue.b64"
+  # The ACME cert cache (account + the issued LE cert/key) — so a recovered harbor REUSES the cert
+  # rather than re-issuing (which would risk Let's Encrypt rate limits). A tar.gz, base64 into the
+  # bundle; empty when no cert has been obtained yet (recover then issues fresh, now that the
+  # autotls propagation check uses public resolvers — see internal/autotls).
+  rsh "$HB_ID" 'cd ~/ncp && tar -czf - acme 2>/dev/null | base64 -w0 || true' > "$WORK/acme.tgz.b64"
+  # ca.crt, config-signing.pub, harbor-collect.crt, gw-collect.crt, hmac.b64 are already in $WORK.
+  HARBOR_BUNDLE_JSON="$(jq -n \
+    --rawfile ca     "$WORK/ca.crt" \
+    --rawfile cfgpub "$WORK/config-signing.pub" \
+    --rawfile hkey   "$WORK/hb-host.key" \
+    --rawfile hcrt   "$WORK/hb-host.crt" \
+    --rawfile hcfg   "$WORK/hb-config.yml" \
+    --rawfile hmac   "$WORK/hmac.b64" \
+    --rawfile hccrt  "$WORK/harbor-collect.crt" \
+    --rawfile hckey  "$WORK/harbor-collect.key" \
+    --rawfile qkey   "$WORK/queue.b64" \
+    --rawfile gwcrt  "$WORK/gw-collect.crt" \
+    --rawfile acmeb64 "$WORK/acme.tgz.b64" \
+    '{ca_crt_pem:$ca, config_signing_pub_pem:$cfgpub, host_key_pem:$hkey, host_crt_pem:$hcrt,
+      host_config_yml:$hcfg, hmac_key_b64:($hmac|rtrimstr("\n")), harbor_collect_cert_pem:$hccrt,
+      harbor_collect_key_pem:$hckey, queue_key_b64:($qkey|rtrimstr("\n")), gw_collect_cert_pem:$gwcrt,
+      acme_cache_tgz_b64:($acmeb64|rtrimstr("\n"))}')"
+  aws secretsmanager put-secret-value --region "$TF_REGION" \
+    --secret-id "$HARBOR_CONFIG_ARN" --secret-string "$HARBOR_BUNDLE_JSON" >/dev/null
+  echo "    snapshot stored — harbor is recoverable from Secrets Manager + KMS + Aurora"
+fi
+
 # Client-facing hints adapt to harbor's TLS posture (computed CORE_URL/ADMIN_URL above).
 if [[ -n "$HARBOR_DOMAIN" ]]; then
   HARBOR_TLS_NOTE="  [HTTPS via Let's Encrypt for $HARBOR_DOMAIN — operators must resolve it to $HARBOR_OVERLAY for mesh members]"
@@ -565,10 +690,17 @@ else
   CLIENT_DNS_NOTE=""
 fi
 
+# On recover the cloud-trust step (which sets ACCOUNT/ROLE/REGION from the client IMDS) is skipped —
+# that config already persists in Aurora — so default them here, or the summary trips set -u.
+ACCOUNT="${ACCOUNT:-<unchanged; cloud-trust persists in Aurora>}"
+ROLE="${ROLE:-<unchanged>}"
+REGION="${REGION:-$TF_REGION}"
+BANNER="$([[ "$MODE" == "recover" ]] && echo "HARBOR RECOVER COMPLETE  (restored from Secrets Manager + KMS + Aurora)" || echo "GENESIS BOOTSTRAP COMPLETE  (control plane + data plane)")"
+
 cat <<EOF
 
 ────────────────────────────────────────────────────────────────────────────
- GENESIS BOOTSTRAP COMPLETE  (control plane + data plane)
+ $BANNER
 ────────────────────────────────────────────────────────────────────────────
  Gateway (off-mesh): enroll(public) $GW_URL  ·  enroll(in-VPC) $GW_URL_INTERNAL
                      collect $GW_COLLECT  (Harbor-only, mTLS) — Harbor PULLS it, gateway
@@ -581,8 +713,8 @@ cat <<EOF
 
  Enroll the CLOUD CLIENT — KEYLESS via aws-sigv4 attestation (its IAM role). It's IN the
  VPC, so it enrolls via the INTERNAL gateway URL:
-   scp -i $SSH_KEY deploy/prod/terraform/app/config-signing.pub $SSH_USER@$CL_IP:/tmp/
-   ssh -i $SSH_KEY $SSH_USER@$CL_IP \\
+   scp -i $SSH_KEY -o "$SSM_PROXY" deploy/prod/terraform/app/config-signing.pub $SSH_USER@$CL_ID:/tmp/
+   ssh -i $SSH_KEY -o "$SSM_PROXY" $SSH_USER@$CL_ID \\
      'sudo pilot enroll -dir /etc/nebula -gateway $GW_URL_INTERNAL -aws-sigv4 -region $REGION \\
         -config-pub /tmp/config-signing.pub -name aws-client && \\
       sudo systemd-run --unit ncp-nebula --collect pilot supervise -dir /etc/nebula \\
@@ -594,7 +726,7 @@ cat <<EOF
    pilot enroll -dir ~/.nebula -gateway $GW_URL -join-key ${IMAC_KEY:-<imac-key>} \\
      -config-pub deploy/prod/terraform/app/config-signing.pub -name imac
    # approve it in the CONSOLE (below) or via CLI:
-   ssh -i $SSH_KEY $SSH_USER@$HB_IP \\
+   ssh -i $SSH_KEY -o "$SSM_PROXY" $SSH_USER@$HB_ID \\
      'EID=\$(harbor enroll pending $HARBOR_DB_FLAGS_HINT | awk "/imac/{print \\\$1}"); \\
       harbor enroll approve \$EID -approver alice $HARBOR_DB_FLAGS_HINT \\
         -ca-cert ~/ncp/genesis/ca.crt $APPROVE_BACKEND \\
@@ -607,7 +739,7 @@ cat <<EOF
      $ADMIN_URL    ($CONSOLE_LOGIN_NOTE; approve enrollments, see
                                             fleet health, policy, cloud-trust, etc.)
    Off-mesh convenience (out-of-band admin path): SSH-tunnel the console —
-     ssh -i $SSH_KEY -L $ADMIN_PORT:$HARBOR_OVERLAY:$ADMIN_PORT$IDP_TUNNEL $SSH_USER@$HB_IP
+     ssh -i $SSH_KEY -o "$SSM_PROXY" -L $ADMIN_PORT:$HARBOR_OVERLAY:$ADMIN_PORT$IDP_TUNNEL $SSH_USER@$HB_ID
 $TUNNEL_PRIV_NOTE
 $TUNNEL_NOTE
 

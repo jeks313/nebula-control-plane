@@ -101,3 +101,19 @@ resource "aws_kms_alias" "ebs" {
   name          = "alias/${var.name_prefix}-ebs"
   target_key_id = aws_kms_key.ebs.key_id
 }
+
+# ── Systems Manager access (private nodes) ───────────────────────────────────
+# harbor/client/monitoring now have NO public IP and NO inbound SSH; admin + the genesis
+# bootstrap reach them via SSM Session Manager / SSH-over-SSM. The SSM agent (preinstalled on
+# AL2023) dials OUT to the ssm/ssmmessages/ec2messages interface endpoints (vpc_endpoints.tf);
+# this managed policy is the IAM half. Attached to BOTH roles — core (harbor) and node
+# (client/monitoring + the EC2 lighthouse) — so every EC2 node is reachable without SSH ingress.
+resource "aws_iam_role_policy_attachment" "core_ssm" {
+  role       = aws_iam_role.core.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+resource "aws_iam_role_policy_attachment" "node_ssm" {
+  role       = aws_iam_role.node.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}

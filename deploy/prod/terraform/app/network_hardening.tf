@@ -55,12 +55,13 @@ resource "aws_default_security_group" "default" {
 # ── S3 gateway endpoint ──────────────────────────────────────────────────────
 # Keep S3 traffic (Terraform state, the artifact bucket the self-update layer adds,
 # package/bootstrap fetches from S3) in-VPC — no IGW/NAT path, no data-egress charge.
-# Gateway endpoints are free and attach to route tables.
+# Gateway endpoints are free and attach to route tables. The PRIVATE route table is
+# included so harbor/client/monitoring (now no public IP) still reach S3 in-VPC.
 resource "aws_vpc_endpoint" "s3" {
   vpc_id            = aws_vpc.main.id
   service_name      = "com.amazonaws.${var.region}.s3"
   vpc_endpoint_type = "Gateway"
-  route_table_ids   = [aws_route_table.public.id, aws_route_table.data.id]
+  route_table_ids   = [aws_route_table.public.id, aws_route_table.private.id, aws_route_table.data.id]
   tags              = { Name = "${var.name_prefix}-s3" }
 }
 
