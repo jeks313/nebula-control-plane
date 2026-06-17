@@ -2,7 +2,7 @@
 # Stand up the control-plane monitoring stack (ADR 0007 Phase 7b) on the dedicated
 # mesh-member monitoring node: enroll it into the mesh (keyless aws-sigv4, exactly like the
 # cloud client), then deploy Prometheus + Alertmanager + Grafana (this dir's config) via
-# podman-compose. The node scrapes the mesh-only core-api/admin-api over the OVERLAY plus the
+# docker compose. The node scrapes the mesh-only core-api/admin-api over the OVERLAY plus the
 # lighthouse; the UIs are reached by SSH tunnel (not exposed).
 #
 # Run AFTER deploy/prod/bootstrap-genesis.sh (which creates the genesis CA + the
@@ -132,21 +132,29 @@ scrape_configs:
       - targets: ["$LH_OVERLAY:$LH_STATS_PORT"]
 YAML
 
-# ── 4. deploy the stack (podman-compose) ────────────────────────────────────
-echo "==> installing podman + bringing up Prometheus/Alertmanager/Grafana"
+# ── 4. deploy the stack (docker compose) ────────────────────────────────────
+echo "==> installing docker + bringing up Prometheus/Alertmanager/Grafana"
 rcp "$HERE/alerts.yml" "$HERE/alertmanager.yml" "$HERE/loki-config.yml" "$HERE/compose.yml" "$WORK/prometheus.yml" "$SSH_USER@$MON_ID:/tmp/"
 rcp -r "$HERE/grafana" "$SSH_USER@$MON_ID:/tmp/grafana"
 rsh "$MON_ID" "set -e
-  sudo dnf install -y podman python3-pip >/dev/null
-  command -v podman-compose >/dev/null 2>&1 || sudo pip3 install --quiet podman-compose
+  # AL2023 ships docker (NOT podman); install it + enable the daemon. The docker compose v2
+  # plugin isn't packaged either, so fetch the static binary into the cli-plugins dir.
+  sudo dnf install -y docker >/dev/null
+  sudo systemctl enable --now docker
+  if ! docker compose version >/dev/null 2>&1; then
+    case \$(uname -m) in x86_64) A=x86_64 ;; aarch64) A=aarch64 ;; *) A=\$(uname -m) ;; esac
+    sudo mkdir -p /usr/libexec/docker/cli-plugins
+    sudo curl -fsSL -o /usr/libexec/docker/cli-plugins/docker-compose https://github.com/docker/compose/releases/download/v2.31.0/docker-compose-linux-\$A
+    sudo chmod +x /usr/libexec/docker/cli-plugins/docker-compose
+  fi
   sudo install -d -o $SSH_USER -g $SSH_USER /opt/ncp-monitoring
   install -m0644 /tmp/alerts.yml /tmp/alertmanager.yml /tmp/loki-config.yml /tmp/compose.yml /tmp/prometheus.yml /opt/ncp-monitoring/
   rm -rf /opt/ncp-monitoring/grafana && cp -r /tmp/grafana /opt/ncp-monitoring/grafana
   echo staged"
-# Grafana admin password as a 0600 .env (podman-compose substitutes \${GF_ADMIN_PASSWORD} from
+# Grafana admin password as a 0600 .env (docker compose substitutes \${GF_ADMIN_PASSWORD} from
 # it) — piped over ssh stdin so the secret never lands on a command line / in the node's ps.
 printf 'GF_ADMIN_PASSWORD=%s\n' "${GF_ADMIN_PASSWORD:-changeme}" | rsh "$MON_ID" 'umask 077; cat > /opt/ncp-monitoring/.env'
-rsh "$MON_ID" 'cd /opt/ncp-monitoring && podman-compose up -d && echo up'
+rsh "$MON_ID" 'cd /opt/ncp-monitoring && sudo docker compose up -d && echo up'
 
 # ── 5. ship harbor's journald logs to Loki (Grafana Alloy on the harbor node, Phase 7c) ──
 # Alloy (promtail's supported successor) tails the systemd journal (core-api/admin-api/collect/
@@ -187,6 +195,6 @@ cat <<EOF
  Reach the UIs   : ssh -i $SSH_KEY -o "$SSM_PROXY" -L 3000:localhost:3000 -L 9090:localhost:9090 -L 9093:localhost:9093 $SSH_USER@$MON_ID
                    then http://localhost:3000 (Grafana), :9090 (Prometheus), :9093 (Alertmanager)
  Alert delivery  : PLACEHOLDER (null receiver) — wire a real Slack/email/PagerDuty receiver in
-                   /opt/ncp-monitoring/alertmanager.yml on the node, then: podman-compose restart alertmanager
+                   /opt/ncp-monitoring/alertmanager.yml on the node, then: sudo docker compose restart alertmanager
 ────────────────────────────────────────────────────────────────────────────
 EOF
