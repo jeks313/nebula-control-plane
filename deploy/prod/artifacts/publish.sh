@@ -64,6 +64,7 @@ publish_pilot() {
   (cd "$ROOT" && GOOS="$GOOS" GOARCH="$GOARCH" CGO_ENABLED=0 go build -trimpath -ldflags "-X main.version=${ver}" -o "$bin" ./cmd/pilot)
   sha="$(sha256_of "$bin")"
   upload "$bin" "$key"
+  printf '%s\n' "$sha" | aws s3 cp - "s3://$BUCKET/$key.sha256" --region "$REGION" --content-type text/plain --only-show-errors # sidecar for install.sh
   echo
   echo "register it (run where Harbor + its DB are reachable):"
   echo "  # FIRST platform of ${ver} — creates the generation:"
@@ -98,6 +99,7 @@ publish_nebula() {
   bin="$TMP/nebula"
   sha="$(sha256_of "$bin")"
   upload "$bin" "$key"
+  printf '%s\n' "$sha" | aws s3 cp - "s3://$BUCKET/$key.sha256" --region "$REGION" --content-type text/plain --only-show-errors # sidecar for install.sh
   echo
   echo "register it (run where Harbor + its DB are reachable):"
   echo "  # FIRST platform of ${ver} — creates the generation:"
