@@ -119,30 +119,51 @@ func Enroll(ctx context.Context, p Params) (Result, error) {
 		if err != nil {
 			return Result{}, err
 		}
-		req := wire.EnrollRequest{
-			ProtocolVersion: wire.ProtocolVersion, Type: "enroll",
-			IssuedAt: p.Now().UTC().Format(time.RFC3339), Nonce: nonce,
-			Method: method, Credential: credential,
-		}
-		req.CSR = wire.CSR{
-			Curve: "P256", PublicKey: base64.RawURLEncoding.EncodeToString(pubBytes),
-			RequestedName: p.RequestedName, RequestedGroups: p.RequestedGroups,
-		}
-		req.Client.SupportedProtocolVersions = []int{wire.ProtocolVersion}
-		req.Client.OS, req.Client.Arch = runtime.GOOS, runtime.GOARCH // per-arch release selection
-		payload, _ := json.Marshal(req)
-		env, err := jws.SignBackendES256(kp, jws.Header{Typ: wire.TypEnrollRequest, Ver: 1, Kid: pubkeyHash}, payload)
+		acc, err = p.submitEnroll(ctx, kp, pubBytes, pubkeyHash, nonce, method, credential)
 		if err != nil {
 			return Result{}, err
 		}
-		body, _ := json.Marshal(env)
-		if err := p.postJSON(ctx, "/v1/enroll", body, &acc); err != nil {
-			return Result{}, err
-		}
-		// Persist the ticket so a PENDING host can resume after approval.
-		_ = saveTicket(ticketPath, acc)
 	}
 
+	// 5–7. Poll -> verify -> write.
+	return p.finishEnroll(ctx, pubBytes, acc, ticketPath)
+}
+
+// submitEnroll builds, signs (proof of possession), and POSTs the EnrollRequest,
+// then persists the returned ticket so a PENDING host can resume after approval.
+// The method + credential are the only things that vary across enrollment methods
+// (join-key token, aws-sigv4, sso/oidc); everything else — the CSR, the client
+// block, the JWS envelope, the submit, and the ticket persistence — is shared.
+func (p Params) submitEnroll(ctx context.Context, kp *hostkey.KeyPair, pubBytes []byte, pubkeyHash, nonce, method string, credential json.RawMessage) (wire.EnrollAccepted, error) {
+	req := wire.EnrollRequest{
+		ProtocolVersion: wire.ProtocolVersion, Type: "enroll",
+		IssuedAt: p.Now().UTC().Format(time.RFC3339), Nonce: nonce,
+		Method: method, Credential: credential,
+	}
+	req.CSR = wire.CSR{
+		Curve: "P256", PublicKey: base64.RawURLEncoding.EncodeToString(pubBytes),
+		RequestedName: p.RequestedName, RequestedGroups: p.RequestedGroups,
+	}
+	req.Client.SupportedProtocolVersions = []int{wire.ProtocolVersion}
+	req.Client.OS, req.Client.Arch = runtime.GOOS, runtime.GOARCH // per-arch release selection
+	payload, _ := json.Marshal(req)
+	env, err := jws.SignBackendES256(kp, jws.Header{Typ: wire.TypEnrollRequest, Ver: 1, Kid: pubkeyHash}, payload)
+	if err != nil {
+		return wire.EnrollAccepted{}, err
+	}
+	body, _ := json.Marshal(env)
+	var acc wire.EnrollAccepted
+	if err := p.postJSON(ctx, "/v1/enroll", body, &acc); err != nil {
+		return wire.EnrollAccepted{}, err
+	}
+	_ = saveTicket(p.Layout.EnrollTicket(), acc)
+	return acc, nil
+}
+
+// finishEnroll polls for the result, then on "issued" verifies the bundle against
+// the pinned config-signing key + the cert against the CA and writes the files. A
+// "pending" result keeps the ticket (resumable after approval); "denied" removes it.
+func (p Params) finishEnroll(ctx context.Context, pubBytes []byte, acc wire.EnrollAccepted, ticketPath string) (Result, error) {
 	// 5. Poll -> bundle.
 	bundleJWS, status, reason, err := p.poll(ctx, acc)
 	if err != nil {

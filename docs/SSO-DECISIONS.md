@@ -240,3 +240,35 @@ build are **B#** (appended as phases land). Review at the end.
   match). On top of crewjam's SAML layer the portal adds **RelayState↔server-side-session
   binding** (single-use, unguessable) — defeating cross-flow / device-substitution
   injection that SAML alone does not cover.
+
+- **B14 — Pilot client `pilot enroll --sso` (loopback authorization-code, S9).** The
+  client side rides the EXISTING enroll machinery (`internal/enrollclient`) — only how
+  the *credential* is obtained changes. **CLI:** `--sso` is a third, mutually-exclusive
+  credential source on `pilot enroll` alongside `-join-key` and `-aws-sigv4` (exactly
+  one required); it reuses the same `-gateway -config-pub [-dir] [-name] [-groups]`
+  flags and adds `-sso-wait` (default 3 min) for the browser round-trip. **Flow
+  (`enrollclient.EnrollSSO`):** mint/load the host key (the shared `loadOrGenerate`) →
+  fetch a pubkey-bound nonce from the existing `/v1/nonce` → bind an **ephemeral
+  loopback listener** on `127.0.0.1:0` with a one-shot `/callback` → call
+  `GET /v1/sso/start?pubkey_hash=&nonce=&redirect=http://127.0.0.1:PORT/callback` with
+  redirects DISABLED and read the **302 `Location`** (the IdP authorize URL) without
+  following into the IdP → **open the user's browser** to it → wait for the browser to
+  hit `/callback?assertion=<jws>` → submit the standard `EnrollRequest{method:oidc,
+  credential:{"assertion":"<jws>"}}` (B5) via the shared `submitEnroll` → poll via the
+  shared `finishEnroll`. The submit/poll path is factored out of `Enroll` into
+  `submitEnroll`/`finishEnroll` so both methods share it and the SSO flow is testable
+  against a fake gateway with no real browser/IdP. **Loopback callback + timeout:** the
+  one-shot `/callback` captures `assertion` (a missing one → 400, shows a "you can close
+  this tab" page), delivers it over a buffered channel, and the listener is shut down on
+  return; `EnrollSSO` waits on the channel with a timer (`-sso-wait`, default 3 min) and
+  ctx (SIGINT/SIGTERM), so it never hangs and never submits on timeout. **Browser-open:**
+  a thin, **injectable** `OpenBrowser func(string) error` (default = cross-platform
+  `open`/`xdg-open`/`cmd /c start`, missing launcher → non-fatal error); the authorize
+  URL is **ALWAYS printed** too, and printed again if the open fails, so a headless or
+  GUI-less host can still complete the flow by hand. **Pending-poll UX (S8):** SSO
+  admission defaults to PENDING, so a `pending` poll outcome is **not an error** —
+  `EnrollSSO` persists the resumable enroll ticket and returns `Status:"pending"`; the
+  CLI prints "submitted — awaiting admin approval … re-run `pilot enroll --sso` later to
+  fetch the bundle (no second sign-in needed)" and **exits 0**. A re-run with a live
+  ticket short-circuits straight to the poll: no second browser round-trip and no second
+  nonce (the ticket is removed only on `issued`/`denied`).
