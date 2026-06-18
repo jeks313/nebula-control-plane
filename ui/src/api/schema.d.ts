@@ -249,6 +249,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/v1/usertrust/active": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The published SSO user-trust config (latest committed usertrust.publish, ADR 0004). */
+        get: operations["getActiveUserTrust"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/usertrust/propose": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Validate an SSO user-trust config, then open a dual-control change. */
+        post: operations["proposeUserTrust"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/admin/v1/policy/compile": {
         parameters: {
             query?: never;
@@ -833,6 +867,32 @@ export interface components {
         CloudTrustProposeRequest: {
             default_groups?: string[];
             aws: components["schemas"]["CloudTrustAccount"][];
+            description?: string;
+        };
+        IDPEntry: {
+            /** @description IdP/tenant realm; matched EXACTLY against the assertion issuer (ADR 0004 S2) */
+            realm: string;
+            /** @description SAML/OIDC AD-group name this entry keys on */
+            directory_group: string;
+            /** @description nebula groups granted to a host matching this entry, on top of default_groups */
+            mesh_groups?: string[];
+            /** @description issue immediately vs queue for manual approval (defaults off, S8) */
+            auto_issue?: boolean;
+            /** @description named IPAM netblock matching hosts draw their overlay IP from (ADR 0010); empty = the default block */
+            netblock?: string;
+        };
+        UserTrustActive: {
+            published: boolean;
+            /** Format: int64 */
+            change_id?: number;
+            hash?: string;
+            /** @description granted to every validly SSO-enrolled host */
+            default_groups?: string[];
+            idp_entries?: components["schemas"]["IDPEntry"][];
+        };
+        UserTrustProposeRequest: {
+            default_groups?: string[];
+            idp_entries: components["schemas"]["IDPEntry"][];
             description?: string;
         };
         CompileRequest: {
@@ -1570,6 +1630,54 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["CloudTrustProposeRequest"];
+            };
+        };
+        responses: {
+            /** @description The opened change (proposer = the authenticated principal). */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Change"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Problem"];
+        };
+    };
+    getActiveUserTrust: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The active user-trust config, or {published:false} when none. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserTrustActive"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    proposeUserTrust: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UserTrustProposeRequest"];
             };
         };
         responses: {

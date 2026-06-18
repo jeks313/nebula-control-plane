@@ -355,3 +355,51 @@ build are **B#** (appended as phases land). Review at the end.
   field / `Match` docs dropped the wildcard language; `TestMatchRealm` now builds its config
   via `Parse` so it can only assert behavior `Validate` permits. No config-format change
   (an empty realm was always invalid).
+
+- **B17 — User-trust publish path: admin API + perm + dual-control + CLI (closes the
+  Phase-1 B2 publish-path gap).** Phase 1 wired the user-trust READ side (`activeUserTrust`,
+  the live `-usertrust-db` getter on `enrollment.Config.UserTrustActive`, the
+  `usertrust.publish` committer registered in `newPolicyController`) but left NO way to
+  PUBLISH a user-trust config — so SSO could never reach issuance (Phase-1 review finding
+  B2). This change adds the publish path, mirroring cloud-trust **exactly** (user-trust is a
+  peer to cloud-trust, not a fork). **Admin API (`internal/adminapi`):** two endpoints —
+  **`GET /admin/v1/usertrust/active`** (`getActiveUserTrust`, returns the latest committed
+  `usertrust.publish` as `{published, change_id, hash, default_groups, idp_entries}`, or
+  `{published:false}`) and **`POST /admin/v1/usertrust/propose`** (`proposeUserTrust`, opens
+  a dual-control change with the proposed `{default_groups, idp_entries, description}`),
+  both added to `routeTable()` and reading the controller via `Server.dc` (built in
+  `adminapi.New`, where `usertrust.RegisterCommitter` is now installed alongside policy +
+  cloudtrust). The propose handler validates eagerly via `usertrust.Validate` (400 on a bad
+  config) and stores the canonical re-marshalled payload; the committer re-parses at commit
+  (defense in depth — `Validate` enforces S3 AD-group uniqueness + grants-nothing), and a
+  commit-time rejection surfaces as the generic dual-control 422. **RBAC (`rbac.go`):** new
+  `PermUserTrustPropose = "usertrust:propose"`, mirroring `PermCloudTrustPropose` —
+  **admin-only** (absent from the operator `rolePerms` map, granted only by the admin
+  superuser), and the propose handler is gated with it + `requireStepUp` (fresh-MFA,
+  authority-granting) + the audited dual-control flow. Approval rides the existing generic
+  `/admin/v1/approvals/{id}/approve` (distinct-approver enforced by the engine). **OpenAPI
+  (`openapi.yaml`):** added schemas `IDPEntry`
+  (`realm`/`directory_group`/`mesh_groups[]`/`auto_issue`/`netblock?`), `UserTrustActive`
+  (+`default_groups[]`/`idp_entries[]`), and `UserTrustProposeRequest`, plus the two paths;
+  the route-coverage guard (`TestRoutesMatchSpec`) + response-conformance tests stay green,
+  and `ui/src/api/schema.d.ts` was regenerated via `npm run gen:api` (the committed schema
+  already tracked cloudtrust, so user-trust is kept in sync; `tsc --noEmit` passes).
+  **CLI (`cmd/harbor`):** new **`harbor usertrust publish`** (`cmd/harbor/usertrust.go`,
+  dispatched from `main.go`) mirroring `harbor cloudtrust publish` — reads the config from
+  `-config` JSON, proposes as `-operator-a` and approves as the distinct `-operator-b` via a
+  dual-control controller with the committer registered (two-person bootstrap/break-glass for
+  before the API is up; the console `POST /usertrust/propose` is the day-to-day path). It is
+  classified in `cli_surface_test.go` as break-glass/local (a `why`, like `cloudtrust
+  publish`), so the CLI⊆OpenAPI guard stays green. **Tests:** admin-API propose→active
+  round-trip (`TestUserTrustDualControlOverHTTP`, with OpenAPI conformance on both bodies),
+  duplicate-AD-group + grants-nothing + empty rejected at propose
+  (`TestUserTrustProposeRejectsDuplicateGroup`, 400), RBAC denial for viewer AND operator
+  (`TestUserTrustProposeRequiresPerm`, admin-only), step-up enforced on propose
+  (`TestUserTrustProposeStepUp`), and the CLI publish core end-to-end
+  (`TestPublishUserTrust`: propose+approve commits, `activeUserTrust` AND the
+  `-usertrust-db` getter both then return it, same-operator + duplicate-group rejected).
+  **B2 closed:** once a config is published — by either the CLI or the API + approval — the
+  `enrollment.Config.UserTrustActive` live getter returns it, so `processSSO`'s
+  `usertrust.Match` resolves and SSO can reach issuance. The ONE deliberate difference from
+  cloud-trust remains the read seam (live getter vs build-time snapshot, B8/B15); the publish
+  path itself is a line-for-line mirror.

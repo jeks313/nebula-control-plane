@@ -29,6 +29,7 @@ const (
 	PermPolicyPropose     Permission = "policy:propose"     // open a policy-publish change
 	PermApprovalDecide    Permission = "approval:decide"    // approve/deny a dual-control change
 	PermCloudTrustPropose Permission = "cloudtrust:propose" // open a cloud-trust-publish change
+	PermUserTrustPropose  Permission = "usertrust:propose"  // open a user-trust-publish change (SSO, ADR 0004)
 	PermIPAMManage        Permission = "ipam:manage"        // carve/edit/remove netblocks (ADR 0010)
 )
 
