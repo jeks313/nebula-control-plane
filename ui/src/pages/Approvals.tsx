@@ -245,6 +245,7 @@ function StateChip({ state }: { state: string }) {
 function kindLabel(kind: string): string {
   if (kind === 'policy.publish') return 'Policy publish'
   if (kind === 'cloudtrust.publish') return 'Cloud-trust publish'
+  if (kind === 'usertrust.publish') return 'User-trust publish'
   return kind
 }
 

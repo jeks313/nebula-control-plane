@@ -11,6 +11,7 @@ const NAV = [
   { to: '/devices', label: 'Devices', end: false },
   { to: '/joinkeys', label: 'Join Keys', end: false },
   { to: '/cloudtrust', label: 'Cloud Trust', end: false },
+  { to: '/usertrust', label: 'User Trust', end: false },
   { to: '/ipam', label: 'IPAM', end: false },
   { to: '/policy', label: 'Policy', end: false },
   { to: '/releases', label: 'Releases', end: false },

@@ -22,6 +22,38 @@ export function JoinedVia({
   onFilter?: (key: string, value: string) => void
   fallback?: string
 }) {
+  // SSO (ADR 0004): the provider-agnostic columns carry provider="sso",
+  // account=issuer/realm, principal=email (else subject). Render it as a first-class
+  // "SSO — <email> @ <issuer>" so an operator sees WHO SSO-enrolled the host, not just
+  // an opaque "sso" tag. The principal (email) is shown inline, not hidden in a tooltip.
+  if (p.attest_provider === 'sso') {
+    return (
+      <span className="flex flex-col gap-0.5">
+        <span className="flex items-center gap-1.5">
+          {onFilter ? (
+            <button onClick={() => onFilter('provider', 'sso')} title="Filter by SSO">
+              <Chip tone="permit">SSO</Chip>
+            </button>
+          ) : (
+            <Chip tone="permit">SSO</Chip>
+          )}
+          {p.attest_principal && <span className="text-[11px] text-ink-dim">{p.attest_principal}</span>}
+        </span>
+        {p.attest_account &&
+          (onFilter ? (
+            <button
+              onClick={() => onFilter('attest_account', p.attest_account!)}
+              className="text-left text-[11px] text-ink-faint hover:text-ink-dim"
+              title="Filter by issuer"
+            >
+              @ {p.attest_account}
+            </button>
+          ) : (
+            <span className="text-[11px] text-ink-faint">@ {p.attest_account}</span>
+          ))}
+      </span>
+    )
+  }
   if (p.attest_provider) {
     return (
       <span className="flex flex-col gap-0.5">
