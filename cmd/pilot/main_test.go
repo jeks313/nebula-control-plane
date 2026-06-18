@@ -287,4 +287,9 @@ func writeMeshCert(t *testing.T, root, mesh string, overlay netip.Prefix) {
 	if err := os.WriteFile(paths.New(base).HostCert(), certPEM, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// Also drop the CA bundle so callers that read it (e.g. `pilot info`'s CA
+	// fingerprint) have it; harmless for the meshOverlay callers that don't.
+	if err := os.WriteFile(paths.New(base).CABundle(), caPEM, 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
