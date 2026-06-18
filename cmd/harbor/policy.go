@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 
@@ -94,18 +95,28 @@ func activeCloudTrust(ctx context.Context, s *store.Store) (cloudtrust.Config, b
 // enrollment consumer reads this LIVE per enrollment via a getter (cf. cloud-trust's
 // build-time snapshot) so the dual-control flow can change who may enroll without a Core
 // restart — see (cf).userTrustActive.
+//
+// Unlike activeCloudTrust (a build-time snapshot read once at startup, where a fatalf is
+// acceptable fail-fast), this is the LIVE per-enrollment path on a long-running harbor
+// process (core-api/collect). It MUST NOT exit: a transient DB blip or one malformed
+// committed config would otherwise crash the running control plane (a self-inflicted DoS).
+// On ANY error (DB error OR parse failure) it returns false + a clear Warn, so SSO
+// enrollment fails closed via the existing ErrSSONotConfigured deny (the getter sees
+// not-found) instead of taking the process down. Security review final hardening (FIX A).
 func activeUserTrust(ctx context.Context, s *store.Store) (usertrust.Config, bool) {
 	dc := newPolicyController(s)
 	ch, ok, err := dc.LatestCommitted(ctx, usertrust.PublishKind)
 	if err != nil {
-		fatalf("usertrust: read active: %v", err)
+		slog.Warn("usertrust: read active failed; treating SSO as not configured (fail closed)", "err", err)
+		return usertrust.Config{}, false
 	}
 	if !ok {
 		return usertrust.Config{}, false
 	}
 	c, err := usertrust.Parse(ch.Payload)
 	if err != nil {
-		fatalf("usertrust: active config #%d is unparseable: %v", ch.ID, err)
+		slog.Warn("usertrust: active config is unparseable; treating SSO as not configured (fail closed)", "change_id", ch.ID, "err", err)
+		return usertrust.Config{}, false
 	}
 	return c, true
 }
