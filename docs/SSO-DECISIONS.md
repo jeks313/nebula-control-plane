@@ -57,3 +57,46 @@ build are **B#** (appended as phases land). Review at the end.
   `10.44.0.2:443` under `-pool 10.44.0.0/16` are within the overlay → allowed.
   `-allow-public-issuance` (default false) is the explicit escape hatch for a deliberately
   exposed issuance surface. Non-issuance-mode servers (no `-ca-cert`) are never guarded.
+
+- **B2 — Assertion field set + signing scheme (`internal/ssoassert`).** The gateway-signed
+  enrollment assertion (S5) carries exactly the facts Core needs to re-verify and act:
+  **who** — `Subject` (`sub`, IdP NameID), `Email` (`email`), `Issuer` (`iss`, the realm),
+  `IdPGroups` (`groups`, the directory groups the IdP asserted, fed to `usertrust.Match`);
+  **which device** — `PubkeyHash` (`pkh`) + `Nonce` (`nonce`, the enrollment nonce it
+  answers, anti-replay); **when** — `IssuedAt`/`ExpiresAt` (`iat`/`exp`, unix seconds, a
+  short window). It is signed as a **compact ES256 JWS** (`protected.payload.signature`)
+  with a typed protected header (`typ=ncp-sso-assertion-v1`, `ver=1`) so a token minted
+  for another purpose can't be replayed here. **Reused `internal/jws`** (`SignES256` /
+  `Verify`) rather than hand-rolling ECDSA, so there is one signature scheme across the
+  control plane; `ssoassert` only adds the compact (de)serialization and the
+  validity-window check. The key is a **dedicated ECDSA P-256 keypair (S6)**, distinct
+  from the CA — gateway holds the private half, Core pins the public half. Keys move as
+  **PKCS#8 `PRIVATE KEY` / PKIX `PUBLIC KEY` PEM** (matching `collect.GenerateSelfSigned`),
+  with `GenerateKey`/`Marshal*PEM`/`Parse*PEM` helpers for genesis to mint + distribute.
+  `Verify` rejects a forged or wrong-key signature (`ErrSignature`), a malformed token or
+  wrong `typ` (`ErrMalformed`), and a token outside its window (`ErrExpired`); Core must
+  still independently re-run nonce single-use + `usertrust.Match` — the assertion only
+  proves the gateway vouched for these facts, never authorizes issuance.
+
+- **B3 — `usertrust.Match` semantics: first-match entry, DefaultGroups always merged.**
+  Resolution (S4) walks `IDPEntries` **in declared order** and returns the **FIRST** entry
+  whose `DirectoryGroup` is in the user's asserted groups — that single entry supplies the
+  mesh groups, the `Netblock`, AND the `AutoIssue` posture (no union across entries, no
+  mixing one entry's netblock with another's groups). A user in several matched groups gets
+  the highest-priority entry only; the UI's reorder controls the priority. `DefaultGroups`
+  (the cloudtrust-style fleet baseline) is **always merged** into the matched entry's
+  `MeshGroups` (deduped + sorted); the netblock and auto-issue come solely from the matched
+  entry. No matching entry → DENY (`ok=false`, nil groups) — an identity in no trusted group
+  may not enroll (fail closed). Server-side `Validate` enforces S3 **(realm, directory_group)
+  uniqueness** (the same AD group in a *different* realm is allowed) and rejects an entry that
+  would grant nothing (no `mesh_groups` and no config `default_groups`), since the UI guard
+  is bypassable. Published via the `usertrust.publish` dual-control kind, re-parsed at commit.
+
+- **B4 — Realm-wildcard rule.** An entry's `Realm` is matched **exactly** against the
+  assertion issuer/realm, with one exception: an **empty `Realm` is a wildcard** that matches
+  any realm. Combined with first-match-wins (B3) this lets a config place realm-specific
+  entries ahead of a catch-all wildcard entry (e.g. `realm=corp → corp-eng`, then
+  `realm="" → any-eng`): a `corp` user takes the specific entry, a `partner` user falls
+  through to the wildcard. `Validate` still requires a non-empty `DirectoryGroup` on every
+  entry (the wildcard is on realm only, never on the group), so a wildcard entry never grants
+  blanket access — it still keys on AD-group membership.
