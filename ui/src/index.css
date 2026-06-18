@@ -26,6 +26,15 @@
   --color-warn: #d8a657;
   --color-danger: #e5484d;
 
+  /* ADR-0010 IPAM growth-envelope overlay (a DIFFERENT axis from the status hues
+     above — these encode growth headroom, not health). Kept distinct from
+     permit/warn/danger so the create-overlay never reads as a status signal:
+     green = free+clear, purple = carved /P, red = doubling buddy, yellow = envelope. */
+  --color-ipam-green: #3fb950;  /* free + clear (the suggester's target) */
+  --color-ipam-purple: #a371f7; /* an allocated / carved block */
+  --color-ipam-red: #f85149;    /* the immediate doubling buddy (caps the block) */
+  --color-ipam-yellow: #d29922; /* the rest of the growth envelope */
+
   --radius: 6px;
 }
 

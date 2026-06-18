@@ -4,9 +4,11 @@ import {
   useCreateJoinKey,
   useRevokeJoinKey,
   useUpdateJoinKey,
+  useNetblocks,
   type JoinKey,
   type JoinKeyCreated,
   type JoinKeyUpdate,
+  type Netblock,
 } from '../api/hooks'
 import { usePermissions } from '../api/perms'
 import { isApiError, isForbidden, isCentrallyHandled } from '../api/errors'
@@ -38,7 +40,7 @@ export function JoinKeys() {
             <table className="w-full text-left">
               <thead className="border-b border-edge text-[11px] uppercase tracking-wide text-ink-faint">
                 <tr>
-                  {['Name', 'Groups', 'Mode', 'Uses', 'Rate/hr', 'Expires', 'State', 'Created'].map((h) => (
+                  {['Name', 'Groups', 'Netblock', 'Mode', 'Uses', 'Rate/hr', 'Expires', 'State', 'Created'].map((h) => (
                     <th key={h} className="px-4 py-2 font-medium">{h}</th>
                   ))}
                   {mayManage && <th className="px-4 py-2 text-right font-medium">Actions</th>}
@@ -52,6 +54,9 @@ export function JoinKeys() {
                       <span className="flex flex-wrap gap-1">
                         {k.groups.length === 0 ? <span className="text-ink-faint">—</span> : k.groups.map((g) => <Chip key={g}>{g}</Chip>)}
                       </span>
+                    </td>
+                    <td className="px-4 py-2 font-mono text-[12px]">
+                      {k.sub_range ? <span className="text-ink-dim">{k.sub_range}</span> : <span className="text-ink-faint">default</span>}
                     </td>
                     <td className="px-4 py-2">
                       {k.auto_issue ? <Chip tone="warn">auto-issue</Chip> : <span className="text-ink-dim">manual approval</span>}
@@ -96,9 +101,10 @@ const FIELD =
 function CreateDialog({ onClose }: { onClose: () => void }) {
   const toast = useToast()
   const create = useCreateJoinKey()
-  const [f, setF] = useState({
+  const [f, setF] = useState<KeyForm>({
     name: '',
     groups: '',
+    subRange: '',
     maxUses: '',
     ttlDays: '',
     quotaPerHour: '',
@@ -116,6 +122,7 @@ function CreateDialog({ onClose }: { onClose: () => void }) {
       {
         name: f.name.trim(),
         groups: splitGroups(f.groups),
+        sub_range: f.subRange,
         max_uses: numOrZero(f.maxUses),
         ttl_seconds: f.ttlDays ? Math.round(Number(f.ttlDays) * 86_400) : 0,
         quota_per_hour: numOrZero(f.quotaPerHour),
@@ -158,6 +165,7 @@ function CreateDialog({ onClose }: { onClose: () => void }) {
 type KeyForm = {
   name: string
   groups: string
+  subRange: string // the bound netblock name; '' = the default block (ADR 0010)
   maxUses: string
   ttlDays: string
   quotaPerHour: string
@@ -193,6 +201,9 @@ function JoinKeyFields({
       </Labeled>
       <Labeled label="Groups (comma-separated)">
         <input value={f.groups} onChange={(e) => setF({ ...f, groups: e.target.value })} placeholder="laptops, contractors" className={FIELD} />
+      </Labeled>
+      <Labeled label="Netblock (where these hosts draw their overlay IP — ADR 0010)">
+        <NetblockSelect value={f.subRange} onChange={(v) => setF({ ...f, subRange: v })} />
       </Labeled>
       <div className="grid grid-cols-3 gap-2">
         <Labeled label="Max uses (0 = ∞)">
@@ -244,6 +255,7 @@ function EditDialog({ k, onClose }: { k: JoinKey; onClose: () => void }) {
   const [f, setF] = useState<KeyForm>({
     name: k.name,
     groups: k.groups.join(', '),
+    subRange: k.sub_range ?? '',
     maxUses: k.max_uses ? String(k.max_uses) : '',
     ttlDays: '',
     quotaPerHour: k.quota_per_hour ? String(k.quota_per_hour) : '',
@@ -254,6 +266,7 @@ function EditDialog({ k, onClose }: { k: JoinKey; onClose: () => void }) {
   function submit() {
     const body: JoinKeyUpdate = {
       groups: splitGroups(f.groups),
+      sub_range: f.subRange,
       max_uses: numOrZero(f.maxUses),
       quota_per_hour: numOrZero(f.quotaPerHour),
       auto_issue: f.autoIssue,
@@ -391,6 +404,28 @@ function Labeled({ label, children }: { label: string; children: ReactNode }) {
       <span className={cx('mb-1 block text-[11px] uppercase tracking-wide text-ink-faint')}>{label}</span>
       {children}
     </label>
+  )
+}
+
+// NetblockSelect — a dropdown of named netblocks + a "Default" option (value ''), bound
+// to the join-key's sub_range (ADR 0010). Empty = the bounded default block. If the
+// key's current binding names a block that's since been removed, it's still shown so the
+// operator sees (and can fix) the stale binding rather than silently losing it.
+function NetblockSelect({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const q = useNetblocks()
+  const named = (q.data?.netblocks ?? []).filter((b: Netblock) => b.kind === 'named')
+  const knownNames = new Set(named.map((b) => b.name))
+  const stale = value && !knownNames.has(value)
+  return (
+    <select value={value} onChange={(e) => onChange(e.target.value)} className={cx(FIELD, 'font-mono')}>
+      <option value="">Default (the bounded fallback block)</option>
+      {named.map((b) => (
+        <option key={b.name} value={b.name}>
+          {b.name} — {b.cidr}
+        </option>
+      ))}
+      {stale && <option value={value}>{value} (no longer a netblock)</option>}
+    </select>
   )
 }
 

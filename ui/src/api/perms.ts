@@ -12,6 +12,7 @@ export const PERMISSIONS = [
   'policy:propose',
   'approval:decide',
   'cloudtrust:propose',
+  'ipam:manage',
 ] as const
 
 export type Permission = (typeof PERMISSIONS)[number]
@@ -20,7 +21,7 @@ export type Permission = (typeof PERMISSIONS)[number]
 // break-glass carries no standalone permission (it's only a second sign-off).
 const ROLE_PERMS: Record<string, readonly Permission[] | '*'> = {
   admin: '*',
-  operator: ['lighthouse:manage', 'rollout:control', 'joinkey:manage', 'enroll:decide'],
+  operator: ['lighthouse:manage', 'rollout:control', 'joinkey:manage', 'enroll:decide', 'ipam:manage'],
   viewer: [],
   'break-glass': [],
 }
