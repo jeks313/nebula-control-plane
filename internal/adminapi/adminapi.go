@@ -40,6 +40,7 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/policy"
 	"github.com/jeks313/nebula-control-plane/internal/rollout"
 	"github.com/jeks313/nebula-control-plane/internal/store"
+	"github.com/jeks313/nebula-control-plane/internal/usertrust"
 )
 
 // Identity is the authenticated admin principal.
@@ -209,6 +210,7 @@ func New(cfg Config) *Server {
 		// seeder all commit through the same validation.
 		policy.RegisterCommitter(s.dc)
 		cloudtrust.RegisterCommitter(s.dc)
+		usertrust.RegisterCommitter(s.dc)
 	}
 	return s
 }
@@ -258,6 +260,9 @@ func (s *Server) routeTable() []route {
 		// Cloud-attestation trust config (dual-control; approved via /approvals).
 		{"GET", "/admin/v1/cloudtrust/active", s.handleCloudTrustActive},
 		{"POST", "/admin/v1/cloudtrust/propose", s.handleCloudTrustPropose},
+		// SSO user-trust config (ADR 0004; dual-control; approved via /approvals).
+		{"GET", "/admin/v1/usertrust/active", s.handleUserTrustActive},
+		{"POST", "/admin/v1/usertrust/propose", s.handleUserTrustPropose},
 		// A0.4 fleet-management mutations (pure-DB).
 		{"POST", "/admin/v1/lighthouses", s.handleLighthouseAdd},
 		{"PUT", "/admin/v1/lighthouses/{ip}", s.handleLighthouseReplace},
@@ -929,6 +934,85 @@ func (s *Server) handleCloudTrustPropose(w http.ResponseWriter, r *http.Request)
 		target = fmt.Sprintf("cloud-trust config (%d AWS accounts)", len(cfg.AWS))
 	}
 	ch, err := s.dc.Propose(r.Context(), cloudtrust.PublishKind, target, payload, id.Principal)
+	if err != nil {
+		s.fail(w, r, "propose failed", err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, changeView(ch, true))
+}
+
+// GET /admin/v1/usertrust/active — the published SSO user-trust config (ADR 0004,
+// latest committed usertrust.publish). {published:false} when none has been published.
+// Peer to GET /cloudtrust/active: the active user-trust config is the latest committed
+// usertrust.publish dual-control change, read the same way. Once published, this — and
+// the enrollment consumer's live -usertrust-db getter — surface the config, so SSO can
+// reach issuance (closing the Phase-1 B2 publish-path gap).
+func (s *Server) handleUserTrustActive(w http.ResponseWriter, r *http.Request) {
+	ch, ok, err := s.dc.LatestCommitted(r.Context(), usertrust.PublishKind)
+	if err != nil {
+		s.fail(w, r, "read active user-trust failed", err)
+		return
+	}
+	if !ok {
+		writeJSON(w, http.StatusOK, map[string]any{"published": false})
+		return
+	}
+	cfg, perr := usertrust.Parse(ch.Payload)
+	if perr != nil {
+		s.fail(w, r, "active user-trust is unparseable", perr)
+		return
+	}
+	dg := cfg.DefaultGroups
+	if dg == nil {
+		dg = []string{} // contract: always a JSON array
+	}
+	entries := cfg.IDPEntries
+	if entries == nil {
+		entries = []usertrust.IDPEntry{} // contract: always a JSON array
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"published": true, "change_id": ch.ID, "hash": hex.EncodeToString(ch.PayloadHash),
+		"default_groups": dg, "idp_entries": entries,
+	})
+}
+
+// POST /admin/v1/usertrust/propose — validate, then open a dual-control change
+// (ADR 0004). Changing which SSO directory groups may enroll into the mesh is
+// authority-granting, so it requires the propose permission AND fresh MFA, and is
+// approved through the generic /approvals flow. The payload is re-validated by the
+// registered usertrust.publish committer at commit (defense in depth: usertrust.Validate
+// enforces AD-group uniqueness S3 + grants-nothing). Mirrors handleCloudTrustPropose.
+func (s *Server) handleUserTrustPropose(w http.ResponseWriter, r *http.Request) {
+	id := identityFrom(r.Context())
+	if !s.requirePerm(w, id, PermUserTrustPropose) {
+		return
+	}
+	if !s.requireStepUp(w, id) {
+		return
+	}
+	var body struct {
+		DefaultGroups []string             `json:"default_groups"`
+		IDPEntries    []usertrust.IDPEntry `json:"idp_entries"`
+		Description   string               `json:"description"`
+	}
+	if !readJSON(w, r, &body) {
+		return
+	}
+	cfg := usertrust.Config{DefaultGroups: body.DefaultGroups, IDPEntries: body.IDPEntries}
+	if err := usertrust.Validate(cfg); err != nil {
+		writeProblem(w, http.StatusBadRequest, "invalid user-trust config", err.Error())
+		return
+	}
+	payload, err := json.Marshal(cfg) // store the canonical, validated form
+	if err != nil {
+		s.fail(w, r, "marshal user-trust failed", err)
+		return
+	}
+	target := body.Description
+	if target == "" {
+		target = fmt.Sprintf("user-trust config (%d IdP entries)", len(cfg.IDPEntries))
+	}
+	ch, err := s.dc.Propose(r.Context(), usertrust.PublishKind, target, payload, id.Principal)
 	if err != nil {
 		s.fail(w, r, "propose failed", err)
 		return

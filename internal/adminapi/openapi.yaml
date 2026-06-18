@@ -252,6 +252,35 @@ paths:
         "400": { $ref: "#/components/responses/Problem" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Problem" }
+  /admin/v1/usertrust/active:
+    get:
+      summary: The published SSO user-trust config (latest committed usertrust.publish, ADR 0004).
+      operationId: getActiveUserTrust
+      responses:
+        "200":
+          description: The active user-trust config, or {published:false} when none.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserTrustActive" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /admin/v1/usertrust/propose:
+    post:
+      summary: Validate an SSO user-trust config, then open a dual-control change.
+      operationId: proposeUserTrust
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UserTrustProposeRequest" }
+      responses:
+        "201":
+          description: The opened change (proposer = the authenticated principal).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Change" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Problem" }
   /admin/v1/policy/compile:
     post:
       summary: Dry-run compile a draft policy for a host's groups (live analysis).
@@ -943,6 +972,31 @@ components:
       properties:
         default_groups: { type: array, items: { type: string } }
         aws: { type: array, items: { $ref: "#/components/schemas/CloudTrustAccount" } }
+        description: { type: string }
+    IDPEntry:
+      type: object
+      required: [realm, directory_group]
+      properties:
+        realm: { type: string, description: "IdP/tenant realm; matched EXACTLY against the assertion issuer (ADR 0004 S2)" }
+        directory_group: { type: string, description: "SAML/OIDC AD-group name this entry keys on" }
+        mesh_groups: { type: array, items: { type: string }, description: "nebula groups granted to a host matching this entry, on top of default_groups" }
+        auto_issue: { type: boolean, description: "issue immediately vs queue for manual approval (defaults off, S8)" }
+        netblock: { type: string, description: "named IPAM netblock matching hosts draw their overlay IP from (ADR 0010); empty = the default block" }
+    UserTrustActive:
+      type: object
+      required: [published]
+      properties:
+        published: { type: boolean }
+        change_id: { type: integer, format: int64 }
+        hash: { type: string }
+        default_groups: { type: array, items: { type: string }, description: "granted to every validly SSO-enrolled host" }
+        idp_entries: { type: array, items: { $ref: "#/components/schemas/IDPEntry" } }
+    UserTrustProposeRequest:
+      type: object
+      required: [idp_entries]
+      properties:
+        default_groups: { type: array, items: { type: string } }
+        idp_entries: { type: array, items: { $ref: "#/components/schemas/IDPEntry" } }
         description: { type: string }
     CompileRequest:
       type: object

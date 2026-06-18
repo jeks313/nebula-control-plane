@@ -83,6 +83,7 @@ var cliSurface = map[string]surfaceEntry{
 	"ca-init":             {why: "CA / HSM bootstrap — offline key ceremony"},
 	"issue-cert":          {why: "break-glass direct cert issuance (decision 10: CLI-only break-glass path)"},
 	"cloudtrust publish":  {why: "operator/bootstrap publish of the cloud-trust config (two distinct operators, like genesis); the console's POST /cloudtrust/propose is the day-to-day path, this is for bootstrap/break-glass before the API is up"},
+	"usertrust publish":   {why: "operator/bootstrap publish of the SSO user-trust config (ADR 0004; two distinct operators, like genesis); the console's POST /usertrust/propose is the day-to-day path, this is for bootstrap/break-glass before the API is up"},
 	"blocklist add":       {why: "security break-glass: blocklist a compromised host's cert (7.1) — must work even when the console is down (when you most need to kill a host). The console blocklist view + dual-control bulk-revoke land in 7.2/UI-5; single-host add is CLI-only until then"},
 	"blocklist remove":    {why: "security break-glass: lift a blocklist entry (7.1); CLI-only until the UI-5 blocklist view (7.2)"},
 	"blocklist list":      {why: "local store inspection of the cert blocklist (7.1); the console blocklist view lands in 7.2/UI-5"},

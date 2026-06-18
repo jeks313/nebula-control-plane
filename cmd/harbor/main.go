@@ -76,6 +76,8 @@ func main() {
 		cmdIssueCert(os.Args[2:])
 	case "cloudtrust":
 		cmdCloudTrust(os.Args[2:])
+	case "usertrust":
+		cmdUserTrust(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Printf("harbor %s\n", version)
 	case "help", "-h", "--help":
