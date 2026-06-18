@@ -495,3 +495,66 @@ build are **B#** (appended as phases land). Review at the end.
   `replay.Observe` in `verify()`) covers the SSO path end-to-end (token + aws-sigv4 already
   did; this closes the SSO gap). Mirrors `TestEnrollNonceReplayRejected`. No wire/config
   format change; all three items are behind the existing fail-closed posture.
+
+- **B20 — Deploy threading: SSO made DEPLOYABLE (B15's deferred plumbing), default OFF, a
+  strict no-op when off.** Closes the B15 "deferred to deploy" gap: wires the genesis-minted
+  keys + the operator's IdP knobs through `deploy/prod/bootstrap-genesis.sh` + the two
+  terraform secrets so an operator can flip SSO on by setting one trigger env var, WITHOUT it
+  being live until they also register the AD app + publish a user-trust config. **The trigger
+  is `SSO_ACS_URL`** (the public gateway ACS, e.g. `https://<gateway>/v1/sso/acs`); empty (the
+  default) = SSO off. The bootstrap also gates on it (`SSO_ENABLED`), mirroring the gateway's
+  own fail-closed-disabled trigger (`cmd/gateway/sso.go`: nil `Config.SSO` when the ACS URL is
+  empty). **What is threaded (all gated on `SSO_ENABLED`):** (1) the genesis-minted **assertion
+  keypair** (`sso-assert.key`/`.pub`, already minted per B15) — the PRIVATE half goes to the
+  gateway (Fargate config secret `sso_assert_key_pem` → `$NCP_GW_SSO_ASSERT_KEY_PEM`; EC2 path
+  via a 0600 file + `-sso-assert-key`), the PUBLIC half is pinned on Core
+  (`-sso-assert-pub $G/sso-assert.pub`); (2) a **stable SAML SP keypair**; (3) the operator
+  **knobs** `SSO_ACS_URL`/`SSO_ENTITY_ID`/`SSO_ISSUER`/`SSO_GROUPS_ATTR` + the **IdP SAML
+  metadata** (`SSO_IDP_METADATA_FILE`/`_URL`, embedded verbatim into the gateway secret +
+  recover bundle); (4) **Core** gains `-sso-assert-pub` AND `-usertrust-db` on ALL THREE
+  issuing consumers (collect — where `processSSO` runs; core-api; admin-api — the approve path;
+  all go through `addCoreFlags`/`buildConsumer`); (5) the **recover bundle** (`ncp-harbor-config`)
+  carries the full SSO set (both assertion halves + the SP keypair + the IdP metadata + the
+  ACS/entity/issuer/groups knobs) so `MODE=recover` reconstructs SSO byte-identical, driven
+  SOLELY by the bundle (recover ignores the env knobs). **SP-key minting — chose the BOOTSTRAP
+  (openssl) over genesis (Go).** The SAML SP signing keypair must be **stable + recoverable**
+  (the IdP app pins the SP cert — an ephemeral pair, as admin-api's `loadOrGenSPKeypair` would
+  mint, would break the IdP trust on every task restart), AND it must be **RSA** (crewjam SAML
+  signs AuthnRequests with RSA — `parseSPKeypair` rejects non-RSA). Genesis today mints only
+  ECDSA P-256 material; adding RSA generation there would introduce a new key type into the Go
+  ceremony (+ a new `Result` field, + the manifest/DB-registry plumbing) for a key that — unlike
+  the assertion key — is NOT a trust root Core pins. So the SP keypair is minted ONCE at genesis
+  time **in the bootstrap** (`openssl req -x509 -newkey rsa:2048 … -days 3650`, idempotent: kept
+  if present), exactly where the other stable leaf material (the gateway/harbor collect mTLS
+  certs) is already minted, and snapshotted into the recover bundle — the established
+  "stable-and-recoverable" mechanism — so it survives task restarts AND a recover with **zero
+  Go change** (genesis/`go build`/`go test` untouched). The assertion key stays in genesis (it
+  IS a pinned trust root, B15). **One small Go change (additive, gateway only):** `cmd/gateway/sso.go`
+  now reads the non-secret knobs (ACS URL / entity id / issuer / groups attr) **env-first**
+  (`$NCP_GW_SSO_ACS_URL` etc., via a new `envOr` helper) in addition to the existing `-flag`s,
+  so a shell-less distroless Fargate task is flipped on purely by populating its Secrets-Manager
+  config — no terraform `command` change. The PEM material + IdP metadata already read env
+  (B15). **terraform:** `gateway_fargate.tf` adds the 8 `sso_*` fields to the `ncp-gateway`
+  secret JSON (empty placeholders, under the existing `lifecycle ignore_changes`, like every
+  other field — the bootstrap owns the real values) + injects each as an `$NCP_GW_SSO_*` env var
+  in the task def `secrets`; `harbor_config.tf` adds the 9 `sso_*` recover-bundle fields (also
+  empty placeholders). **SSO-OFF IS A STRICT NO-OP** (the hard constraint): with `SSO_ACS_URL`
+  unset, `SSO_ENABLED=0`, so (a) no SSO files are minted/distributed, (b) the gateway secret JSON
+  is built as `{…5 fields…} + {}` = the byte-identical pre-SSO object (verified with jq), (c) the
+  recover bundle is likewise `{…} + {}` = unchanged, (d) the Fargate task def's empty `sso_*`
+  secret fields inject empty env vars → `$NCP_GW_SSO_ACS_URL` empty → the gateway leaves
+  `Config.SSO` nil (portal disabled, the `/v1/sso/*` routes 404, no CA either way), (e) Core's
+  `CORE_SSO_FLAGS` stays `""` so the collect/core-api/admin-api argv are unchanged (no
+  `-sso-assert-pub`/`-usertrust-db`), and (f) the genesis/recover/gateway-task/Core invocations
+  all produce the same result as before this change. When SSO IS enabled but no user-trust config
+  is published yet, Core still denies every SSO enrollment with the existing terminal
+  `ErrSSONotConfigured` (fail closed) — so "deployable" never means "live" by accident.
+  **Remains OPERATOR-ONLY (not automatable here):** (1) register the SECOND SAML app in the IdP
+  (distinct Entity ID + Reply URL = the public ACS — ADR 0004 "Operator setup"); (2) set the
+  trigger + knobs (`SSO_ACS_URL` + `SSO_ENTITY_ID` + `SSO_ISSUER` + the IdP metadata); (3)
+  publish a user-trust config (`harbor usertrust publish` or the console User Trust page) mapping
+  AD groups → mesh groups + CIDR; (4) redeploy/re-bootstrap. The live SSO end-to-end test waits
+  on an operator-provided IdP app — no live `terraform apply` / genesis ceremony was run for this
+  change (static plumbing only). **Verification (static):** `bash -n` clean; `go build ./...`,
+  `go vet ./...`, `gofmt -l` (clean), `go test ./...` all green (genesis untouched, gateway tests
+  pass); `terraform validate` succeeds + `terraform fmt -check` clean.

@@ -46,7 +46,26 @@ const (
 	envSSOSPCert    = "NCP_GW_SSO_SP_CERT_PEM"    // SAML SP signing cert
 	envSSOSPKey     = "NCP_GW_SSO_SP_KEY_PEM"     // SAML SP signing key
 	envSSOIdPMeta   = "NCP_GW_SSO_IDP_METADATA"   // SAML IdP metadata XML (alternative to the file/URL)
+	// Non-secret operator knobs, also env-injectable so a shell-less distroless container
+	// (Fargate) can be flipped on purely by populating its Secrets-Manager config — no
+	// terraform `command` change. Each env var, when set, takes precedence over its
+	// matching -flag. envSSOACSURL is the SSO TRIGGER (presence enables the portal).
+	envSSOACSURL     = "NCP_GW_SSO_ACS_URL"     // public ACS URL — presence ENABLES SSO
+	envSSOEntityID   = "NCP_GW_SSO_ENTITY_ID"   // SAML SP entity id
+	envSSOIssuer     = "NCP_GW_SSO_ISSUER"      // assertion realm (iss)
+	envSSOGroupsAttr = "NCP_GW_SSO_GROUPS_ATTR" // SAML group-claim attribute
 )
+
+// envOr returns the env var if set, else the flag value. Used for the non-secret SSO
+// knobs (ACS URL / entity id / issuer / groups attr) so the Fargate task can supply them
+// from its config secret (env-first, mirroring the PEM material precedence) rather than
+// from a terraform-static `command`.
+func envOr(env, flagVal string) string {
+	if v := os.Getenv(env); v != "" {
+		return v
+	}
+	return flagVal
+}
 
 // ssoFlags are the gateway's SSO enrollment-portal flags. SSO is enabled iff -sso-acs-url
 // is set; the rest are then required (fail closed on partial config).
@@ -66,15 +85,15 @@ type ssoFlags struct {
 
 func addSSOFlags(fs flagSet) *ssoFlags {
 	return &ssoFlags{
-		acsURL:       fs.String("sso-acs-url", "", "PUBLIC ACS URL for the SSO enrollment portal, e.g. https://<gateway>/v1/sso/acs — presence ENABLES SSO (ADR 0004); the IdP POSTs the SAML response here"),
+		acsURL:       fs.String("sso-acs-url", "", "PUBLIC ACS URL for the SSO enrollment portal, e.g. https://<gateway>/v1/sso/acs — presence ENABLES SSO (ADR 0004; or $"+envSSOACSURL+"); the IdP POSTs the SAML response here"),
 		idpMetaURL:   fs.String("sso-idp-metadata-url", "", "SAML IdP metadata URL (SSO; alternative to -sso-idp-metadata-file or $"+envSSOIdPMeta+")"),
 		idpMetaFile:  fs.String("sso-idp-metadata-file", "", "SAML IdP metadata XML file (SSO; alternative to -sso-idp-metadata-url or $"+envSSOIdPMeta+")"),
-		entityID:     fs.String("sso-entity-id", "", "SAML SP entity id (SSO; default the SP metadata URL)"),
-		groupsAttr:   fs.String("sso-groups-attr", "groups", "SAML assertion attribute carrying directory-group membership (SSO)"),
+		entityID:     fs.String("sso-entity-id", "", "SAML SP entity id (SSO; default the SP metadata URL; or $"+envSSOEntityID+")"),
+		groupsAttr:   fs.String("sso-groups-attr", "groups", "SAML assertion attribute carrying directory-group membership (SSO; or $"+envSSOGroupsAttr+")"),
 		spCert:       fs.String("sso-sp-cert", "", "SAML SP signing cert PEM (SSO; or $"+envSSOSPCert+")"),
 		spKey:        fs.String("sso-sp-key", "", "SAML SP signing key PEM (SSO; or $"+envSSOSPKey+")"),
 		assertKey:    fs.String("sso-assert-key", "", "gateway assertion-signing PRIVATE key PEM (SSO; ECDSA P-256, decision S6 — from genesis sso-assert.key; or $"+envSSOAssertKey+")"),
-		issuer:       fs.String("sso-issuer", "", "realm stamped into the assertion's iss (SSO; fed to Core's usertrust.Match; empty -> the SAML provider name)"),
+		issuer:       fs.String("sso-issuer", "", "realm stamped into the assertion's iss (SSO; fed to Core's usertrust.Match; empty -> the SAML provider name; or $"+envSSOIssuer+")"),
 		assertionTTL: fs.Duration("sso-assertion-ttl", 0, "validity window of signed SSO assertions (SSO; <=0 -> default 3m, decision B12)"),
 		sessionTTL:   fs.Duration("sso-session-ttl", 0, "how long a started SSO session may await the ACS POST (SSO; <=0 -> default 5m)"),
 	}
@@ -87,8 +106,10 @@ type flagSet interface {
 	Duration(name string, value time.Duration, usage string) *time.Duration
 }
 
-// requested reports whether the operator asked for SSO at all (the trigger flag is set).
-func (f *ssoFlags) requested() bool { return *f.acsURL != "" }
+// requested reports whether the operator asked for SSO at all (the trigger is set, via
+// either -sso-acs-url or $NCP_GW_SSO_ACS_URL). When neither is set the portal stays
+// disabled and the gateway is byte-for-behavior unchanged.
+func (f *ssoFlags) requested() bool { return envOr(envSSOACSURL, *f.acsURL) != "" }
 
 // build assembles gateway.Config.SSO from the flags/env. It returns nil when SSO is not
 // requested (the trigger flag -sso-acs-url is unset). When SSO IS requested it FAILS
@@ -142,19 +163,20 @@ func (f *ssoFlags) build() (*gateway.SSOConfig, error) {
 	// Derive the SP BaseURL + ACSPath from the public ACS URL so adminauth declares the
 	// portal's own /v1/sso/acs as the SP's ACS (the IdP auto-POSTs there; crewjam's
 	// Destination/Recipient checks line up). e.g. https://gw/v1/sso/acs ->
-	// BaseURL=https://gw, ACSPath=/v1/sso/acs.
-	base, acsPath, err := splitACSURL(*f.acsURL)
+	// BaseURL=https://gw, ACSPath=/v1/sso/acs. ACS URL / entity id / groups attr resolve
+	// env-first (so the Fargate task can supply them from its config secret).
+	base, acsPath, err := splitACSURL(envOr(envSSOACSURL, *f.acsURL))
 	if err != nil {
 		return nil, fmt.Errorf("-sso-acs-url: %w", err)
 	}
 	sa, err := adminauth.NewSAML(adminauth.SAMLOptions{
 		Name:        "sso",
 		BaseURL:     base,
-		EntityID:    *f.entityID,
+		EntityID:    envOr(envSSOEntityID, *f.entityID),
 		IDPMetadata: idpMeta,
 		Key:         spKey,
 		Certificate: spCert,
-		GroupsAttr:  *f.groupsAttr,
+		GroupsAttr:  envOr(envSSOGroupsAttr, *f.groupsAttr),
 		ACSPath:     acsPath,
 		// MetadataPath left default; the portal does not serve SP metadata itself —
 		// the operator registers the SP out of band. Secure stays false: the cookie
@@ -167,7 +189,7 @@ func (f *ssoFlags) build() (*gateway.SSOConfig, error) {
 	return &gateway.SSOConfig{
 		SAML:         sa,
 		SigningKey:   signingKey,
-		Issuer:       *f.issuer,
+		Issuer:       envOr(envSSOIssuer, *f.issuer),
 		SessionTTL:   *f.sessionTTL,
 		AssertionTTL: *f.assertionTTL,
 	}, nil
