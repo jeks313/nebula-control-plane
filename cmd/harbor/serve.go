@@ -84,6 +84,21 @@ func cmdCoreAPI(args []string) {
 	s := openStore(*cf.driver, *cf.dsn)
 	defer s.Close()
 	audit := func(c context.Context, a, ac, t, d string) error { _, e := s.AppendAudit(c, a, ac, t, d); return e }
+	// Boot-seed central/default for an existing mesh upgraded onto the IPAM build: the
+	// migrations created an empty netblocks table but genesis-only seeding left the
+	// 'default' block (which the enroll consumer resolves unbound joins to) missing, so
+	// every new enrollment would error. No-op when the table is already populated, and
+	// race-tolerant if admin-api boot-seeds concurrently (D22). A failure is recoverable
+	// next boot (a missing default surfaces as audited/metered enrollment errors), so warn
+	// rather than abort the control plane.
+	if salloc, serr := ipam.NewAllocator(s, ipam.Pool{Prefix: pool}); serr != nil {
+		log.Warn("core-api: ipam allocator for boot-seed failed; skipping netblock boot-seed", "err", serr)
+	} else {
+		sreg := netblock.New(s.DB, pool, nil, salloc, audit)
+		if _, serr := genesis.BootSeedNetblocks(context.Background(), sreg, pool, netip.Prefix{}, netip.Prefix{}, "boot-seed", log); serr != nil {
+			log.Warn("core-api: boot-seed of central/default netblocks failed; unbound enrollments may error until 'default' exists", "err", serr)
+		}
+	}
 	sg, err := signer.New(signer.Config{
 		CACertPEM: caPEM, Backend: caB,
 		Policy: signer.IssuePolicy{AllowedNetwork: pool, MaxLifetime: *cf.certLifetime}, Audit: audit,
@@ -254,6 +269,15 @@ func cmdAdminAPI(args []string) {
 	}
 	nbReg := netblock.New(s.DB, pool, nil, alloc, audit)
 	alloc = alloc.WithResolver(nbReg)
+	// Boot-seed central/default for an existing mesh upgraded onto the IPAM build
+	// (migrations created an empty netblocks table but genesis-only seeding left the
+	// 'default' block — which unbound enrollments resolve to — missing). No-op when the
+	// table is already populated, and race-tolerant if core-api boot-seeds at the same
+	// time (D22). A failure surfaces as enrollment errors (audited/metered) and is
+	// retried next boot, so warn rather than abort startup.
+	if _, err := genesis.BootSeedNetblocks(ctx, nbReg, pool, netip.Prefix{}, netip.Prefix{}, "boot-seed", log); err != nil {
+		log.Warn("admin-api: boot-seed of central/default netblocks failed; unbound enrollments may error until 'default' exists", "err", err)
+	}
 
 	api := adminapi.New(adminapi.Config{
 		Store: s, Identity: idp,

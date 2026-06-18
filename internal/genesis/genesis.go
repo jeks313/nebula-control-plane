@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/netip"
 	"time"
 
@@ -168,26 +169,14 @@ func Run(ctx context.Context, s *store.Store, caBackend, configBackend signer.Ba
 		return Result{}, err
 	}
 	// Seed the central + default netblocks (ADR 0010) and wire the registry as the
-	// allocator's resolver so central allocations carry netblock_id provenance.
-	centralCIDR := p.CentralCIDR
-	if !centralCIDR.IsValid() {
-		centralCIDR = netip.PrefixFrom(p.Pool.Masked().Addr(), 27).Masked() // first /27
-	}
-	defaultCIDR := p.DefaultCIDR
-	if !defaultCIDR.IsValid() {
-		defaultCIDR = defaultBlock(p.Pool)
-	}
+	// allocator's resolver so central allocations carry netblock_id provenance. The
+	// placement math lives in SeedNetblocks, shared with the boot-seed upgrade path.
 	nbReg := netblock.New(s.DB, p.Pool, nil, alloc, func(c context.Context, a, ac, t, d string) error {
 		_, e := s.AppendAudit(c, a, ac, t, d)
 		return e
 	})
-	if _, err := nbReg.Seed(ctx, netblock.NameCentral, centralCIDR, netblock.KindReserved,
-		"control-plane reserved space (lighthouse, core, backends)", p.OperatorA); err != nil {
-		return Result{}, fmt.Errorf("genesis: seed central netblock: %w", err)
-	}
-	if _, err := nbReg.Seed(ctx, netblock.NameDefault, defaultCIDR, netblock.KindDefault,
-		"bounded fallback for unbound join methods", p.OperatorA); err != nil {
-		return Result{}, fmt.Errorf("genesis: seed default netblock: %w", err)
+	if _, _, err := SeedNetblocks(ctx, nbReg, p.Pool, p.CentralCIDR, p.DefaultCIDR, p.OperatorA); err != nil {
+		return Result{}, err
 	}
 	alloc = alloc.WithResolver(nbReg)
 	if err := alloc.AllocateSpecific(ctx, p.LighthouseName, p.LighthouseIP, "genesis"); err != nil {
@@ -317,6 +306,86 @@ func VerifyControlPlaneCert(certPEM []byte) (string, error) {
 		c.Name(), policy.GroupControlPlane, policy.GroupControlPlane)
 }
 
+// SeedNetblocks seeds the two protected genesis netblocks — 'central' (the
+// control-plane reserved /27) and 'default' (the bounded fallback) — into reg,
+// resolving each CIDR from the optional operator overrides or the standard
+// placement defaults (the same math genesis uses; see centralBlock/defaultBlock).
+// It is the single seeding chokepoint shared by the genesis ceremony (genesis.Run)
+// and the harbor boot-seed upgrade path (cmd/harbor/serve.go), so the CIDR math is
+// never duplicated.
+//
+// Seed itself is idempotent on the name: a row that already exists is returned
+// unchanged, and a concurrent insert that loses the UNIQUE(name) race is folded
+// back to the existing row — so two services boot-seeding at once is safe and a
+// re-genesis is a no-op. Returns the central and default rows.
+func SeedNetblocks(ctx context.Context, reg *netblock.Registry, pool, centralOverride, defaultOverride netip.Prefix, actor string) (central, def netblock.Netblock, err error) {
+	centralCIDR := centralOverride
+	if !centralCIDR.IsValid() {
+		centralCIDR = centralBlock(pool)
+	}
+	defaultCIDR := defaultOverride
+	if !defaultCIDR.IsValid() {
+		defaultCIDR = defaultBlock(pool)
+	}
+	central, err = reg.Seed(ctx, netblock.NameCentral, centralCIDR, netblock.KindReserved,
+		"control-plane reserved space (lighthouse, core, backends)", actor)
+	if err != nil {
+		return netblock.Netblock{}, netblock.Netblock{}, fmt.Errorf("genesis: seed central netblock: %w", err)
+	}
+	def, err = reg.Seed(ctx, netblock.NameDefault, defaultCIDR, netblock.KindDefault,
+		"bounded fallback for unbound join methods", actor)
+	if err != nil {
+		return netblock.Netblock{}, netblock.Netblock{}, fmt.Errorf("genesis: seed default netblock: %w", err)
+	}
+	return central, def, nil
+}
+
+// BootSeedNetblocks is the existing-mesh upgrade path (IPAM-DECISIONS D22): an
+// already-genesis'd mesh that upgrades to the IPAM build runs migrations
+// 000022/000023 (creating an empty netblocks table) but never ran genesis again, so
+// the 'default' netblock the allocator resolves unbound enrollments to is missing —
+// every new enrollment would break. Harbor's long-running services (core-api,
+// admin-api) call this at startup, AFTER migrations, to seed central+default the
+// same way genesis would.
+//
+// It only seeds when the table is EMPTY, so it never disturbs a genesis'd or
+// operator-curated set (a count check; a populated table is a no-op returning
+// false). It is race/duplicate-tolerant: core-api and admin-api may both boot and
+// both attempt it, so a concurrent insert that loses the UNIQUE(name) race is
+// swallowed by Seed (it folds the duplicate back to the existing row) — seeding
+// twice is a no-op, not a crash. Returns whether it actually seeded.
+//
+// Logs an info line when it seeds (so the upgrade is visible in operator logs). A
+// caller that wants the warn-but-don't-abort posture should log the returned error
+// rather than fatal on it: a missing default surfaces as enrollment errors that are
+// already audited + metered, so a transient seed failure is recoverable on the next
+// boot and must not take the control plane down.
+func BootSeedNetblocks(ctx context.Context, reg *netblock.Registry, pool, centralOverride, defaultOverride netip.Prefix, actor string, log *slog.Logger) (seeded bool, err error) {
+	if log == nil {
+		log = slog.Default()
+	}
+	n, err := reg.Count(ctx)
+	if err != nil {
+		return false, fmt.Errorf("genesis: boot-seed count netblocks: %w", err)
+	}
+	if n > 0 {
+		return false, nil // genesis'd or operator-curated — leave it alone
+	}
+	central, def, err := SeedNetblocks(ctx, reg, pool, centralOverride, defaultOverride, actor)
+	if err != nil {
+		return false, err
+	}
+	log.Info("netblock: boot-seeded central + default (existing-mesh upgrade — netblocks table was empty)",
+		"central", central.CIDR, "default", def.CIDR, "pool", pool.String())
+	return true, nil
+}
+
+// centralBlock is the control-plane reserved CIDR when the operator does not supply
+// -central-cidr: the pool's first /27 (lighthouse + core + backend headroom).
+func centralBlock(pool netip.Prefix) netip.Prefix {
+	return netip.PrefixFrom(pool.Masked().Addr(), 27).Masked()
+}
+
 // defaultBlock picks a sensible bounded 'default' CIDR when the operator does not
 // supply -default-cidr: a /18 (or the whole pool, if the pool is coarser than /18)
 // placed at the first aligned slot clear of central (the first /27). It uses the
@@ -329,7 +398,7 @@ func defaultBlock(pool netip.Prefix) netip.Prefix {
 	if pool.Bits() > want {
 		want = pool.Bits() // pool coarser than /18 -> the whole pool
 	}
-	central := netip.PrefixFrom(pool.Addr(), 27).Masked()
+	central := centralBlock(pool)
 	p, err := netblock.Suggest(want, pool, nil, []netip.Prefix{central})
 	if err != nil {
 		// Fall back to the slot immediately after central, aligned to /want.
