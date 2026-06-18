@@ -133,7 +133,10 @@ func (v *Values) Defaults() {
 		v.MTU = 1300
 	}
 	if v.StatsPort == 0 {
-		v.StatsPort = 8080 // nebula prometheus /metrics (same port the Fargate lighthouse uses)
+		// Non-standard port: 8080 is a magnet for conflicts, and the ephemeral range (32768+)
+		// risks the kernel grabbing it. 4280 (a nod to nebula's 4242) is below ephemeral and
+		// not a registered service. pilot supervise fails open if it's somehow taken anyway.
+		v.StatsPort = 4280
 	}
 	if v.StatsSubsystem == "" {
 		v.StatsSubsystem = "node"

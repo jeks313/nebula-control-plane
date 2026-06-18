@@ -14,7 +14,7 @@ printf '%s' "${HOST_CRT_PEM:?missing HOST_CRT_PEM}" > "$d/host.crt"
 printf '%s' "${HOST_KEY_PEM:?missing HOST_KEY_PEM}" > "$d/host.key"
 
 NEBULA_PORT="${NEBULA_PORT:-4242}"
-NCP_STATS_PORT="${NCP_STATS_PORT:-8080}"
+NCP_STATS_PORT="${NCP_STATS_PORT:-4280}"
 
 cat > "$d/config.yml" <<YAML
 pki:

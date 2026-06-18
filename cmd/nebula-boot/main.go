@@ -59,7 +59,7 @@ func prepare(getenv func(string) string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", envNebulaPort, err)
 	}
-	statsPort, err := port(getenv(envStatsPort), 8080)
+	statsPort, err := port(getenv(envStatsPort), 4280)
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", envStatsPort, err)
 	}
