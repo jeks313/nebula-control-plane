@@ -86,7 +86,7 @@ usage:
   pilot info [--json] [-mesh <id>] [-dir <path>]
   pilot uninstall [-mesh <id>] [-purge] | -all
   pilot init [-dir <path>] [-values <values.yml>] [-am-lighthouse]
-  pilot enroll -gateway <url> -join-key <secret> -config-pub <pem> [-dir <path>] [-name N] [-groups a,b]
+  pilot enroll -gateway <url> -config-pub <pem> (-join-key <secret> | -aws-sigv4 | --sso) [-dir <path>] [-name N] [-groups a,b]
   pilot renew -core <url> -config-pub <pem> [-dir <path>]
   pilot clock-check [-server <host>] [-max-skew <dur>] [-timeout <dur>]
   pilot supervise -config <nebula.yml> [-nebula <path>] [-sha256 <hex>] [-core <url> -config-pub <pem> -dir <path>]
@@ -151,24 +151,35 @@ func cmdRenew(args []string) {
 }
 
 // cmdEnroll runs the full join flow (M3.7): nonce -> signed submit -> poll ->
-// verify the bundle against the pinned config-signing key -> write files.
+// verify the bundle against the pinned config-signing key -> write files. The
+// credential is a join key, an AWS-SigV4 instance attestation, or — with --sso — a
+// browser IdP round-trip (loopback authorization-code, ADR 0004 / S9).
 func cmdEnroll(args []string) {
 	fs := flag.NewFlagSet("enroll", flag.ExitOnError)
 	dir := fs.String("dir", "", "host directory (default: platform-specific)")
 	gateway := fs.String("gateway", "", "enrollment gateway base URL (required)")
-	joinKey := fs.String("join-key", "", "join key secret (required unless -aws-sigv4)")
+	joinKey := fs.String("join-key", "", "join key secret (required unless -aws-sigv4 / --sso)")
 	awsSigV4 := fs.Bool("aws-sigv4", false, "attest via this instance's IAM role (IMDS) instead of a join key (M5)")
+	sso := fs.Bool("sso", false, "enroll via browser SSO (loopback authorization-code; opens your browser to the IdP)")
 	region := fs.String("region", "", "STS region for -aws-sigv4 (default: the instance's IMDS-derived region)")
 	configPub := fs.String("config-pub", "", "pinned config-signing public key PEM (required)")
 	name := fs.String("name", "", "requested device name (cosmetic)")
-	groups := fs.String("groups", "", "requested groups (advisory; the join key / cloud-trust config decides)")
+	groups := fs.String("groups", "", "requested groups (advisory; the join key / cloud-trust / user-trust config decides)")
 	timeout := fs.Duration("timeout", 60*time.Second, "max time to wait for the result")
+	ssoWait := fs.Duration("sso-wait", 3*time.Minute, "max time to wait for the browser SSO sign-in (--sso)")
 	_ = fs.Parse(args)
 	if *gateway == "" || *configPub == "" {
 		fatalf("enroll: -gateway and -config-pub are required")
 	}
-	if *awsSigV4 == (*joinKey != "") { // exactly one credential source
-		fatalf("enroll: provide either -join-key or -aws-sigv4 (not both, not neither)")
+	// Exactly one credential source.
+	sources := 0
+	for _, on := range []bool{*joinKey != "", *awsSigV4, *sso} {
+		if on {
+			sources++
+		}
+	}
+	if sources != 1 {
+		fatalf("enroll: provide exactly one credential source: -join-key, -aws-sigv4, or --sso")
 	}
 
 	pubPEM, err := os.ReadFile(*configPub)
@@ -184,11 +195,20 @@ func cmdEnroll(args []string) {
 	defer stop()
 
 	layout := paths.New(*dir)
-	res, err := enrollclient.Enroll(ctx, enrollclient.Params{
-		GatewayURL: *gateway, JoinKey: *joinKey, AWSSigV4: *awsSigV4, Region: *region, Layout: layout,
-		RequestedName: *name, RequestedGroups: splitCSV(*groups),
-		PinnedConfigPub: pinned, PollTimeout: *timeout,
-	})
+	var res enrollclient.Result
+	if *sso {
+		res, err = enrollclient.EnrollSSO(ctx, enrollclient.SSOParams{
+			GatewayURL: *gateway, Layout: layout,
+			RequestedName: *name, RequestedGroups: splitCSV(*groups),
+			PinnedConfigPub: pinned, PollTimeout: *timeout, SSOWait: *ssoWait,
+		})
+	} else {
+		res, err = enrollclient.Enroll(ctx, enrollclient.Params{
+			GatewayURL: *gateway, JoinKey: *joinKey, AWSSigV4: *awsSigV4, Region: *region, Layout: layout,
+			RequestedName: *name, RequestedGroups: splitCSV(*groups),
+			PinnedConfigPub: pinned, PollTimeout: *timeout,
+		})
+	}
 	if err != nil {
 		fatalf("enroll: %v", err)
 	}
@@ -198,6 +218,15 @@ func cmdEnroll(args []string) {
 		fmt.Printf("  wrote %s, %s, %s\n", layout.HostCert(), layout.CABundle(), layout.Config())
 		fmt.Printf("  start the node: pilot supervise -config %s\n", layout.Config())
 	case "pending":
+		if *sso {
+			// SSO admission defaults to PENDING (S8): the assertion was accepted and the
+			// enrollment is queued for an admin to approve. Not an error — exit 0.
+			fmt.Println("enroll --sso: submitted — awaiting admin approval.")
+			fmt.Println("  Your SSO sign-in was accepted and the enrollment is queued. A certificate")
+			fmt.Println("  is issued only after an admin approves it. Re-run `pilot enroll --sso` later")
+			fmt.Println("  to fetch the bundle once approved (no second sign-in is needed).")
+			return
+		}
 		fmt.Println("enroll: submitted — awaiting manual approval.")
 		fmt.Println("  This enrollment requires an admin to approve it before a certificate is")
 		fmt.Println("  issued. Re-run enroll later to fetch the bundle once it's approved.")
