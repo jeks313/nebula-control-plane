@@ -141,10 +141,24 @@ resource "aws_security_group" "gateway_internal_nlb" {
     protocol        = "tcp"
     security_groups = [aws_security_group.harbor.id]
   }
+  ingress {
+    description     = "Scrape /metrics - monitoring node ONLY (Prometheus over the internal NLB)"
+    from_port       = var.gateway_obs_port
+    to_port         = var.gateway_obs_port
+    protocol        = "tcp"
+    security_groups = [aws_security_group.monitoring.id]
+  }
   egress {
     description = "Forward enroll+collect to the gateway tasks (edge subnet)"
     from_port   = var.gateway_port
     to_port     = var.collect_port
+    protocol    = "tcp"
+    cidr_blocks = [local.tier_cidr["edge"]]
+  }
+  egress {
+    description = "Forward /metrics scrapes to the gateway tasks (edge subnet)"
+    from_port   = var.gateway_obs_port
+    to_port     = var.gateway_obs_port
     protocol    = "tcp"
     cidr_blocks = [local.tier_cidr["edge"]]
   }
@@ -170,6 +184,13 @@ resource "aws_security_group" "gateway_task" {
     description     = "Enroll + collect from the internal NLB"
     from_port       = var.gateway_port
     to_port         = var.collect_port
+    protocol        = "tcp"
+    security_groups = [aws_security_group.gateway_internal_nlb[0].id]
+  }
+  ingress {
+    description     = "Scrape /metrics from the internal NLB (Prometheus)"
+    from_port       = var.gateway_obs_port
+    to_port         = var.gateway_obs_port
     protocol        = "tcp"
     security_groups = [aws_security_group.gateway_internal_nlb[0].id]
   }
@@ -305,12 +326,13 @@ resource "aws_lb_listener" "collect" {
 # Gateway observability (/metrics) via the INTERNAL NLB — a stable scrape target for Prometheus,
 # since Fargate task IPs are dynamic. Plaintext HTTP obs port (never the public enroll NLB).
 resource "aws_lb_target_group" "gateway_obs" {
-  count       = local.gw_fargate
-  name_prefix = "ncpob-"
-  port        = var.gateway_obs_port
-  protocol    = "TCP"
-  vpc_id      = aws_vpc.main.id
-  target_type = "ip"
+  count              = local.gw_fargate
+  name_prefix        = "ncpob-"
+  port               = var.gateway_obs_port
+  protocol           = "TCP"
+  vpc_id             = aws_vpc.main.id
+  target_type        = "ip"
+  preserve_client_ip = false # the NLB is the source to the task; gateway_task SG allows the NLB SG
   health_check {
     protocol = "HTTP"
     path     = "/healthz"
@@ -352,6 +374,7 @@ resource "aws_ecs_task_definition" "gateway" {
     portMappings = [
       { containerPort = var.gateway_port, protocol = "tcp" },
       { containerPort = var.collect_port, protocol = "tcp" },
+      { containerPort = var.gateway_obs_port, protocol = "tcp" }, # /metrics, fronted by the internal NLB
     ]
     # Operational (non-secret) flags — the shell-less distroless binary gets them as `command`
     # args. Enroll TLS posture: auto-TLS (the gateway's own Let's Encrypt cert via ACME DNS-01)
