@@ -153,7 +153,7 @@ func main() {
 	}
 	gwCfg.SSO = ssoCfg
 	if ssoCfg != nil {
-		log.Info("gateway SSO enrollment portal enabled", "acs", *ssoF.acsURL, "routes", "/v1/sso/start /v1/sso/acs")
+		log.Info("gateway SSO enrollment portal enabled", "acs", envOr(envSSOACSURL, *ssoF.acsURL), "routes", "/v1/sso/start /v1/sso/acs")
 	}
 	gw := gateway.New(gwCfg)
 

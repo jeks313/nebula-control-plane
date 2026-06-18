@@ -28,6 +28,22 @@ resource "aws_secretsmanager_secret_version" "harbor_config" {
     queue_key_b64           = "" # admin-api local issuance/approval-queue key
     gw_collect_cert_pem     = "" # the gateway's mTLS server cert harbor pins
     acme_cache_tgz_b64      = "" # tar.gz (base64) of ~/ncp/acme — the LE account + issued cert, so recover reuses it
+    # ── SSO enrollment material (ADR 0004, OPTIONAL) ─────────────────────────────
+    # Empty by default => SSO off => recover reconstructs the same (SSO-disabled) gateway +
+    # Core it had at genesis. When the operator enables SSO, the bootstrap snapshots this
+    # material here so MODE=recover restores it EXACTLY (the assertion keypair Core pins +
+    # the gateway signs with, the STABLE SP keypair the IdP app pins, the IdP metadata, and
+    # the ACS/entity/issuer knobs). Without it, a recovered gateway would lose its SP identity
+    # (the IdP app pins the SP cert) and a recovered Core would lose the pinned assertion key.
+    sso_assert_priv_pem = "" # genesis sso-assert.key — the gateway's assertion-signing PRIVATE half (S6)
+    sso_assert_pub_pem  = "" # genesis sso-assert.pub — the PUBLIC half Core pins (-sso-assert-pub)
+    sso_sp_cert_pem     = "" # the STABLE SAML SP signing cert (the IdP app pins it; minted once at genesis)
+    sso_sp_key_pem      = "" # the SAML SP signing key
+    sso_idp_metadata    = "" # the enrollment-portal SAML app's IdP metadata XML
+    sso_acs_url         = "" # PUBLIC ACS URL (presence is the gateway SSO trigger)
+    sso_entity_id       = "" # SAML SP entity id (the enrollment-portal app's Identifier)
+    sso_issuer          = "" # assertion realm (iss), fed to Core's usertrust.Match
+    sso_groups_attr     = "" # SAML group-claim attribute (empty => the gateway's "groups" default)
   })
   lifecycle {
     ignore_changes = [secret_string] # the bootstrap owns the real values (placeholder only at create)

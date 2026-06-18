@@ -47,6 +47,20 @@ resource "aws_secretsmanager_secret_version" "gateway" {
     collect_cert_pem  = "" # the gateway's mTLS server cert (its leaf is pinned in Harbor's registry)
     collect_key_pem   = "" # its key
     harbor_client_pem = "" # Harbor's pinned client cert
+    # ── SSO enrollment portal (ADR 0004, OPTIONAL) ───────────────────────────────
+    # All empty by default => the portal stays DISABLED (cmd/gateway/sso.go is
+    # fail-closed-disabled: nil Config.SSO unless sso_acs_url is set), so the gateway is
+    # byte-for-behavior unchanged. The bootstrap owns the real values (it distributes the
+    # genesis-minted assertion private key + the SP keypair, and threads the operator's IdP
+    # metadata + ACS/entity/issuer knobs). sso_acs_url is the TRIGGER: its presence enables SSO.
+    sso_acs_url        = "" # PUBLIC ACS URL, e.g. https://<gateway>/v1/sso/acs — presence ENABLES SSO
+    sso_entity_id      = "" # SAML SP entity id (the enrollment-portal app's Identifier in the IdP)
+    sso_issuer         = "" # assertion realm (iss), fed to Core's usertrust.Match
+    sso_groups_attr    = "" # SAML group-claim attribute (empty => the gateway's "groups" default)
+    sso_idp_metadata   = "" # the enrollment-portal SAML app's IdP metadata XML
+    sso_assert_key_pem = "" # genesis sso-assert.key — the gateway's assertion-signing PRIVATE half (S6)
+    sso_sp_cert_pem    = "" # the STABLE SAML SP signing cert (the IdP app pins it; minted once at genesis)
+    sso_sp_key_pem     = "" # the SAML SP signing key
   })
   lifecycle {
     ignore_changes = [secret_string] # the bootstrap owns the real values
@@ -402,6 +416,17 @@ resource "aws_ecs_task_definition" "gateway" {
         { name = "NCP_GW_COLLECT_CERT_PEM", valueFrom = "${aws_secretsmanager_secret.gateway[0].arn}:collect_cert_pem::" },
         { name = "NCP_GW_COLLECT_KEY_PEM", valueFrom = "${aws_secretsmanager_secret.gateway[0].arn}:collect_key_pem::" },
         { name = "NCP_GW_HARBOR_CLIENT_PEM", valueFrom = "${aws_secretsmanager_secret.gateway[0].arn}:harbor_client_pem::" },
+        # SSO enrollment portal (ADR 0004) — every field is "" in the placeholder secret, so
+        # the gateway sees empty env vars and stays fail-closed-disabled (NCP_GW_SSO_ACS_URL
+        # empty => Config.SSO nil; no behavior change). The bootstrap populates them to enable.
+        { name = "NCP_GW_SSO_ACS_URL", valueFrom = "${aws_secretsmanager_secret.gateway[0].arn}:sso_acs_url::" },
+        { name = "NCP_GW_SSO_ENTITY_ID", valueFrom = "${aws_secretsmanager_secret.gateway[0].arn}:sso_entity_id::" },
+        { name = "NCP_GW_SSO_ISSUER", valueFrom = "${aws_secretsmanager_secret.gateway[0].arn}:sso_issuer::" },
+        { name = "NCP_GW_SSO_GROUPS_ATTR", valueFrom = "${aws_secretsmanager_secret.gateway[0].arn}:sso_groups_attr::" },
+        { name = "NCP_GW_SSO_IDP_METADATA", valueFrom = "${aws_secretsmanager_secret.gateway[0].arn}:sso_idp_metadata::" },
+        { name = "NCP_GW_SSO_ASSERT_KEY_PEM", valueFrom = "${aws_secretsmanager_secret.gateway[0].arn}:sso_assert_key_pem::" },
+        { name = "NCP_GW_SSO_SP_CERT_PEM", valueFrom = "${aws_secretsmanager_secret.gateway[0].arn}:sso_sp_cert_pem::" },
+        { name = "NCP_GW_SSO_SP_KEY_PEM", valueFrom = "${aws_secretsmanager_secret.gateway[0].arn}:sso_sp_key_pem::" },
       ],
       local.gateway_acme == 1 ? [
         { name = "NCP_ACME_CLOUDFLARE_TOKEN", valueFrom = data.aws_secretsmanager_secret.cloudflare_token[0].arn },

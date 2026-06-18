@@ -58,6 +58,33 @@ MOCK_IDP_PORT="${MOCK_IDP_PORT:-8446}"           # dev mock-IdP for the console 
 COLLECT_OBS_PORT="${COLLECT_OBS_PORT:-9445}"     # harbor collect /metrics + /healthz (Phase 7b), mesh-only on the overlay
 DB_BACKEND="${DB_BACKEND:-sqlite}"               # sqlite (local file on harbor) | aurora (managed Postgres; rotating creds via Secrets Manager, no static password)
 
+# ── SSO enrollment portal (ADR 0004, OPTIONAL — default OFF) ──────────────────
+# SSO is wired into the SAME off-mesh gateway (ADR 0009: no new tier). It is DISABLED unless
+# the operator sets SSO_ACS_URL — exactly mirroring the gateway's own fail-closed-disabled
+# trigger (cmd/gateway/sso.go: nil Config.SSO when -sso-acs-url/$NCP_GW_SSO_ACS_URL is empty).
+# When SSO_ACS_URL is empty, NONE of the SSO threading below fires: the gateway secret's SSO
+# fields stay empty, no -sso-assert-pub/-usertrust-db is added to Core, and the recover bundle
+# gains only empty SSO fields — so genesis/recover/gateway/Core are byte-for-behavior unchanged.
+#
+# To ENABLE (after registering a SECOND SAML app in the IdP whose Reply URL = SSO_ACS_URL —
+# see ADR 0004 "Operator setup"):
+#   SSO_ACS_URL          PUBLIC gateway ACS, e.g. https://<gateway-domain>/v1/sso/acs  (the TRIGGER)
+#   SSO_ENTITY_ID        the SP entity id (the enrollment-portal app's Identifier; DISTINCT from the console's)
+#   SSO_ISSUER           the assertion realm (iss), fed to Core's usertrust.Match (the IdP's issuer)
+#   SSO_GROUPS_ATTR      (optional) the SAML group-claim attribute (default: the gateway's "groups")
+#   SSO_IDP_METADATA_URL or SSO_IDP_METADATA_FILE   the enrollment-portal app's IdP SAML metadata
+# The genesis-minted assertion keypair + a genesis-minted STABLE SP keypair are distributed
+# automatically (no operator input). A user-trust config (harbor usertrust publish / the console)
+# is still required for SSO to reach issuance — that is a separate operator step.
+SSO_ACS_URL="${SSO_ACS_URL:-}"
+SSO_ENTITY_ID="${SSO_ENTITY_ID:-}"
+SSO_ISSUER="${SSO_ISSUER:-}"
+SSO_GROUPS_ATTR="${SSO_GROUPS_ATTR:-}"
+SSO_IDP_METADATA_URL="${SSO_IDP_METADATA_URL:-}"
+SSO_IDP_METADATA_FILE="${SSO_IDP_METADATA_FILE:-}"
+SSO_ENABLED=0
+[[ -n "$SSO_ACS_URL" ]] && SSO_ENABLED=1
+
 for t in terraform jq go ssh scp openssl aws session-manager-plugin; do command -v "$t" >/dev/null || { echo "missing tool: $t" >&2; exit 1; }; done
 [[ -f "$SSH_KEY" ]] || { echo "ssh private key not found: $SSH_KEY (set SSH_KEY=...)" >&2; exit 1; }
 
@@ -189,6 +216,28 @@ fi
 # UDP-NLB preserve_client_ip behaviour is the thing this spike proves on a live apply.
 [[ "$LIGHTHOUSE_RUNTIME" == "fargate" ]] && echo "    NOTE: lighthouse on Fargate (spike) — host key generated off-box + injected"
 
+# SSO (ADR 0004): when enabled at GENESIS, the operator MUST supply the second SAML app's IdP
+# metadata (URL or file) and the SP entity id + assertion realm — fail closed before any work
+# rather than launch a half-configured portal (the gateway itself also fails closed,
+# cmd/gateway/sso.go). On RECOVER this is skipped: the SSO state + material come SOLELY from the
+# bundle (re-derived below), so the operator need not re-supply the env knobs.
+if [[ "$MODE" != "recover" && "$SSO_ENABLED" -eq 1 ]]; then
+  [[ -n "$SSO_IDP_METADATA_URL" || -n "$SSO_IDP_METADATA_FILE" ]] \
+    || { echo "FATAL: SSO_ACS_URL is set (SSO enabled) but no IdP metadata — set SSO_IDP_METADATA_URL or SSO_IDP_METADATA_FILE (the SECOND SAML app's metadata; see ADR 0004 'Operator setup')." >&2; exit 1; }
+  [[ -z "$SSO_IDP_METADATA_FILE" || -f "$SSO_IDP_METADATA_FILE" ]] \
+    || { echo "FATAL: SSO_IDP_METADATA_FILE=$SSO_IDP_METADATA_FILE not found" >&2; exit 1; }
+  [[ -n "$SSO_ENTITY_ID" ]] \
+    || { echo "FATAL: SSO enabled but SSO_ENTITY_ID is unset (the enrollment-portal SP entity id; MUST be distinct from the console's -saml-entity-id — ADR 0004)." >&2; exit 1; }
+  [[ -n "$SSO_ISSUER" ]] \
+    || { echo "FATAL: SSO enabled but SSO_ISSUER is unset (the assertion realm fed to Core's usertrust.Match — the IdP issuer)." >&2; exit 1; }
+  # The metadata is embedded into the gateway secret + the recover bundle (so recover is exact);
+  # fetching a URL needs curl. (A FILE needs nothing beyond the -f check above.)
+  if [[ -z "$SSO_IDP_METADATA_FILE" ]]; then
+    command -v curl >/dev/null || { echo "missing tool (SSO_IDP_METADATA_URL set, fetches the IdP metadata): curl — or supply SSO_IDP_METADATA_FILE instead" >&2; exit 1; }
+  fi
+  echo "    NOTE: SSO enrollment portal ENABLED — ACS=$SSO_ACS_URL entity-id=$SSO_ENTITY_ID issuer=$SSO_ISSUER"
+fi
+
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 LH="$LH_OVERLAY=$LH_ADDR"
 
@@ -255,6 +304,29 @@ if [[ "$MODE" == "recover" ]]; then
   if [[ -n "$ACMEB64" ]]; then
     printf '%s' "$ACMEB64" | base64 -d | rsh "$HB_ID" "umask 077; mkdir -p ~/ncp && tar -xzf - -C ~/ncp" &&
       echo "    restored the ACME cert cache (harbor reuses its existing LE cert; no re-issuance)"
+  fi
+  # SSO (ADR 0004): if the bundle carries SSO material (sso_acs_url non-empty => SSO was on at
+  # genesis), restore it byte-identical and re-enable the downstream threading. The recover-time
+  # SSO state is driven SOLELY by the bundle (the operator env knobs are NOT needed on recover) —
+  # so a recovered control plane reconstructs SSO exactly as genesis left it. An empty sso_acs_url
+  # (the default / SSO-off case) leaves SSO_ENABLED=0 and nothing SSO-related is touched.
+  SSO_ACS_URL="$(jq -r '.sso_acs_url // ""' <<<"$BUNDLE")"
+  if [[ -n "$SSO_ACS_URL" ]]; then
+    SSO_ENABLED=1
+    SSO_ENTITY_ID="$(jq -r '.sso_entity_id // ""' <<<"$BUNDLE")"
+    SSO_ISSUER="$(jq -r '.sso_issuer // ""' <<<"$BUNDLE")"
+    SSO_GROUPS_ATTR="$(jq -r '.sso_groups_attr // ""' <<<"$BUNDLE")"
+    jq -r '.sso_assert_priv_pem' <<<"$BUNDLE" >"$WORK/sso-assert.key"
+    jq -r '.sso_assert_pub_pem'  <<<"$BUNDLE" >"$WORK/sso-assert.pub"
+    jq -r '.sso_sp_cert_pem'     <<<"$BUNDLE" >"$WORK/sso-sp.crt"
+    jq -r '.sso_sp_key_pem'      <<<"$BUNDLE" >"$WORK/sso-sp.key"
+    jq -r '.sso_idp_metadata'    <<<"$BUNDLE" >"$WORK/sso-idp-metadata.xml"
+    # Core pins the assertion PUBLIC half from a file on the box; restore it (genesis writes it
+    # under ~/ncp/genesis; the collect/core/admin invocations below read $G/sso-assert.pub).
+    jq -r '.sso_assert_pub_pem' <<<"$BUNDLE" | rsh "$HB_ID" "umask 077; cat > ~/ncp/genesis/sso-assert.pub"
+    echo "    restored SSO material (assertion keypair + SP keypair + IdP metadata + ACS/entity/issuer knobs) — SSO re-enabled"
+  else
+    SSO_ENABLED=0
   fi
   cp "$WORK/config-signing.pub" "$ROOT/deploy/prod/terraform/app/config-signing.pub" # the pin for clients
   echo "    restored: ca.crt + config-signing pin + harbor identity (key/cert/config) + hmac + collect mTLS + queue key"
@@ -329,6 +401,41 @@ rcp "$SSH_USER@$HB_ID:ncp/genesis/lighthouse-1.crt"   "$WORK/lighthouse-1.crt"
 rcp "$SSH_USER@$HB_ID:ncp/genesis/harbor-core.crt"    "$WORK/harbor-core.crt"
 rcp "$SSH_USER@$HB_ID:ncp/genesis/config-signing.pub" "$WORK/config-signing.pub"
 echo "    genesis done; pulled ca.crt + lighthouse + harbor-core certs + config-signing pin"
+
+# ── 3d. SSO material (ADR 0004) — only when SSO is enabled ───────────────────
+# Genesis ALWAYS mints the dedicated assertion keypair (sso-assert.key/.pub, decision B15),
+# but we only DISTRIBUTE it (and mint the SP keypair) when the operator turned SSO on. The
+# assertion private half goes to the gateway, the public half is pinned on Core. The SAML SP
+# signing keypair must be STABLE + recoverable (the IdP app pins the SP cert) — so it is minted
+# ONCE here at genesis (a self-signed RSA pair, what crewjam SAML requires; the assertion key is
+# ECDSA and lives in genesis, the SP key is RSA and lives in the recover bundle) and snapshotted
+# into the harbor-config bundle alongside the other keys, so MODE=recover restores it byte-identical.
+if [[ "$SSO_ENABLED" -eq 1 ]]; then
+  echo "==> [harbor] SSO: pull the genesis assertion keypair + mint the STABLE SAML SP keypair"
+  rcp "$SSH_USER@$HB_ID:ncp/genesis/sso-assert.key" "$WORK/sso-assert.key"   # gateway's assertion-signing PRIVATE half (S6)
+  rcp "$SSH_USER@$HB_ID:ncp/genesis/sso-assert.pub" "$WORK/sso-assert.pub"   # Core pins this PUBLIC half
+  # Mint the SP keypair on harbor (it has openssl); RSA-2048 self-signed, long-lived (the IdP
+  # app pins it, so it must not rotate on a task restart). Idempotent: keep an existing one.
+  rsh "$HB_ID" "set -e
+    cd ~/ncp; umask 077
+    if [ ! -f sso-sp.key ] || [ ! -f sso-sp.crt ]; then
+      openssl req -x509 -newkey rsa:2048 -keyout sso-sp.key -out sso-sp.crt -days 3650 -nodes \
+        -subj '/CN=ncp-sso-portal-sp' >/dev/null 2>&1
+      chmod 600 sso-sp.key
+    fi
+    echo ok"
+  rcp "$SSH_USER@$HB_ID:ncp/sso-sp.crt" "$WORK/sso-sp.crt"
+  rcp "$SSH_USER@$HB_ID:ncp/sso-sp.key" "$WORK/sso-sp.key"
+  # The operator-supplied IdP metadata: stage it into $WORK so the gateway-secret assembly +
+  # the recover-bundle snapshot can embed it verbatim. From a file, or fetched from the URL.
+  if [[ -n "$SSO_IDP_METADATA_FILE" ]]; then
+    cp "$SSO_IDP_METADATA_FILE" "$WORK/sso-idp-metadata.xml"
+  else
+    curl -fsSL "$SSO_IDP_METADATA_URL" -o "$WORK/sso-idp-metadata.xml" \
+      || { echo "FATAL: failed to fetch SSO_IDP_METADATA_URL=$SSO_IDP_METADATA_URL" >&2; exit 1; }
+  fi
+  echo "    SSO material ready: assertion keypair (genesis) + SP keypair (minted, stable) + IdP metadata"
+fi
 
 # ── 4. lighthouse: install issued cert + start ──────────────────────────────
 if [[ "$LIGHTHOUSE_RUNTIME" == "ec2" ]]; then
@@ -429,6 +536,28 @@ if [[ "$GATEWAY_RUNTIME" == "ec2" ]]; then
   echo "==> [gateway/ec2] mint server identity + start the off-mesh gateway (enroll :$GW_PORT, collect :$COLLECT_PORT)"
   rcp "$WORK/harbor-collect.crt" "$SSH_USER@$GW_ID:/tmp/harbor-collect.crt"
   rcp "$WORK/hmac.b64"           "$SSH_USER@$GW_ID:/tmp/hmac.b64"
+  # SSO (ADR 0004) — deliver the portal material as 0600/0644 files (NOT argv; the EC2 gateway
+  # already reads its secrets from files) and add the -sso-* flags. Empty/SSO-off => GW_SSO_FLAGS
+  # stays "", the files are never delivered, and the gateway start line is byte-for-byte unchanged.
+  GW_SSO_FLAGS=""
+  if [[ "$SSO_ENABLED" -eq 1 ]]; then
+    rcp "$WORK/sso-assert.key"       "$SSH_USER@$GW_ID:/tmp/sso-assert.key"
+    rcp "$WORK/sso-sp.crt"           "$SSH_USER@$GW_ID:/tmp/sso-sp.crt"
+    rcp "$WORK/sso-sp.key"           "$SSH_USER@$GW_ID:/tmp/sso-sp.key"
+    rcp "$WORK/sso-idp-metadata.xml" "$SSH_USER@$GW_ID:/tmp/sso-idp-metadata.xml"
+    rsh "$GW_ID" "set -e
+      sudo install -d -o $SSH_USER -g $SSH_USER -m0750 /opt/ncp-gw
+      install -m0600 /tmp/sso-assert.key /opt/ncp-gw/sso-assert.key
+      install -m0600 /tmp/sso-sp.key /opt/ncp-gw/sso-sp.key
+      install -m0644 /tmp/sso-sp.crt /opt/ncp-gw/sso-sp.crt
+      install -m0644 /tmp/sso-idp-metadata.xml /opt/ncp-gw/sso-idp-metadata.xml
+      rm -f /tmp/sso-assert.key /tmp/sso-sp.key /tmp/sso-sp.crt /tmp/sso-idp-metadata.xml"
+    # URLs/strings single-quoted so the remote shell keeps them literal.
+    GW_SSO_FLAGS="-sso-acs-url '$SSO_ACS_URL' -sso-entity-id '$SSO_ENTITY_ID' -sso-issuer '$SSO_ISSUER' \
+      -sso-assert-key /opt/ncp-gw/sso-assert.key -sso-sp-cert /opt/ncp-gw/sso-sp.crt -sso-sp-key /opt/ncp-gw/sso-sp.key \
+      -sso-idp-metadata-file /opt/ncp-gw/sso-idp-metadata.xml"
+    [[ -n "$SSO_GROUPS_ATTR" ]] && GW_SSO_FLAGS="$GW_SSO_FLAGS -sso-groups-attr '$SSO_GROUPS_ATTR'"
+  fi
   rsh "$GW_ID" "set -e
     sudo install -d -o $SSH_USER -g $SSH_USER -m0750 /opt/ncp-gw
     cd /opt/ncp-gw; umask 077
@@ -441,9 +570,9 @@ if [[ "$GATEWAY_RUNTIME" == "ec2" ]]; then
       -insecure -addr 0.0.0.0:$GW_PORT -hmac-key /opt/ncp-gw/hmac.b64 \
       -queue-dsn /opt/ncp-gw/queue.db -queue-key /opt/ncp-gw/qkey.b64 \
       -collect-addr 0.0.0.0:$COLLECT_PORT -collect-cert /opt/ncp-gw/gw-collect.crt \
-      -collect-key /opt/ncp-gw/gw-collect.key -harbor-client-cert /opt/ncp-gw/harbor-collect.crt >/dev/null
+      -collect-key /opt/ncp-gw/gw-collect.key -harbor-client-cert /opt/ncp-gw/harbor-collect.crt $GW_SSO_FLAGS >/dev/null
     cat gw-collect.crt" > "$WORK/gw-collect.crt"
-  echo "    gateway up (off-mesh EC2 node; public enroll + Harbor-only collect)"
+  echo "    gateway up (off-mesh EC2 node; public enroll + Harbor-only collect$( [[ "$SSO_ENABLED" -eq 1 ]] && echo ' + SSO portal'))"
 else
   # Fargate: no node to start. Mint the gateway's server identity + queue key (on
   # harbor — it has the gateway binary), build/push the image, populate the config
@@ -462,14 +591,33 @@ else
   bash "$ROOT/deploy/prod/fargate/build-push.sh" gateway
 
   echo "==> [gateway/fargate] populate the config secret ${NAME_PREFIX}-gateway-config + force the ECS deploy"
+  # SSO (ADR 0004) — when enabled, fold the portal material into the SAME config secret as
+  # NCP_GW_SSO_* fields (the terraform task def injects each as an env var; cmd/gateway/sso.go
+  # reads them env-first). When SSO is OFF, GW_SSO_JSON is the empty object {} so the resulting
+  # secret is byte-for-byte the pre-SSO five-field object — no behavior change.
+  GW_SSO_JSON='{}'
+  if [[ "$SSO_ENABLED" -eq 1 ]]; then
+    GW_SSO_JSON="$(jq -n \
+      --rawfile akey "$WORK/sso-assert.key" \
+      --rawfile spc  "$WORK/sso-sp.crt" \
+      --rawfile spk  "$WORK/sso-sp.key" \
+      --rawfile idp  "$WORK/sso-idp-metadata.xml" \
+      --arg acs    "$SSO_ACS_URL" \
+      --arg ent    "$SSO_ENTITY_ID" \
+      --arg iss    "$SSO_ISSUER" \
+      --arg grp    "$SSO_GROUPS_ATTR" \
+      '{sso_acs_url:$acs, sso_entity_id:$ent, sso_issuer:$iss, sso_groups_attr:$grp,
+        sso_idp_metadata:$idp, sso_assert_key_pem:$akey, sso_sp_cert_pem:$spc, sso_sp_key_pem:$spk}')"
+  fi
   SECRET_JSON="$(jq -n \
     --rawfile hmac "$WORK/hmac.b64" \
     --rawfile qkey "$WORK/gw-qkey.b64" \
     --rawfile cert "$WORK/gw-collect.crt" \
     --rawfile key  "$WORK/gw-collect.key" \
     --rawfile hcli "$WORK/harbor-collect.crt" \
+    --argjson sso "$GW_SSO_JSON" \
     '{hmac_key_b64:($hmac|rtrimstr("\n")), queue_key_b64:($qkey|rtrimstr("\n")),
-      collect_cert_pem:$cert, collect_key_pem:$key, harbor_client_pem:$hcli}')"
+      collect_cert_pem:$cert, collect_key_pem:$key, harbor_client_pem:$hcli} + $sso')"
   aws secretsmanager put-secret-value --region "$TF_REGION" \
     --secret-id "${NAME_PREFIX}-gateway-config" --secret-string "$SECRET_JSON" >/dev/null
   aws ecs update-service --region "$TF_REGION" \
@@ -477,6 +625,15 @@ else
   echo "    gateway image pushed, secret populated, ECS deployment forced (off-mesh Fargate; NLB enroll + Harbor-only collect)"
 fi
 fi # end step 7 mint+gateway (genesis only)
+
+# Core SSO flags (ADR 0004) — added to ALL THREE issuing consumers (collect runs processSSO;
+# core-api + admin-api go through buildConsumer / the approve path). -sso-assert-pub pins the
+# gateway's assertion-signing PUBLIC half (genesis sso-assert.pub on the box); -usertrust-db
+# enables the LIVE per-enrollment user-trust getter. Empty/SSO-off => CORE_SSO_FLAGS stays ""
+# and every invocation is byte-for-byte unchanged (Core then denies any SSO enrollment with the
+# existing terminal ErrSSONotConfigured — fail closed). \$G expands remotely to ~/ncp/genesis.
+CORE_SSO_FLAGS=""
+[[ "$SSO_ENABLED" -eq 1 ]] && CORE_SSO_FLAGS="-sso-assert-pub \$G/sso-assert.pub -usertrust-db"
 
 echo "==> [harbor] register the gateway + start the pull collector"
 rcp "$WORK/gw-collect.crt" "$SSH_USER@$HB_ID:/tmp/gw-collect.crt"
@@ -496,7 +653,7 @@ rsh "$HB_ID" "set -e
   sudo systemd-run --uid=$SSH_USER --gid=$SSH_USER --unit ncp-collect --collect /usr/local/bin/harbor collect -pool '$POOL' \
     $HARBOR_DB_FLAGS -ca-cert \$G/ca.crt $SIGN_BACKEND \
     -hmac-key ~/ncp/hmac.b64 -lighthouse '$LH' -cloudtrust-db -obs-addr $HARBOR_OVERLAY:$COLLECT_OBS_PORT \
-    -client-cert ~/ncp/harbor-collect.crt -client-key ~/ncp/harbor-collect.key >/dev/null
+    -client-cert ~/ncp/harbor-collect.crt -client-key ~/ncp/harbor-collect.key $CORE_SSO_FLAGS >/dev/null
   echo registered"
 echo "    gateway registered + collector pulling (attestation enabled)"
 
@@ -618,14 +775,15 @@ rsh "$HB_ID" "set -e
   sudo systemd-run --uid=$SSH_USER --gid=$SSH_USER --unit ncp-core --collect /usr/local/bin/harbor core-api \
     $HARBOR_DB_FLAGS -ca-cert \$G/ca.crt $SIGN_BACKEND \
     -pool '$POOL' -lighthouse '$LH' -host-cert /etc/nebula/host.crt \
-    -addr $HARBOR_OVERLAY:$CORE_PORT$DB_POOL_FLAGS${ACME_FLAGS:+ $ACME_FLAGS} >/dev/null
+    -addr $HARBOR_OVERLAY:$CORE_PORT$DB_POOL_FLAGS${CORE_SSO_FLAGS:+ $CORE_SSO_FLAGS}${ACME_FLAGS:+ $ACME_FLAGS} >/dev/null
   # admin console: issuance mode (so it can approve enrollments) + SAML/mock IdP. $ADMIN_CAP grants
-  # CAP_NET_BIND_SERVICE when the console is on a privileged port (default 443).
+  # CAP_NET_BIND_SERVICE when the console is on a privileged port (default 443). $CORE_SSO_FLAGS
+  # adds -sso-assert-pub + -usertrust-db on the approve path so a pending SSO host can be approved.
   sudo systemd-run --uid=$SSH_USER --gid=$SSH_USER$ADMIN_CAP --unit ncp-admin --collect /usr/local/bin/harbor admin-api \
     $HARBOR_DB_FLAGS -ca-cert \$G/ca.crt $SIGN_BACKEND \
     -hmac-key ~/ncp/hmac.b64 -queue-dsn \$QDSN -queue-key ~/ncp/queue.b64 -pool '$POOL' \
     -addr $HARBOR_OVERLAY:$ADMIN_PORT -base-url $ADMIN_URL \
-    $IDP_FLAGS${ACME_FLAGS:+ $ACME_FLAGS} >/dev/null
+    $IDP_FLAGS${CORE_SSO_FLAGS:+ $CORE_SSO_FLAGS}${ACME_FLAGS:+ $ACME_FLAGS} >/dev/null
   echo ok"
 cp "$WORK/config-signing.pub" "$ROOT/deploy/prod/terraform/app/config-signing.pub"  # gitignored; the pin for clients
 echo "    core-api + admin console up"
@@ -655,6 +813,23 @@ if [[ "$MODE" != "recover" && -n "$HARBOR_CONFIG_ARN" ]]; then
   # bundle; empty when no cert has been obtained yet (recover then issues fresh, now that the
   # autotls propagation check uses public resolvers — see internal/autotls).
   rsh "$HB_ID" 'cd ~/ncp && tar -czf - acme 2>/dev/null | base64 -w0 || true' > "$WORK/acme.tgz.b64"
+  # SSO (ADR 0004) — snapshot the portal material so MODE=recover reconstructs SSO byte-identical:
+  # the assertion keypair (Core pins the public half, the gateway signs with the private half), the
+  # STABLE SP keypair (the IdP app pins the SP cert — it MUST survive a recreate), the IdP metadata,
+  # and the ACS/entity/issuer/groups knobs. When SSO is OFF, SSO_BUNDLE_JSON is {} so the bundle is
+  # byte-for-byte the pre-SSO object (recover then sees an empty sso_acs_url => SSO stays off).
+  SSO_BUNDLE_JSON='{}'
+  if [[ "$SSO_ENABLED" -eq 1 ]]; then
+    SSO_BUNDLE_JSON="$(jq -n \
+      --rawfile apriv "$WORK/sso-assert.key" \
+      --rawfile apub  "$WORK/sso-assert.pub" \
+      --rawfile spc   "$WORK/sso-sp.crt" \
+      --rawfile spk   "$WORK/sso-sp.key" \
+      --rawfile idp   "$WORK/sso-idp-metadata.xml" \
+      --arg acs "$SSO_ACS_URL" --arg ent "$SSO_ENTITY_ID" --arg iss "$SSO_ISSUER" --arg grp "$SSO_GROUPS_ATTR" \
+      '{sso_assert_priv_pem:$apriv, sso_assert_pub_pem:$apub, sso_sp_cert_pem:$spc, sso_sp_key_pem:$spk,
+        sso_idp_metadata:$idp, sso_acs_url:$acs, sso_entity_id:$ent, sso_issuer:$iss, sso_groups_attr:$grp}')"
+  fi
   # ca.crt, config-signing.pub, harbor-collect.crt, gw-collect.crt, hmac.b64 are already in $WORK.
   HARBOR_BUNDLE_JSON="$(jq -n \
     --rawfile ca     "$WORK/ca.crt" \
@@ -668,13 +843,14 @@ if [[ "$MODE" != "recover" && -n "$HARBOR_CONFIG_ARN" ]]; then
     --rawfile qkey   "$WORK/queue.b64" \
     --rawfile gwcrt  "$WORK/gw-collect.crt" \
     --rawfile acmeb64 "$WORK/acme.tgz.b64" \
+    --argjson sso "$SSO_BUNDLE_JSON" \
     '{ca_crt_pem:$ca, config_signing_pub_pem:$cfgpub, host_key_pem:$hkey, host_crt_pem:$hcrt,
       host_config_yml:$hcfg, hmac_key_b64:($hmac|rtrimstr("\n")), harbor_collect_cert_pem:$hccrt,
       harbor_collect_key_pem:$hckey, queue_key_b64:($qkey|rtrimstr("\n")), gw_collect_cert_pem:$gwcrt,
-      acme_cache_tgz_b64:($acmeb64|rtrimstr("\n"))}')"
+      acme_cache_tgz_b64:($acmeb64|rtrimstr("\n"))} + $sso')"
   aws secretsmanager put-secret-value --region "$TF_REGION" \
     --secret-id "$HARBOR_CONFIG_ARN" --secret-string "$HARBOR_BUNDLE_JSON" >/dev/null
-  echo "    snapshot stored — harbor is recoverable from Secrets Manager + KMS + Aurora"
+  echo "    snapshot stored — harbor is recoverable from Secrets Manager + KMS + Aurora$( [[ "$SSO_ENABLED" -eq 1 ]] && echo ' (incl. SSO material)')"
 fi
 
 # Client-facing hints adapt to harbor's TLS posture (computed CORE_URL/ADMIN_URL above).
@@ -689,6 +865,21 @@ else
   HARBOR_TLS_NOTE=""
   TUNNEL_NOTE="   then browse $ADMIN_URL through the tunnel."
   CLIENT_DNS_NOTE=""
+fi
+
+# SSO status line for the summary. Empty (SSO off, the default) => the banner is byte-identical
+# to the pre-SSO output. When on, remind the operator of the still-manual steps (the AD app +
+# the user-trust config) — without them SSO is wired but cannot reach issuance.
+SSO_NOTE=""
+if [[ "$SSO_ENABLED" -eq 1 ]]; then
+  SSO_NOTE="
+ SSO (ADR 0004)    : enrollment portal ENABLED on the gateway — ACS $SSO_ACS_URL
+                     STILL MANUAL: (1) register the SECOND SAML app in the IdP with
+                       Identifier=$SSO_ENTITY_ID and Reply URL (ACS)=$SSO_ACS_URL (distinct
+                       from the console app); (2) publish a user-trust config mapping AD groups
+                       -> mesh groups + CIDR (\`harbor usertrust publish\` or the console's User
+                       Trust page) — until then every SSO enrollment is denied (fail closed).
+                     Enroll a laptop:  pilot enroll --sso -gateway $GW_URL -config-pub <pin> -name <host>"
 fi
 
 # On recover the cloud-trust step (which sets ACCOUNT/ROLE/REGION from the client IMDS) is skipped —
@@ -710,7 +901,7 @@ cat <<EOF
  Lighthouse        : $LH_OVERLAY @ $LH_ADDR  (pool $POOL)
  Harbor (mesh)     : $HARBOR_OVERLAY  — core-api :$CORE_PORT, console :$ADMIN_PORT (mesh-only)$HARBOR_TLS_NOTE
  Config-signing pin: deploy/prod/terraform/app/config-signing.pub  (give this to clients)
- Cloud-trust       : account $ACCOUNT / role $ROLE -> groups [workloads], auto-issue
+ Cloud-trust       : account $ACCOUNT / role $ROLE -> groups [workloads], auto-issue$SSO_NOTE
 
  Enroll the CLOUD CLIENT — KEYLESS via aws-sigv4 attestation (its IAM role). It's IN the
  VPC, so it enrolls via the INTERNAL gateway URL:
