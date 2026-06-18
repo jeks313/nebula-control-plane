@@ -133,23 +133,26 @@ func gatherInfo(ctx context.Context, meshFilter, meshDir string) nodeInfo {
 	switch {
 	case meshDir != "":
 		// Explicit -dir: report exactly that directory as one mesh, bypassing both the
-		// StateRoot scan and the single-mesh auto-detect.
-		info.Meshes = append(info.Meshes, gatherMeshAt(ctx, filepath.Base(meshDir), meshDir))
+		// StateRoot scan and the single-mesh auto-detect. viaDir: this is a `-dir`
+		// supervise deployment, so introspect its running process for liveness + core URL.
+		info.Meshes = append(info.Meshes, gatherMeshAt(ctx, filepath.Base(meshDir), meshDir, true))
 	case meshFilter != "":
-		// -mesh x: just that mesh under StateRoot (works even before its dir exists).
-		info.Meshes = append(info.Meshes, gatherMeshAt(ctx, meshFilter, filepath.Join(pilotservice.StateRoot, meshFilter)))
+		// -mesh x: just that mesh under StateRoot (works even before its dir exists). A
+		// multi-mesh entry — keep the per-mesh OS service + service.env behavior.
+		info.Meshes = append(info.Meshes, gatherMeshAt(ctx, meshFilter, filepath.Join(pilotservice.StateRoot, meshFilter), false))
 	default:
-		// The multi-mesh StateRoot scan...
+		// The multi-mesh StateRoot scan (per-mesh OS services; not viaDir)...
 		seen := map[string]bool{}
 		for _, m := range infoMeshes("") {
 			base := filepath.Join(pilotservice.StateRoot, m)
 			seen[filepath.Clean(base)] = true
-			info.Meshes = append(info.Meshes, gatherMeshAt(ctx, m, base))
+			info.Meshes = append(info.Meshes, gatherMeshAt(ctx, m, base, false))
 		}
 		// ...plus the conventional single-mesh `-dir` dir, if it holds mesh state and
-		// isn't already covered by a StateRoot entry (the no-double-report guard).
+		// isn't already covered by a StateRoot entry (the no-double-report guard). viaDir:
+		// it's a `-dir` supervise deployment, so introspect the running process.
 		if !seen[filepath.Clean(defaultMeshDir)] && hasMeshState(defaultMeshDir) {
-			info.Meshes = append(info.Meshes, gatherMeshAt(ctx, filepath.Base(defaultMeshDir), defaultMeshDir))
+			info.Meshes = append(info.Meshes, gatherMeshAt(ctx, filepath.Base(defaultMeshDir), defaultMeshDir, true))
 		}
 	}
 
@@ -176,23 +179,48 @@ func hasMeshState(base string) bool {
 	return fileExists(layout.HostCert()) || fileExists(layout.Config())
 }
 
-// gatherMeshAt reads one mesh's local state from baseDir, then layers on the OS service
+// gatherMeshAt reads one mesh's local state from baseDir, then layers on the service
 // state and a best-effort Harbor probe. It splits the pure on-disk reads (readMeshState,
 // testable against any base dir) from the side-effecting OS/network calls. label is the
 // reported mesh name; for a StateRoot mesh it's the mesh id, for a `-dir`/auto-detected
 // single-mesh deployment it's filepath.Base(baseDir) (the StateDir is shown too, so the
 // exact label is secondary).
-func gatherMeshAt(ctx context.Context, label, baseDir string) MeshInfo {
+//
+// viaDir selects how liveness + the core URL are learned:
+//   - viaDir=false (multi-mesh StateRoot/`-mesh` entries): the per-mesh OS service is
+//     queryable by label, so use pilotservice.Status; the core URL comes from service.env.
+//   - viaDir=true (the `-dir` flag + the auto-detected /etc/nebula deployment): there is
+//     no per-mesh OS service to query — instead introspect the running `pilot supervise`
+//     process targeting baseDir for liveness/pid, and fall back to its `-core` flag for
+//     the core URL (config.yml doesn't carry it), so the Harbor probe still runs.
+func gatherMeshAt(ctx context.Context, label, baseDir string, viaDir bool) MeshInfo {
 	mi := readMeshState(baseDir)
 	mi.Mesh = label
 
-	// Local service state (same source as `pilot status`). For a `-dir` deployment the
-	// service label may not match the install's service name — keep it best-effort
-	// (show the lookup error rather than failing; the on-disk identity is the headline).
-	if rep, err := pilotservice.Status(label); err != nil {
-		mi.Service = err.Error()
+	if viaDir {
+		// `-dir` supervise deployment: the misleading multi-mesh pilotservice.Status
+		// (which looks up pilot@<label>) doesn't match it, so derive liveness + core URL
+		// from the running supervise process instead.
+		proc := findSuperviseProc(baseDir)
+		if proc.Running {
+			mi.Service = fmt.Sprintf("active (supervise, pid %d)", proc.PID)
+		} else {
+			mi.Service = "not running (no supervise process for this dir)"
+		}
+		// config.yml doesn't carry the core URL (it's a supervise runtime flag) and a
+		// `-dir` host has no service.env, so adopt the process's `-core` value when
+		// readMeshState found none — this is what lets probeHarbor run below.
+		if mi.CoreURL == "" && proc.Core != "" {
+			mi.CoreURL = proc.Core
+		}
 	} else {
-		mi.Service = rep
+		// Multi-mesh: local service state (same source as `pilot status`). Best-effort —
+		// show the lookup error rather than failing; the on-disk identity is the headline.
+		if rep, err := pilotservice.Status(label); err != nil {
+			mi.Service = err.Error()
+		} else {
+			mi.Service = rep
+		}
 	}
 
 	// Best-effort Harbor reachability.
