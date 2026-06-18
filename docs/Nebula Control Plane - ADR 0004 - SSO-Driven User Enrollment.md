@@ -216,6 +216,17 @@ registration. Two reasons:
    a console-login assertion can never be replayed at the public portal (or vice-versa).
    Sharing one app would collapse that boundary — a real security regression.
 
+**Deployment topology — combined with the gateway, not a separate tier (ADR 0009).** The
+portal is HTTP routes (`/v1/sso/start`, `/v1/sso/acs`) on the **existing off-mesh gateway**
+(`cmd/gateway`, Fargate), enabled iff `-sso-acs-url` is set — **no new container, task, or load
+balancer**. It shares the gateway's public HTTPS surface, so the gateway must run with
+**autotls + a public DNS name**: the browser/IdP POST the SAML response to
+`https://<gateway-domain>/v1/sso/acs`, which needs a publicly-valid cert (the gateway's existing
+Let's-Encrypt / ACME-DNS-01 cert). The gateway task simply gains the `-sso-*` env + the two SSO
+secrets (SAML SP cert/key + the assertion-signing private key) — still **no CA** on the edge.
+Splitting the portal into its own Fargate service later is a pure deploy-topology change (the
+portal is optional gateway config, not a rewrite), and the no-issuance invariant holds either way.
+
 **The new (enrollment-portal) app:**
 - **Identifier (Entity ID)** = the gateway portal's `-sso-entity-id` (distinct from the console's
   `-saml-entity-id`).
