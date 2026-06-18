@@ -47,24 +47,15 @@ var (
 	ErrOutOfPool       = errors.New("ipam: address not in pool")
 )
 
-// IPAM Prometheus metrics (ADR 0010 — "Auto-grow, exhaustion & surfacing").
-// Registered on the default registry at init, scraped like the rest of ncp_*; the
-// capacity/allocated gauges feed utilization (dashboard + >75% warn / >90% crit
-// alerts), and the counters surface auto-grows and exhaustion denials. Labelled by
-// netblock (low cardinality — the few admin-carved blocks + central/default).
+// IPAM Prometheus EVENT counters (ADR 0010 — "Auto-grow, exhaustion & surfacing").
+// Registered on the default registry at init, scraped like the rest of ncp_*; these
+// are imperative because they mark moments in time (a grow happened, an enrollment was
+// denied), so a counter Inc at the event is exactly right. The per-netblock UTILIZATION
+// gauges (capacity/allocated/used) are NOT here — they decay between alloc events (a
+// host going stale drops `used` with no allocation to hang an Inc on), so they are
+// emitted by a scrape-time NetblockCollector (D23) reading live state at /metrics.
+// Labelled by netblock (low cardinality — the few admin-carved blocks + central/default).
 var (
-	metricNetblockCapacity = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "ncp_ipam_netblock_capacity",
-		Help: "Usable address capacity of a netblock (its CIDR's host count), by netblock.",
-	}, []string{"netblock"})
-	metricNetblockAllocated = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "ncp_ipam_netblock_allocated",
-		Help: "Currently allocated (or quarantined) addresses in a netblock, by netblock.",
-	}, []string{"netblock"})
-	metricNetblockUsed = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "ncp_ipam_netblock_used",
-		Help: "Live (heartbeat-confirmed) addresses in a netblock, by netblock. Set by the fleet view; 0 here until wired.",
-	}, []string{"netblock"})
 	metricAutogrow = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "ncp_ipam_autogrow_total",
 		Help: "Auto-grow events (a full named netblock doubled into its free buddy), by netblock.",
@@ -232,7 +223,9 @@ func (a *Allocator) Allocate(ctx context.Context, deviceName, netblockName, meth
 		}
 		err = a.db.WithContext(ctx).Create(&alloc).Error
 		if err == nil {
-			a.refreshNetblockMetrics(ctx, res)
+			// Utilization gauges (capacity/allocated/used) are emitted at scrape time by
+			// NetblockCollector (D23) — a successful allocation needs no metric refresh
+			// here; the next /metrics scrape reflects it from live state.
 			return ip, nil
 		}
 		if errors.Is(err, gorm.ErrDuplicatedKey) {
@@ -467,33 +460,6 @@ func inAnyCarve(addr netip.Addr, carves []netip.Prefix) bool {
 		}
 	}
 	return false
-}
-
-// refreshNetblockMetrics sets the capacity/allocated gauges for the netblock just
-// allocated into (best-effort; metric maintenance must never fail an allocation).
-func (a *Allocator) refreshNetblockMetrics(ctx context.Context, res Resolved) {
-	name := metricName(res)
-	if name == "" {
-		return
-	}
-	cidr := res.CIDR
-	if !cidr.IsValid() {
-		return
-	}
-	capacity := hostCapacity(cidr)
-	metricNetblockCapacity.WithLabelValues(name).Set(float64(capacity))
-
-	var ips []string
-	if err := a.db.WithContext(ctx).Model(&Allocation{}).Pluck("ip", &ips).Error; err != nil {
-		return
-	}
-	allocated := 0
-	for _, s := range ips {
-		if addr, err := netip.ParseAddr(s); err == nil && cidr.Contains(addr) {
-			allocated++
-		}
-	}
-	metricNetblockAllocated.WithLabelValues(name).Set(float64(allocated))
 }
 
 // hostCapacity is the usable host count of an IPv4 CIDR: 2^(32-bits) minus the

@@ -386,6 +386,24 @@ func (r *Registry) Resolve(ctx context.Context, name string) (netip.Prefix, erro
 	return netip.Prefix{}, fmt.Errorf("%w: %q", ErrNotFound, name)
 }
 
+// NetblockCIDRs returns every netblock's name + parsed CIDR (all kinds), implementing
+// ipam.NetblockLister so the scrape-time utilization collector (ncp_ipam_netblock_*,
+// D23) can bucket allocations per block without importing this package's row type.
+// Backed by the same cache as Resolve/Carves.
+func (r *Registry) NetblockCIDRs(ctx context.Context) ([]ipam.NamedCIDR, error) {
+	c, err := r.snapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ipam.NamedCIDR, 0, len(c.rows))
+	for name, row := range c.rows {
+		if p := row.Prefix(); p.IsValid() {
+			out = append(out, ipam.NamedCIDR{Name: name, CIDR: p})
+		}
+	}
+	return out, nil
+}
+
 // Carves returns the 'named' netblock CIDRs (for the allocator's overlap checks
 // when filling 'default'). It implements ipam.NetblockResolver.
 func (r *Registry) Carves(ctx context.Context) ([]netip.Prefix, error) {

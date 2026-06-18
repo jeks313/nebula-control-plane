@@ -1097,7 +1097,7 @@ export interface components {
             capacity: number;
             /** @description current allocations inside the CIDR */
             allocated: number;
-            /** @description live (heartbeat-confirmed) addresses; 0 until the fleet wiring lands (Phase 4) */
+            /** @description live addresses: allocations whose host has heartbeated within the fleet stale window (StaleAfter); a subset of allocated, decaying as hosts go stale */
             used: number;
             /** @description allocated / capacity * 100 (one decimal) */
             pct: number;
