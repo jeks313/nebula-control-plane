@@ -88,3 +88,42 @@ build could proceed; flagged here for review. **D#** = decided-by-default during
   identical, `cloudtrust.Parse`'s `DisallowUnknownFields` now accepts the field, and propose/active
   marshal the struct directly — round-trip verified by a `TestParseValid` assertion. `openapi.yaml`'s
   `CloudTrustAccount` schema gains a `netblock` string property (contract guard stays green).
+- **D18 — Phase-3 admin IPAM API shapes & wiring.** The netblock admin surface follows the
+  join-key/lighthouse pattern (RBAC + step-up + audit per D5), with these defaults:
+  - **Perm split:** `PermIPAMManage = "ipam:manage"` granted to admin (superuser) + operator;
+    the GET endpoints (`netblocks` list, `allocations`, `suggest`) are read-only and allowed
+    for any authenticated principal (viewer included) — matching how the existing read endpoints
+    (joinkeys list, lighthouses, approvals) carry no perm gate. Suggest is a pure read (no DB
+    write) so it is ungated like the policy analysis endpoints. Mutations (POST/PATCH/DELETE)
+    require `PermIPAMManage` AND `requireStepUp` (carving address space is sensitive; matches
+    policy-publish/approve gating).
+  - **Routes:** `GET/POST /admin/v1/ipam/netblocks`, `PATCH/DELETE /admin/v1/ipam/netblocks/{name}`,
+    `GET /admin/v1/ipam/netblocks/suggest?prefix=N`, `GET /admin/v1/ipam/allocations?netblock=NAME`.
+    The literal `/netblocks/suggest` route is registered alongside `/netblocks/{name}`; Go's 1.22
+    ServeMux prefers the more-specific literal segment, so `suggest` is never captured as `{name}`.
+  - **Utilization:** per-netblock `capacity` = CIDR host count minus the network address;
+    `allocated` = count of `ip_allocations` rows whose IP falls inside the block's CIDR (a single
+    pluck of all allocation IPs, bucketed in Go — the fleet is small); `used` = 0 (the live/heartbeat
+    wiring is Phase 4, matching the `ncp_ipam_netblock_used` gauge left at 0 per D14); `pct` =
+    allocated/capacity * 100 rounded to one decimal (0 when capacity is 0). The list is unpaginated
+    (the netblock set is small — central/default + a handful of carves, like lighthouses).
+  - **Allocations endpoint:** `?netblock=NAME` is required (400 if absent); returns every allocation
+    inside that block's CIDR as `{ip, device, method, allocated_at}` (device name joined from
+    `devices`, RFC3339 timestamp). Unpaginated for Phase 3 (a single block is bounded by its CIDR;
+    the React overlay reads the whole block). A `netblock=NAME` that doesn't exist → 404.
+  - **Create body:** `{name, cidr, description}` where `cidr` is `"a.b.c.d/NN"`; an empty/invalid
+    CIDR → 400. **Patch body:** `{cidr?, description}` — both optional; an omitted `cidr` keeps the
+    current CIDR (the handler re-passes the stored value to `Update`), so a description-only edit
+    never trips the stranding guard.
+  - **Error mapping:** `ErrNotFound`→404; `ErrExists`/`ErrOverlap`/`ErrProtected`→409;
+    `ErrBadCIDR`/`ErrOutOfPool`/`ErrNoName`/`ErrReservedKind`/`ErrBadPrefixLen`→400; `ErrStranded`→422
+    (well-formed but unprocessable against live state — the same 422 convention as a dual-control
+    commit failure); `ErrPoolFull` (from Suggest)→409.
+  - **Wiring:** `adminapi.Config` gains `Netblocks *netblock.Registry` and `Allocator *ipam.Allocator`.
+    In `cmd/harbor/serve.go` they are constructed from `-pool` (already on the admin-api command via
+    `addCoreFlags`) exactly as enroll/genesis do: `NewAllocator` → `netblock.New(db, pool, nil, alloc,
+    audit)` → `alloc.WithResolver(reg)`. Both are optional in `Config` — when nil, the list returns an
+    empty set and mutations 503 (mirroring the `Lighthouses == nil` guard) — but `New` defaults them
+    from the store + `-pool` so the live server always has them.
+  - **Join-key `sub_range`:** already fully exposed (view + create + update handlers and the
+    `JoinKey`/`JoinKeyCreate`/`JoinKeyUpdate` openapi schemas). Confirmed; no change needed (D6).

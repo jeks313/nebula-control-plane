@@ -24,8 +24,10 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/fleet"
 	"github.com/jeks313/nebula-control-plane/internal/genesis"
 	"github.com/jeks313/nebula-control-plane/internal/httpserve"
+	"github.com/jeks313/nebula-control-plane/internal/ipam"
 	"github.com/jeks313/nebula-control-plane/internal/lighthouse"
 	"github.com/jeks313/nebula-control-plane/internal/nebularelease"
+	"github.com/jeks313/nebula-control-plane/internal/netblock"
 	"github.com/jeks313/nebula-control-plane/internal/obs"
 	"github.com/jeks313/nebula-control-plane/internal/pilotrelease"
 	"github.com/jeks313/nebula-control-plane/internal/queue"
@@ -239,10 +241,25 @@ func cmdAdminAPI(args []string) {
 	}
 	idp := adminapi.ChainProvider{tokenProvider, human} // token first, then the human path
 
+	// IPAM (ADR 0010): wire the netblock registry + allocator the admin IPAM surface
+	// reads/writes. Constructed from -pool exactly as enroll/genesis do — the allocator
+	// backs the registry's stranding guard, the registry is its netblock resolver.
+	pool, perr := netip.ParsePrefix(*cf.pool)
+	if perr != nil {
+		fatalf("admin-api: bad -pool: %v", perr)
+	}
+	alloc, aerr := ipam.NewAllocator(s, ipam.Pool{Prefix: pool})
+	if aerr != nil {
+		fatalf("admin-api: ipam: %v", aerr)
+	}
+	nbReg := netblock.New(s.DB, pool, nil, alloc, audit)
+	alloc = alloc.WithResolver(nbReg)
+
 	api := adminapi.New(adminapi.Config{
 		Store: s, Identity: idp,
 		Rollout: rollout.New(s.DB, audit), Lighthouses: lighthouse.New(s.DB, audit),
 		Enrollment: consumer, CanIssue: canIssue,
+		Netblocks: nbReg, Allocator: alloc, Pool: pool,
 		Thresholds:   fleet.Thresholds{ExpiryWindow: *expiryWithin, StaleAfter: *staleAfter, ClockSkewMs: *clockSkew},
 		MFAFreshness: *mfaFreshness,
 	})
