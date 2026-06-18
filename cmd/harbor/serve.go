@@ -232,18 +232,23 @@ func cmdCoreAPI(args []string) {
 	if !*reapDisable {
 		// Allocator + revocation registry the reaper mutates, built like the boot-seed/admin path:
 		// the resolver-backed allocator releases an IP cleanly; the registry blocklists a still-live
-		// cert under the silent trigger. central is resolved once for the never-reap netblock guard.
+		// cert under the silent trigger.
 		ralloc, rerr := ipam.NewAllocator(s, ipam.Pool{Prefix: pool})
 		if rerr != nil {
 			fatalf("core-api: reaper allocator: %v", rerr)
 		}
 		rreg := netblock.New(s.DB, pool, nil, ralloc, audit)
 		ralloc = ralloc.WithResolver(rreg)
-		var central netip.Prefix
-		if cidr, cerr := rreg.Resolve(context.Background(), netblock.NameCentral); cerr == nil {
-			central = cidr
-		} else {
-			log.Warn("core-api: reaper could not resolve the 'central' reserved netblock; the central never-reap guard is OFF until it exists", "err", cerr)
+		// Central never-reap guard (R10): compute the reserved block DETERMINISTICALLY from the
+		// configured -pool — the pool's first /27, exactly what genesis/SeedNetblocks seed via
+		// genesis.CentralBlock. Deriving it from the pool (not a registry Resolve that can be
+		// absent during a boot-seed gap or a wiped netblocks table) keeps the guard ALWAYS ON, so a
+		// control-plane host with empty/malformed groups can never bypass both the group guard AND
+		// the central guard. If even the pool is somehow zero, FAIL CLOSED — refuse to start the
+		// reaper rather than run with the central guard off.
+		central := genesis.CentralBlock(pool)
+		if !central.IsValid() {
+			fatalf("core-api: reaper central guard could not be computed from -pool %q; refusing to start the reaper (fail-closed) — fix -pool or set -reap-disable", pool.String())
 		}
 		rcfg := reaper.Config{
 			PersistentGrace: *reapGrace,
@@ -258,7 +263,7 @@ func cmdCoreAPI(args []string) {
 		}
 		log.Info("core-api device reaper "+mode,
 			"interval", *reapInterval, "grace", *reapGrace, "ephemeral_grace", *reapEphemeralGrace,
-			"silent_after", *reapSilentAfter, "central_guard", central.IsValid())
+			"silent_after", *reapSilentAfter, "central_guard", central.String())
 		wg.Add(1)
 		go func() { defer wg.Done(); rp.Run(ctx, *reapInterval) }()
 	} else {
