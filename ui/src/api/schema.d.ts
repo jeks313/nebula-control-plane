@@ -745,6 +745,13 @@ export interface components {
             groups?: string[];
             /** @description host joined via an ephemeral join key (shorter cert TTL; foundation for auto-reaping, impl 2.12) */
             ephemeral?: boolean;
+            /**
+             * Format: date-time
+             * @description when the reaper soft-reclaimed this device (impl 2.12); absent for live hosts. A reaped host's heartbeat is deleted, so it normally leaves the heartbeat-driven list — present for completeness / a future include-reaped view
+             */
+            reaped_at?: string;
+            /** @description why the device was reaped: cert-expired | silent (impl 2.12); absent for live hosts */
+            reap_reason?: string;
         };
         DeviceList: {
             devices: components["schemas"]["Device"][];

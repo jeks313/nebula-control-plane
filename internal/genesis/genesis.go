@@ -356,7 +356,7 @@ func VerifyControlPlaneCert(certPEM []byte) (string, error) {
 // SeedNetblocks seeds the two protected genesis netblocks — 'central' (the
 // control-plane reserved /27) and 'default' (the bounded fallback) — into reg,
 // resolving each CIDR from the optional operator overrides or the standard
-// placement defaults (the same math genesis uses; see centralBlock/defaultBlock).
+// placement defaults (the same math genesis uses; see CentralBlock/defaultBlock).
 // It is the single seeding chokepoint shared by the genesis ceremony (genesis.Run)
 // and the harbor boot-seed upgrade path (cmd/harbor/serve.go), so the CIDR math is
 // never duplicated.
@@ -368,7 +368,7 @@ func VerifyControlPlaneCert(certPEM []byte) (string, error) {
 func SeedNetblocks(ctx context.Context, reg *netblock.Registry, pool, centralOverride, defaultOverride netip.Prefix, actor string) (central, def netblock.Netblock, err error) {
 	centralCIDR := centralOverride
 	if !centralCIDR.IsValid() {
-		centralCIDR = centralBlock(pool)
+		centralCIDR = CentralBlock(pool)
 	}
 	defaultCIDR := defaultOverride
 	if !defaultCIDR.IsValid() {
@@ -427,9 +427,13 @@ func BootSeedNetblocks(ctx context.Context, reg *netblock.Registry, pool, centra
 	return true, nil
 }
 
-// centralBlock is the control-plane reserved CIDR when the operator does not supply
-// -central-cidr: the pool's first /27 (lighthouse + core + backend headroom).
-func centralBlock(pool netip.Prefix) netip.Prefix {
+// CentralBlock is the control-plane reserved CIDR when the operator does not supply
+// -central-cidr: the pool's first /27 (lighthouse + core + backend headroom). It is
+// the single source of truth for the central reserved block — genesis/SeedNetblocks
+// seed THIS CIDR, and the device reaper computes its never-reap central guard from it
+// (cmd/harbor serve.go) so the guard is deterministic and always on regardless of
+// registry/boot-seed state (REAPER-DECISIONS R10).
+func CentralBlock(pool netip.Prefix) netip.Prefix {
 	return netip.PrefixFrom(pool.Masked().Addr(), 27).Masked()
 }
 
@@ -445,7 +449,7 @@ func defaultBlock(pool netip.Prefix) netip.Prefix {
 	if pool.Bits() > want {
 		want = pool.Bits() // pool coarser than /18 -> the whole pool
 	}
-	central := centralBlock(pool)
+	central := CentralBlock(pool)
 	p, err := netblock.Suggest(want, pool, nil, []netip.Prefix{central})
 	if err != nil {
 		// Fall back to the slot immediately after central, aligned to /want.
