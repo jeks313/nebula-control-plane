@@ -388,6 +388,17 @@ func cmdSeedDemo(args []string) {
 		}
 	}
 
+	// A reap event-trail entry so the dashboard's "recent reaps" panel isn't empty (it
+	// filters audit for the reaper.actionReap action). Mirrors what reaper.reapOne emits
+	// at runtime: an ephemeral CI host whose cert lapsed beyond its short grace was reaped
+	// (cert-expired -> revoke skipped, the cert is already refused), its overlay IP
+	// reclaimed and its heartbeat pruned. The host therefore has NO heartbeat row — exactly
+	// why the reap surfaces via the audit log, not the heartbeat-driven fleet list.
+	if err := audit(ctx, "reaper", "reaper-reap", "ci-runner-03",
+		`{"overlay_ip":"100.64.64.31","reason":"cert-expired","ip_reclaimed":true,"revoked":false}`); err != nil {
+		fatalf("seed reap audit: %v", err)
+	}
+
 	// Attested enrollments (aws-sigv4) carrying provider evidence — what the UI renders
 	// for cloud-attested hosts.
 	for i, a := range []struct {

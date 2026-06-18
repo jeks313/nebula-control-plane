@@ -451,6 +451,12 @@ type Device struct {
 	// Ephemeral marks a host that joined via an ephemeral join key (shorter cert TTL;
 	// foundation for the auto-reaping lifecycle, impl 2.12). From the authoritative enrollment.
 	Ephemeral bool `json:"ephemeral,omitempty"`
+	// ReapedAt / ReapReason expose the reaper soft-mark (impl 2.12) for completeness. The
+	// reaper deletes a reaped host's heartbeat, so a reaped device normally drops out of
+	// this heartbeat-driven list; these are populated only if a reaped device ever surfaces
+	// (e.g. a future include-reaped view). From the devices table, keyed by name.
+	ReapedAt   string `json:"reaped_at,omitempty"`
+	ReapReason string `json:"reap_reason,omitempty"`
 }
 
 // GET /admin/v1/devices?limit=N&after=OVERLAY_IP — device inventory from
@@ -578,6 +584,15 @@ func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Reaper soft-marks (impl 2.12), keyed by device name. A reaped host's heartbeat is
+	// deleted, so a reaped device rarely appears in this list — this enriches the field
+	// for completeness / a future include-reaped view.
+	reapMarks, err := s.deviceReapMarks(ctx, deviceNames(kept))
+	if err != nil {
+		s.fail(w, r, "device reap-mark lookup failed", err)
+		return
+	}
+
 	out := make([]Device, len(kept))
 	for i, h := range kept {
 		d := Device{
@@ -597,6 +612,10 @@ func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
 				d.JoinKeyName = names[p.JoinKeyID]
 			}
 		}
+		if rm, ok := reapMarks[h.DeviceName]; ok {
+			d.ReapedAt = rfc3339(rm.ReapedAt)
+			d.ReapReason = rm.ReapReason
+		}
 		out[i] = d
 	}
 
@@ -613,6 +632,14 @@ func overlayIPs(rows []deviceHB) []string {
 		ips[i] = h.OverlayIP
 	}
 	return ips
+}
+
+func deviceNames(rows []deviceHB) []string {
+	names := make([]string, len(rows))
+	for i, h := range rows {
+		names[i] = h.DeviceName
+	}
+	return names
 }
 
 // AuditRow is one audit-log entry in the API.
