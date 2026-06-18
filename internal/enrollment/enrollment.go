@@ -9,6 +9,7 @@ package enrollment
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -29,7 +30,9 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/queue"
 	"github.com/jeks313/nebula-control-plane/internal/replay"
 	"github.com/jeks313/nebula-control-plane/internal/signer"
+	"github.com/jeks313/nebula-control-plane/internal/ssoassert"
 	"github.com/jeks313/nebula-control-plane/internal/store"
+	"github.com/jeks313/nebula-control-plane/internal/usertrust"
 	"github.com/jeks313/nebula-control-plane/internal/wire"
 	"gorm.io/gorm"
 )
@@ -51,6 +54,15 @@ var (
 	ErrMethod     = errors.New("enrollment: unsupported method")
 	ErrNotPending = errors.New("enrollment: not a pending enrollment")
 	ErrQuota      = errors.New("enrollment: join-key enrollment quota exceeded")
+
+	// SSO (oidc/saml) enrollment outcomes (ADR 0004; decisions S5–S8). All terminal
+	// for THIS attempt — a denied SSO enrollment is acked, never redelivered (the
+	// single-use nonce was already consumed in verify(), so a redelivery would only
+	// hit ErrReplay; the host re-enrolls with a fresh nonce for a replay-safe retry).
+	ErrSSONotConfigured = errors.New("enrollment: SSO not configured")             // nil pinned key or user-trust seam
+	ErrSSOAssertion     = errors.New("enrollment: SSO assertion invalid")          // bad signature / wrong key / expired / malformed
+	ErrSSOBinding       = errors.New("enrollment: SSO assertion binding mismatch") // pubkey-hash or nonce does not match this request (anti-relay)
+	ErrSSONotAllowed    = errors.New("enrollment: SSO identity not in user-trust") // no matching user-trust entry
 )
 
 // Enrollment is a persisted enrollment attempt (the PENDING queue + result).
@@ -176,6 +188,25 @@ type Config struct {
 	AWSSigV4Enabled bool
 	AWSVerify       awsattest.VerifyConfig
 	CloudTrust      *cloudtrust.Config
+
+	// SSO enrollment (ADR 0004; decisions S5–S8). The off-mesh gateway (ADR 0005)
+	// authenticates the user against the IdP and signs a short-lived assertion
+	// (internal/ssoassert) binding the IdP identity to the enrolling device; mesh-only
+	// Core pulls the candidate and re-verifies EVERYTHING here before deciding.
+	//
+	// AssertionVerifyKey is the PINNED gateway assertion-signing public key (the public
+	// half of the dedicated ECDSA P-256 keypair, S6 — distinct from the CA). Core pins
+	// it; the gateway holds the private half. nil => SSO is not configured and an oidc
+	// enrollment is denied (fail closed).
+	AssertionVerifyKey *ecdsa.PublicKey
+	// UserTrustActive sources the ACTIVE user-trust config (S1 — the latest committed
+	// usertrust.publish dual-control change). It is a getter SEAM rather than a snapshot
+	// pointer (cf. CloudTrust, read once at build) so the published config is read live
+	// per enrollment — the dual-control flow can change who may enroll without a Core
+	// restart. nil getter, OR a getter returning nil, => SSO is not configured (fail
+	// closed). The real source (a usertrust.publish reader) + the genesis key
+	// distribution are wired in cmd/harbor as a LATER integration step; this is the seam.
+	UserTrustActive func() *usertrust.Config
 }
 
 // Consumer processes enrollment candidates.
@@ -230,6 +261,10 @@ func terminal(err error) bool {
 		awsattest.ErrBinding, awsattest.ErrUnsignedBinding, awsattest.ErrBadRequest,
 		awsattest.ErrBadEndpoint, awsattest.ErrAttestation, awsattest.ErrNotAllowed,
 		awsattest.ErrSTSUnavailable,
+		// SSO (oidc/saml) outcomes are all terminal for THIS attempt: a forged/expired/
+		// wrong-bound assertion or an untrusted identity will never succeed, and a
+		// not-configured deny is a fixed posture — none warrant a queue redelivery.
+		ErrSSONotConfigured, ErrSSOAssertion, ErrSSOBinding, ErrSSONotAllowed,
 	} {
 		if errors.Is(err, t) {
 			return true
@@ -251,8 +286,11 @@ func (c *Consumer) Process(ctx context.Context, cand queue.Candidate) (Result, e
 	if req.Method == wire.MethodAWSSigV4 {
 		return c.processAttested(ctx, cand, req, pubBytes)
 	}
+	if req.Method == wire.MethodOIDC {
+		return c.processSSO(ctx, cand, req, pubBytes)
+	}
 	if req.Method != wire.MethodToken {
-		return Result{}, fmt.Errorf("%w: %q (token/join-key and aws-sigv4 are implemented)", ErrMethod, req.Method)
+		return Result{}, fmt.Errorf("%w: %q (token/join-key, aws-sigv4 and oidc/sso are implemented)", ErrMethod, req.Method)
 	}
 
 	// Validate + consume the join key.
@@ -401,6 +439,139 @@ func (c *Consumer) processAttested(ctx context.Context, cand queue.Candidate, re
 	return Result{EnrollmentID: cand.EnrollmentID, Status: StatusIssued, OverlayIP: ip.String(), CertPEM: certPEM}, nil
 }
 
+// providerSSO is the attestation-evidence provider recorded for an SSO enrollment
+// (S7 — SAML first; OIDC is the near-free follow-on, both ride the same path). The
+// AttestProvider/AttestAccount/AttestPrincipal evidence columns are provider-agnostic
+// (M5): for SSO, account = the IdP issuer/realm, principal = the IdP subject/email.
+const providerSSO = "sso"
+
+// processSSO handles an SSO (oidc/saml) enrollment (ADR 0004; decisions S5–S8). The
+// credential is the off-mesh gateway's portal-signed assertion (a compact ES256 JWS
+// from internal/ssoassert). Trusting the gateway for NOTHING beyond "the IdP said this",
+// Core re-verifies the assertion against the PINNED gateway key + the clock, re-checks
+// the device binding (pubkey hash + the SAME single-use nonce the outer JWS verify
+// already consumed — anti-relay), resolves the issuing identity from the dual-control
+// user-trust config (usertrust.Match, first-match-wins), records provider-agnostic
+// evidence, and lands PENDING by default (S8) — honoring auto-issue only when the
+// matched entry set it. Fails closed: every rejection is a TERMINAL deny.
+func (c *Consumer) processSSO(ctx context.Context, cand queue.Candidate, req wire.EnrollRequest, pubBytes []byte) (Result, error) {
+	// Config seam (fail closed). Need BOTH the pinned gateway key to verify the
+	// assertion AND a user-trust source to authorize it; either absent => not configured.
+	if c.cfg.AssertionVerifyKey == nil || c.cfg.UserTrustActive == nil {
+		c.deny(ctx, cand, req, pubBytes, "enroll-denied", "SSO enrollment is not configured on this control plane")
+		return Result{EnrollmentID: cand.EnrollmentID, Status: StatusDenied}, ErrSSONotConfigured
+	}
+	active := c.cfg.UserTrustActive()
+	if active == nil {
+		c.deny(ctx, cand, req, pubBytes, "enroll-denied", "no user-trust config has been published")
+		return Result{EnrollmentID: cand.EnrollmentID, Status: StatusDenied}, ErrSSONotConfigured
+	}
+
+	// Envelope: the credential is {"assertion":"<compact-jws>"} — a typed wrapper so the
+	// SSO credential is self-describing and future SSO fields can ride alongside it
+	// without overloading the bare token (B5). An empty/malformed envelope is terminal.
+	var cred struct {
+		Assertion string `json:"assertion"`
+	}
+	if err := json.Unmarshal(req.Credential, &cred); err != nil || cred.Assertion == "" {
+		c.deny(ctx, cand, req, pubBytes, "enroll-denied", "malformed SSO credential envelope")
+		return Result{EnrollmentID: cand.EnrollmentID, Status: StatusDenied}, fmt.Errorf("%w: malformed credential envelope", ErrSSOAssertion)
+	}
+
+	// 1) Verify the assertion against the PINNED gateway key + the validity window. This
+	// rejects a forged/wrong-key signature, a malformed token or wrong typ, and a token
+	// outside its window — but proves only that the gateway vouched for these facts.
+	a, err := ssoassert.Verify(c.cfg.AssertionVerifyKey, []byte(cred.Assertion), c.now())
+	if err != nil {
+		reason := "SSO assertion rejected: " + err.Error()
+		c.deny(ctx, cand, req, pubBytes, "enroll-denied", reason)
+		return Result{EnrollmentID: cand.EnrollmentID, Status: StatusDenied}, fmt.Errorf("%w: %w", ErrSSOAssertion, err)
+	}
+
+	// 2) Binding (anti-relay): the assertion MUST be bound to THIS enrolling device.
+	//   (a) its PubkeyHash must equal the request's host pubkey hash, and
+	//   (b) its Nonce must pass the SAME single-use nonce verification the other paths
+	//       use, bound to that pubkey hash — reusing c.verify()'s mechanism rather than
+	//       inventing a parallel one. (The outer JWS verify already consumed req.Nonce
+	//       via the replay observer; here we re-prove the ASSERTION's embedded nonce is
+	//       the same one, authentic for this pubkey — so a gateway assertion minted for a
+	//       different device or a different enrollment cannot be relayed onto this one.)
+	pubkeyHash := wire.PubkeyHash(pubBytes)
+	if a.PubkeyHash != pubkeyHash {
+		c.deny(ctx, cand, req, pubBytes, "enroll-denied", "SSO assertion is bound to a different device key")
+		return Result{EnrollmentID: cand.EnrollmentID, Status: StatusDenied}, fmt.Errorf("%w: pubkey hash", ErrSSOBinding)
+	}
+	if a.Nonce != req.Nonce {
+		c.deny(ctx, cand, req, pubBytes, "enroll-denied", "SSO assertion is bound to a different enrollment nonce")
+		return Result{EnrollmentID: cand.EnrollmentID, Status: StatusDenied}, fmt.Errorf("%w: nonce mismatch", ErrSSOBinding)
+	}
+	if err := c.cfg.Nonces.Verify(a.Nonce, []byte(pubkeyHash)); err != nil {
+		c.deny(ctx, cand, req, pubBytes, "enroll-denied", "SSO assertion nonce is not authentic for this device")
+		return Result{EnrollmentID: cand.EnrollmentID, Status: StatusDenied}, fmt.Errorf("%w: %w", ErrSSOBinding, err)
+	}
+
+	// 3) Policy: resolve the issuing identity from the active user-trust config —
+	// first-match-wins over the ordered entries (S4), keyed on the assertion's realm
+	// (issuer) + the IdP-asserted directory groups. No match => DENY (fail closed).
+	groupsSlice, netblock, autoIssue, ok := usertrust.Match(*active, a.Issuer, a.IdPGroups)
+	if !ok {
+		reason := fmt.Sprintf("SSO identity %q (realm %q) is in no trusted user-trust group", a.Subject, a.Issuer)
+		c.deny(ctx, cand, req, pubBytes, "enroll-denied", reason)
+		return Result{EnrollmentID: cand.EnrollmentID, Status: StatusDenied}, fmt.Errorf("%w: realm %s", ErrSSONotAllowed, a.Issuer)
+	}
+
+	// Evidence (provider-agnostic columns, M5): provider=sso, account=the IdP issuer/realm,
+	// principal=email when present else subject, region=the IdP-asserted directory groups
+	// (so the pending row shows what membership drove the match). No cloud STS here.
+	principal := a.Email
+	if principal == "" {
+		principal = a.Subject
+	}
+	ev := evidence{
+		provider:   providerSSO,
+		account:    a.Issuer,
+		principal:  principal,
+		region:     strings.Join(a.IdPGroups, ","),
+		verifiedAt: c.now().UnixNano(),
+	}
+	if groupsSlice == nil {
+		groupsSlice = []string{}
+	}
+	groupsJSON, _ := json.Marshal(groupsSlice)
+	deviceName := deviceName(req, cand.PubkeyHash)
+
+	// 4) Admission (S8): default PENDING — Phase 1 issues nothing automatically; an admin
+	// approves in the existing queue. Honor the matched entry's auto-issue ONLY when set.
+	// JoinKeyID stays 0 (there is no join key). The wire method is "oidc" (req.Method);
+	// the IPAM provenance enum is token|aws-sigv4|sso|genesis, so the allocation is
+	// recorded as "sso" (B7 — wire oidc → provenance sso).
+	if !autoIssue {
+		if err := c.record(ctx, cand.EnrollmentID, req, pubBytes, 0, string(groupsJSON), StatusPending, nil, "", "", ev); err != nil {
+			return Result{}, fmt.Errorf("enroll: persist pending enrollment: %w", err) // transient -> nack, don't deliver
+		}
+		c.writeResult(ctx, cand.EnrollmentID, cand.RetrievalSecretHash, nil, StatusPending, "")
+		_ = c.audit(ctx, "system", "enroll-pending", deviceName,
+			fmt.Sprintf(`{"method":"sso","realm":%q,"subject":%q,"reason":"manual approval required"}`, a.Issuer, a.Subject))
+		return Result{EnrollmentID: cand.EnrollmentID, Status: StatusPending}, nil
+	}
+
+	ip, certPEM, fp, notAfter, err := c.issue(ctx, "enroll-sso", deviceName, pubBytes, groupsSlice, netblock, providerSSO)
+	if err != nil {
+		return Result{}, err
+	}
+	bundleJWS, err := c.buildBundle(ctx, deviceName, ip.String(), groupsSlice, certPEM, notAfter, req.Client.OS, req.Client.Arch)
+	if err != nil {
+		return Result{}, err
+	}
+	if err := c.record(ctx, cand.EnrollmentID, req, pubBytes, 0, string(groupsJSON), StatusIssued, certPEM, ip.String(), fp, ev); err != nil {
+		return Result{}, fmt.Errorf("enroll: persist issued enrollment: %w", err) // transient -> nack, don't deliver the bundle
+	}
+	c.writeResult(ctx, cand.EnrollmentID, cand.RetrievalSecretHash, bundleJWS, StatusIssued, "")
+	_ = c.audit(ctx, "system", "enroll-sso", deviceName,
+		fmt.Sprintf(`{"method":"sso","realm":%q,"subject":%q}`, a.Issuer, a.Subject))
+	return Result{EnrollmentID: cand.EnrollmentID, Status: StatusIssued, OverlayIP: ip.String(), CertPEM: certPEM}, nil
+}
+
 // regionFromSTSURL extracts the AWS region from a signed STS host
 // (sts.<region>.amazonaws.com); the global endpoint sts.amazonaws.com -> "global".
 func regionFromSTSURL(raw string) string {
@@ -437,10 +608,11 @@ func (c *Consumer) Approve(ctx context.Context, enrollmentID, approver string) (
 	// Re-derive the netblock binding from the pending row: a join-key enrollment draws
 	// from the key's sub-range (netblock name); an aws-sigv4 enrollment re-resolves the
 	// matched cloud-trust scope's netblock from the active config + the row's stored
-	// attestation evidence (ADR 0010 Phase 2). The wire method recorded on the row
-	// (token|aws-sigv4) is the provenance method.
+	// attestation evidence (ADR 0010 Phase 2); an SSO enrollment re-resolves the matched
+	// user-trust entry's netblock the same way. The wire method recorded on the row
+	// (token|aws-sigv4|oidc) maps to the IPAM provenance method (oidc -> sso, B7).
 	netblockName := c.approveNetblock(ctx, e)
-	ip, certPEM, fp, notAfter, err := c.issue(ctx, approver, e.DeviceName, e.Pubkey, groups, netblockName, e.Method)
+	ip, certPEM, fp, notAfter, err := c.issue(ctx, approver, e.DeviceName, e.Pubkey, groups, netblockName, provenanceMethod(e.Method))
 	if err != nil {
 		return Result{}, err
 	}
@@ -624,7 +796,40 @@ func (c *Consumer) approveNetblock(ctx context.Context, e Enrollment) string {
 			return netblock
 		}
 	}
+	// An SSO enrollment re-resolves the matched user-trust entry's netblock from the
+	// active config + the row's stored evidence (issuer = AttestAccount, the
+	// IdP-asserted groups recorded comma-joined in AttestRegion), so a pending SSO
+	// enrollment lands in the SAME block its auto-issue sibling would have (ADR 0010
+	// per-scope binding, mirroring the aws-sigv4 case above).
+	if e.Method == wire.MethodOIDC && c.cfg.UserTrustActive != nil && e.AttestProvider == providerSSO {
+		if active := c.cfg.UserTrustActive(); active != nil {
+			groups := splitGroups(e.AttestRegion)
+			if _, netblock, _, ok := usertrust.Match(*active, e.AttestAccount, groups); ok {
+				return netblock
+			}
+		}
+	}
 	return ""
+}
+
+// splitGroups reverses the comma-join used to store an SSO enrollment's IdP groups in
+// the AttestRegion evidence column (empty -> nil, so no spurious "" group).
+func splitGroups(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, ",")
+}
+
+// provenanceMethod maps the WIRE enrollment method (recorded on the row) to the IPAM
+// provenance enum (token|aws-sigv4|sso|genesis, ADR 0010). The wire SSO method is
+// "oidc" but the IPAM enum is "sso" (B7), so a re-issue on approve records the same
+// provenance the auto-issue path would have. All other wire methods pass through.
+func provenanceMethod(wireMethod string) string {
+	if wireMethod == wire.MethodOIDC {
+		return providerSSO
+	}
+	return wireMethod
 }
 
 // issue allocates an overlay IP from the named netblock (empty -> the bounded

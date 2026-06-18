@@ -100,3 +100,64 @@ build are **B#** (appended as phases land). Review at the end.
   through to the wildcard. `Validate` still requires a non-empty `DirectoryGroup` on every
   entry (the wildcard is on realm only, never on the group), so a wildcard entry never grants
   blanket access — it still keys on AD-group membership.
+
+- **B5 — SSO credential envelope: `{"assertion":"<compact-jws>"}`.** The wire
+  `EnrollRequest.Credential` for `method=oidc` is a typed JSON wrapper carrying the
+  gateway-signed assertion (the compact ES256 JWS from `internal/ssoassert`) under an
+  `assertion` field, rather than the bare token. The wrapper keeps the SSO credential
+  self-describing and symmetric with the other methods' JSON credentials
+  (`{"token":...}`, the marshalled `awsattest.PresignedRequest`), and leaves room for
+  future SSO-only fields (e.g. an IdP-attestation blob) without overloading a bare
+  string. `processSSO` unmarshals the envelope; an empty/missing `assertion` or a
+  non-JSON credential is a terminal `ErrSSOAssertion` deny.
+
+- **B6 — SSO verification + device binding (fail-closed, all terminal).** Core, trusting
+  the gateway for nothing beyond "the IdP said this", re-verifies in order: **(1)**
+  `ssoassert.Verify(pinnedKey, token, now)` against the **pinned** gateway
+  assertion-signing public key (S6) + the validity window — a forged/wrong-key signature,
+  malformed/wrong-`typ` token, or an out-of-window token is a terminal `ErrSSOAssertion`;
+  **(2) binding (anti-relay):** the assertion's `PubkeyHash` MUST equal the enrolling
+  host's pubkey hash (`wire.PubkeyHash(pubBytes)`), the assertion's `Nonce` MUST equal the
+  request's `Nonce`, AND that nonce MUST pass the **SAME** keyring check the other paths
+  use (`c.cfg.Nonces.Verify(nonce, pubkeyHash)`) — reusing the existing single-use nonce
+  mechanism rather than a parallel one (the outer JWS `verify()` already consumed the
+  request nonce via the replay observer; this re-proves the *assertion's embedded* nonce
+  is that same nonce, authentic for this device, so a gateway assertion minted for a
+  different device or enrollment cannot be relayed). Any binding failure is a terminal
+  `ErrSSOBinding`. **(3) policy:** `usertrust.Match(active, assertion.Issuer,
+  assertion.IdPGroups)` (first-match-wins, B3) — no match is a terminal `ErrSSONotAllowed`.
+  Evidence is recorded on the provider-agnostic columns (M5): `provider="sso"`,
+  `account=`issuer/realm, `principal=`email (else subject), and the IdP groups stored
+  comma-joined in the region column (so a pending row shows the membership that drove the
+  match, and approve can re-resolve the netblock). All four SSO sentinels
+  (`ErrSSONotConfigured`, `ErrSSOAssertion`, `ErrSSOBinding`, `ErrSSONotAllowed`) are in
+  `Terminal()`, so a denied SSO enrollment is **acked, never redelivered** — recovery is a
+  fresh re-enroll with a new nonce (the consumed nonce would otherwise loop on `ErrReplay`,
+  mirroring the aws-sigv4 reasoning).
+
+- **B7 — Admission default PENDING + provenance mapping (wire `oidc` → IPAM `sso`).**
+  Admission defaults to **pending** (S8): `processSSO` records the pending result and
+  issues nothing, honoring the matched entry's `auto_issue` ONLY when set — Phase 1's
+  common path is pending → admin approves in the existing queue. The **wire** enrollment
+  method is `oidc` (`wire.MethodOIDC`, recorded on the row's `method` column), but the
+  **IPAM provenance** enum is `token|aws-sigv4|sso|genesis` (ADR 0010), so the allocation
+  is recorded as `"sso"` — both the auto-issue path and the approve path map it via a
+  single `provenanceMethod(oidc)→sso` helper, so a pending SSO enrollment re-issued on
+  approve carries the same provenance its auto-issue sibling would have. `Approve`'s
+  `approveNetblock` likewise re-resolves the SSO entry's netblock from the active
+  user-trust config + the stored evidence (issuer + the comma-joined groups), mirroring
+  the aws-sigv4 re-resolution, so a pending SSO host lands in the same block.
+
+- **B8 — Config seam (pinned key + live user-trust getter); harbor wiring deferred.**
+  `enrollment.Config` gains **(a)** `AssertionVerifyKey *ecdsa.PublicKey` — the pinned
+  gateway assertion-signing public key (S6); and **(b)** `UserTrustActive func()
+  *usertrust.Config` — the active user-trust source. Unlike `CloudTrust` (a snapshot
+  pointer read once at consumer build), the user-trust source is a **getter** so the
+  dual-control-published config is read **live per enrollment** (changing who may enroll
+  needs no Core restart). If `AssertionVerifyKey == nil` OR `UserTrustActive == nil` OR
+  the getter returns nil (no config published yet), `processSSO` returns a terminal
+  `ErrSSONotConfigured` deny — fail closed. Wiring the real published-config reader (a
+  `usertrust.publish` `LatestCommitted` reader, peer to `activeCloudTrust`) and the
+  genesis key distribution (gateway gets the PKCS#8 private half, Core pins the PKIX
+  public half via `ssoassert.Parse*KeyPEM`) into `cmd/harbor` is a **LATER integration
+  step**; this change provides only the seam + tests that inject it.
