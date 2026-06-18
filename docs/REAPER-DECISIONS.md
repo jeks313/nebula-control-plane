@@ -80,4 +80,34 @@ conservative. R# = the default taken; flagged here for review.
   `-reap-ephemeral-grace` (1h), `-reap-silent-after` (0=off). Effective config is logged at startup
   with the mode (ENABLED / DRY-RUN) prominent. admin-api/collect do not run it.
 
+## Admin-console surface (impl 2.12 UI)
+
+- **R15 — Dashboard "recent reaps" panel sources the audit feed, filtered on action
+  `reaper-reap`.** A reaped host's heartbeat is DELETED (R3), so it drops out of the
+  heartbeat-driven Devices/fleet list — the natural surface is the audit log, exactly like the
+  IPAM "recent grows / exhaustion" panel. The new `RecentReapsCard` (ui/src/components/fleet.tsx,
+  wired into ui/src/pages/Dashboard.tsx) reuses the dashboard's existing `useAudit` feed (limit 50,
+  same feed the IPAM card filters for `netblock-autogrow`/`netblock-exhausted`) and filters for the
+  reaper's per-reap action string `reaper-reap` (the literal in `reaper.reapOne`; the dry-run
+  `reaper-would-reap` action is intentionally NOT surfaced — dry-run mutates nothing). It shows host
+  (overlay_ip from the detail JSON, falling back to target), reason (`cert-expired` | `silent` as a
+  tone chip), a `revoked` chip when the cert was blocklisted, and when (`ts`). The detail JSON
+  (`{overlay_ip,reason,ip_reclaimed,revoked}`) is parsed best-effort (a malformed/absent detail
+  degrades to target + no chips, never throws). No new endpoint was needed — the existing audit feed
+  already carries the row.
+- **R16 — Device API exposes `reaped_at` / `reap_reason` for completeness.** Added to the `Device`
+  schema in internal/adminapi/openapi.yaml (both `omitempty`/optional, `reaped_at` as date-time) and
+  regenerated into ui/src/api/schema.d.ts via `gen:api`. The device list is heartbeat-driven, but
+  the soft-mark lives on `devices` (R11), so a new `deviceReapMarks` read (internal/adminapi/
+  device_provenance.go) loads `reaped_at`/`reap_reason` from `devices` keyed by name (only rows with
+  `reaped_at != 0`), mirroring `deviceProvenance`; `handleDevices` enriches each row by device name.
+  Because a reaped host's heartbeat is deleted, a reaped device normally won't appear in the list —
+  the field is there for completeness and a future "include reaped" view. Both fields are absent for
+  live hosts, so existing responses still conform to the OpenAPI schema (the contract guard passes).
+- **R17 — `seed-demo` seeds one sample reap audit row** so the dashboard panel isn't empty in the
+  demo, mirroring the IPAM `netblock-autogrow`/`netblock-exhausted` seed rows: a `reaper`-actor
+  `reaper-reap` entry for an ephemeral CI host (`ci-runner-03`, overlay 100.64.64.31, `cert-expired`,
+  `ip_reclaimed:true`, `revoked:false`). It is audit-only (no heartbeat row for that host — exactly
+  the real reaper outcome, and why the reap surfaces via the audit log rather than the fleet list).
+
 <!-- appended as the build lands: R# — <title>. <what + why> -->

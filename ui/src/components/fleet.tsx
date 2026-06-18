@@ -367,6 +367,57 @@ export function IPAMHealthCard() {
   )
 }
 
+// Recent reaps (impl 2.12) — the device reaper turns passive cert-expiry into active
+// reclamation: on a schedule it reclaims a gone host's overlay IP, prunes its stale
+// heartbeat, and soft-marks the device. Because the reaped host's heartbeat is DELETED,
+// it drops out of the heartbeat-driven Devices/fleet list — so the natural surface is the
+// audit log, exactly like the IPAM "recent grows / exhaustion" panel above. We filter the
+// shared audit feed for the reaper's per-reap action ('reaper-reap') and show host, reason
+// (cert-expired | silent), whether the cert was revoked, and when. The reaper writes the
+// detail as JSON {overlay_ip, reason, ip_reclaimed, revoked}; we parse it best-effort.
+type reapDetail = { overlay_ip?: string; reason?: string; revoked?: boolean }
+
+function parseReapDetail(details?: string): reapDetail {
+  if (!details) return {}
+  try {
+    const d = JSON.parse(details) as reapDetail
+    return d && typeof d === 'object' ? d : {}
+  } catch {
+    return {}
+  }
+}
+
+export function RecentReapsCard() {
+  const audit = useAudit()
+  const reaps = (audit.data?.entries ?? []).filter((e) => e.action === 'reaper-reap').slice(0, 5)
+  return (
+    <Tile title="Recent reaps" hint="reclaimed hosts — from audit">
+      {audit.isPending && <StateBlock kind="loading" message="…" />}
+      {audit.isError && <ErrorState error={audit.error} fallback="Couldn't load the audit log." />}
+      {audit.data &&
+        (reaps.length === 0 ? (
+          <StateBlock kind="empty" message="No hosts reaped recently." />
+        ) : (
+          <ul className="flex flex-col gap-1.5 text-[12px]">
+            {reaps.map((e) => {
+              const d = parseReapDetail(e.details)
+              return (
+                <li key={e.seq} className="flex items-center gap-2">
+                  {d.reason === 'silent' ? <Chip tone="warn">silent</Chip> : <Chip tone="danger">cert-expired</Chip>}
+                  <span className="truncate font-mono text-ink-dim" title={e.target ?? ''}>
+                    {d.overlay_ip || e.target || '—'}
+                  </span>
+                  {d.revoked && <Chip tone="danger">revoked</Chip>}
+                  <span className="ml-auto shrink-0 text-ink-faint">{fmtDateTime(e.ts)}</span>
+                </li>
+              )
+            })}
+          </ul>
+        ))}
+    </Tile>
+  )
+}
+
 function NetblockHealthRow({ b }: { b: Netblock }) {
   const tone = utilizationTone(b.pct)
   // used % keys off the live count vs capacity. `used` is now wired (D23): the backend
