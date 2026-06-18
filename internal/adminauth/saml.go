@@ -19,13 +19,21 @@ import (
 // shared RoleMapper. The SP key/cert sign AuthnRequests and back the SP metadata.
 type SAMLOptions struct {
 	Name        string
-	BaseURL     string                 // {BaseURL}/admin/v1/auth/<name>/{acs,metadata}
+	BaseURL     string                 // {BaseURL}/admin/v1/auth/<name>/{acs,metadata} by default
 	EntityID    string                 // SP entity id (default the metadata URL)
 	IDPMetadata *saml.EntityDescriptor // parsed IdP metadata (SSO URL + signing cert)
 	Key         *rsa.PrivateKey        // SP signing key
 	Certificate *x509.Certificate      // SP signing cert (in SP metadata)
 	GroupsAttr  string                 // assertion attribute carrying roles/groups
 	Secure      bool                   // Secure flag on the login cookie
+	// ACSPath / MetadataPath optionally override the default
+	// /admin/v1/auth/<name>/{acs,metadata} endpoint paths (joined onto BaseURL). The
+	// SSO enrollment portal (internal/gateway) sets these so the SP's declared ACS is
+	// the portal's own /v1/sso/acs — the IdP then auto-POSTs there, and crewjam's
+	// Destination/Recipient validation lines up against that URL. Leave empty for the
+	// admin login flow's default Register() routes.
+	ACSPath      string
+	MetadataPath string
 }
 
 // SAMLAuthenticator is a SAML 2.0 SP login provider. It implements
@@ -49,11 +57,13 @@ func NewSAML(opts SAMLOptions) (*SAMLAuthenticator, error) {
 	}
 	name := orDefault(opts.Name, "saml")
 	base := strings.TrimRight(opts.BaseURL, "/")
-	acs, err := url.Parse(base + "/admin/v1/auth/" + name + "/acs")
+	acsPath := orDefault(opts.ACSPath, "/admin/v1/auth/"+name+"/acs")
+	metaPath := orDefault(opts.MetadataPath, "/admin/v1/auth/"+name+"/metadata")
+	acs, err := url.Parse(base + acsPath)
 	if err != nil {
 		return nil, fmt.Errorf("adminauth: saml: acs url: %w", err)
 	}
-	meta, err := url.Parse(base + "/admin/v1/auth/" + name + "/metadata")
+	meta, err := url.Parse(base + metaPath)
 	if err != nil {
 		return nil, fmt.Errorf("adminauth: saml: metadata url: %w", err)
 	}
@@ -156,6 +166,46 @@ func (a *SAMLAuthenticator) acs(complete CompleteFunc) http.HandlerFunc {
 		}
 		complete(w, r, a.name, a.subjectFrom(assertion), ls.ReturnTo)
 	}
+}
+
+// AuthnRedirect builds an SP-initiated AuthnRequest (HTTP-Redirect binding) carrying
+// relayState and returns the IdP redirect URL plus the AuthnRequest ID. It is the
+// portal-flow seam (internal/gateway): unlike StartLogin it sets NO cookie and mints
+// NO RelayState — the caller owns the per-attempt state server-side (the SSO enroll
+// session) and is responsible for remembering requestID to pass back to ValidateACS as
+// the only accepted InResponseTo, and for binding relayState to that same session. All
+// SAML crypto (the SP construction, AuthnRequest signing) stays here.
+func (a *SAMLAuthenticator) AuthnRedirect(relayState string) (redirectURL, requestID string, err error) {
+	authReq, err := a.sp.MakeAuthenticationRequest(
+		a.sp.GetSSOBindingLocation(saml.HTTPRedirectBinding),
+		saml.HTTPRedirectBinding, saml.HTTPPostBinding)
+	if err != nil {
+		return "", "", fmt.Errorf("adminauth: saml: build authn request: %w", err)
+	}
+	redirect, err := authReq.Redirect(relayState, a.sp)
+	if err != nil {
+		return "", "", fmt.Errorf("adminauth: saml: build redirect: %w", err)
+	}
+	return redirect.String(), authReq.ID, nil
+}
+
+// ValidateACS validates an HTTP-POST SAML response on r against the single expected
+// AuthnRequest ID (the InResponseTo binding the caller stored server-side) and returns
+// the extracted Subject. crewjam's ParseResponse performs the full SAML validation —
+// XML-dsig signature against the trusted IdP signing cert, the audience (== SP entity
+// id), the NotBefore/NotOnOrAfter conditions, InResponseTo (== requestID, defeating
+// unsolicited/replayed assertions), and signature-wrapping (XSW) defenses. A non-empty
+// requestID MUST be supplied: an empty one would let crewjam accept an unsolicited
+// assertion. The caller is responsible for the RelayState↔session match before calling.
+func (a *SAMLAuthenticator) ValidateACS(r *http.Request, requestID string) (Subject, error) {
+	if requestID == "" {
+		return Subject{}, fmt.Errorf("adminauth: saml: empty request id (would admit unsolicited assertions)")
+	}
+	assertion, err := a.sp.ParseResponse(r, []string{requestID})
+	if err != nil {
+		return Subject{}, fmt.Errorf("adminauth: saml: assertion did not verify: %w", err)
+	}
+	return a.subjectFrom(assertion), nil
 }
 
 // metadata serves the SP metadata XML so the IdP admin can register Harbor.

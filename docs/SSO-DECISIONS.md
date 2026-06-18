@@ -161,3 +161,82 @@ build are **B#** (appended as phases land). Review at the end.
   genesis key distribution (gateway gets the PKCS#8 private half, Core pins the PKIX
   public half via `ssoassert.Parse*KeyPEM`) into `cmd/harbor` is a **LATER integration
   step**; this change provides only the seam + tests that inject it.
+
+- **B9 — Portal routes on the off-mesh gateway (two new, OPTIONAL).** The SSO enrollment
+  portal (S7/S9, SAML loopback authorization-code) is **two** routes added to the
+  existing gateway HTTP surface (`internal/gateway`), alongside the unchanged
+  nonce/enroll/poll routes: **`GET /v1/sso/start`** (pilot begins an SSO session) and
+  **`POST /v1/sso/acs`** (the IdP HTTP-POST SAML callback). They are **always mounted**
+  but **gated on config**: when SSO is not fully configured they return **404
+  `not_found` "SSO not enabled"** (uniform surface — a probe can't tell "off" from
+  "missing route"), and the rest of the gateway is unaffected. **The actual enroll
+  submission is UNCHANGED**: pilot still POSTs `EnrollRequest{method:oidc,
+  credential:{"assertion":"<jws>"}}` to the existing `/v1/enroll` (B5), which queues it
+  for Harbor's pull — `wire.MethodOIDC` was already accepted by `knownMethod`, so no
+  change there. Per ADR 0009 the gateway holds **no CA**: the portal only runs the IdP
+  flow and signs the short-lived assertion; all issuance authority stays mesh-only in
+  Core, which pulls + re-verifies (B6).
+
+- **B10 — Server-side session binding + loopback hand-off (the device cannot be
+  substituted).** `/v1/sso/start` takes `pubkey_hash`, the pubkey-bound `nonce` pilot
+  minted at `/v1/nonce`, and a `redirect` (pilot's loopback URL). It re-verifies the
+  nonce with the **same `nonces.Verify(nonce, pubkey_hash)` keyring check** `/v1/enroll`
+  uses (fail fast before a SAML round trip; Core still re-checks single-use, B6), mints
+  an **unguessable 256-bit `state` token**, stores a **short-TTL, single-use server-side
+  session** `{pubkey_hash, nonce, loopback_redirect, SAML requestID}` keyed by that
+  state, and redirects to the IdP AuthnRequest with **`RelayState = state`**. The
+  browser/user **never sees** pubkey_hash, nonce, or requestID — RelayState is only an
+  opaque lookup key — so a user **cannot substitute a different device's** pubkey/nonce
+  into the flow (the binding is fixed server-side at start, not carried in any
+  user-controllable field). At `/v1/sso/acs` the session is **recovered and consumed
+  (single-use) by RelayState FIRST**; an unknown/forged/replayed RelayState has no
+  session and is rejected before any SAML work. **Hand-off:** after validation the
+  gateway **302s the browser to the loopback `redirect` with
+  `?assertion=<compact-jws>&state=<state>`** (the simpler safe option vs a retrieval
+  handle) — the assertion is already integrity-protected (ES256), short-lived, and
+  bound to {pubkey_hash, nonce}, so a different device can't use it even if the redirect
+  query leaks; `state` is echoed so pilot can match the response to its own session. The
+  session store is **in-memory with TTL GC** (loses everything on gateway restart;
+  in-flight enrolls just retry — fine, mirrors the nonce/cookie ephemerality elsewhere).
+
+- **B11 — Loopback-redirect validation (open-redirect / assertion-exfil guard).** The
+  `redirect` is accepted **only** when it is an `http`/`https` URL with **no userinfo**
+  whose host is a **loopback target** — the literal `localhost`, or an IP that
+  `net.IP.IsLoopback()` accepts (`127.0.0.0/8`, `::1`). Everything else is refused at
+  `/v1/sso/start` with `invalid_request` (and capped at 512 bytes): a public host, a
+  private non-loopback IP, a non-http scheme, a `user:pass@` form, a bare path, a
+  look-alike host like `127.0.0.1.evil.com` (rejected — its *host* is not loopback), or
+  an unparseable URL. This is the key exfil guard: the signed assertion is only ever
+  handed to a process **on pilot's own machine**, never to an attacker-chosen host. Host
+  parsing uses `url.Hostname()` so a `:port` and IPv6 brackets are handled correctly.
+
+- **B12 — Assertion TTL: short, configurable, default 3 min.** The signed
+  `ssoassert.Assertion` carries `iat = now` and `exp = now + AssertionTTL`, with
+  `AssertionTTL` configurable on the portal and **defaulting to 3 minutes** (within the
+  S5 "2–5 min" band) — long enough for pilot to receive the loopback redirect and POST
+  to `/v1/enroll`, short enough that a captured assertion is near-useless. Core
+  independently re-checks the window in `ssoassert.Verify(pinnedKey, token, now)` (B6),
+  so a too-long TTL on the gateway can never widen Core's acceptance beyond the embedded
+  `exp`. The session TTL (how long a started flow may sit awaiting the ACS POST) is a
+  **separate** knob, default 5 min.
+
+- **B13 — SAML protections RELIED ON from adminauth (no hand-rolled SAML).** Per the
+  ADR-0004 directive, the portal **reuses `internal/adminauth`'s SAML
+  `SAMLAuthenticator`** for every SAML operation rather than parsing SAML itself. Two
+  thin exported seams were added there: **`AuthnRedirect(relayState)`** (builds + signs
+  the SP-initiated AuthnRequest, returns the IdP redirect URL + the AuthnRequest ID the
+  portal stores as the only accepted InResponseTo — sets **no cookie**, mints **no
+  RelayState**, because the portal owns that state server-side), and
+  **`ValidateACS(r, requestID)`** (runs crewjam's `sp.ParseResponse(r, [requestID])` and
+  returns the extracted `Subject`). Through crewjam, adminauth handles: **XML-dsig
+  signature** verification against the trusted IdP signing cert; **signature-wrapping
+  (XSW)** defenses; **audience** restriction (`== SP entity id`); the
+  **NotBefore/NotOnOrAfter conditions**; and **InResponseTo / replay** (the assertion
+  must answer the portal's stored `requestID`; `AllowIDPInitiated=false` means an
+  empty/unsolicited assertion is refused, and `ValidateACS` additionally rejects an empty
+  requestID). The **`Destination`/`Recipient`** checks line up because a new optional
+  **`ACSPath`/`MetadataPath`** on `adminauth.SAMLOptions` lets the portal declare its own
+  `/v1/sso/acs` as the SP's ACS (so the IdP auto-POSTs there and crewjam's URL checks
+  match). On top of crewjam's SAML layer the portal adds **RelayState↔server-side-session
+  binding** (single-use, unguessable) — defeating cross-flow / device-substitution
+  injection that SAML alone does not cover.
