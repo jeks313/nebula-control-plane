@@ -349,7 +349,7 @@ func (c *Consumer) processAttested(ctx context.Context, cand queue.Candidate, re
 		return Result{EnrollmentID: cand.EnrollmentID, Status: StatusDenied}, err
 	}
 
-	groupsSlice, autoIssue, ok := c.cfg.CloudTrust.MatchAWS(id)
+	groupsSlice, netblock, autoIssue, ok := c.cfg.CloudTrust.MatchAWS(id)
 	if !ok {
 		reason := fmt.Sprintf("AWS account %s / role %s is not in the cloud-trust config", id.Account, id.Arn)
 		c.deny(ctx, cand, req, pubBytes, "enroll-denied", reason)
@@ -381,9 +381,10 @@ func (c *Consumer) processAttested(ctx context.Context, cand queue.Candidate, re
 		return Result{EnrollmentID: cand.EnrollmentID, Status: StatusPending}, nil
 	}
 
-	// Cloud-trust -> netblock binding is Phase 2 (AWSAccount.Netblock); for now the
-	// aws-sigv4 path draws from the default block. Method records the join source.
-	ip, certPEM, fp, notAfter, err := c.issue(ctx, "enroll-attested", deviceName, pubBytes, groupsSlice, "", "aws-sigv4")
+	// Cloud-trust -> netblock binding (ADR 0010 Phase 2): the matched AWSAccount's
+	// Netblock (empty -> the bounded 'default' block) scopes the allocation. Method
+	// records the join source.
+	ip, certPEM, fp, notAfter, err := c.issue(ctx, "enroll-attested", deviceName, pubBytes, groupsSlice, netblock, "aws-sigv4")
 	if err != nil {
 		return Result{}, err
 	}
@@ -434,8 +435,9 @@ func (c *Consumer) Approve(ctx context.Context, enrollmentID, approver string) (
 	var groups []string
 	_ = json.Unmarshal([]byte(e.Groups), &groups)
 	// Re-derive the netblock binding from the pending row: a join-key enrollment draws
-	// from the key's sub-range (netblock name); other methods (aws-sigv4) draw from the
-	// default block (cloud->netblock is Phase 2). The wire method recorded on the row
+	// from the key's sub-range (netblock name); an aws-sigv4 enrollment re-resolves the
+	// matched cloud-trust scope's netblock from the active config + the row's stored
+	// attestation evidence (ADR 0010 Phase 2). The wire method recorded on the row
 	// (token|aws-sigv4) is the provenance method.
 	netblockName := c.approveNetblock(ctx, e)
 	ip, certPEM, fp, notAfter, err := c.issue(ctx, approver, e.DeviceName, e.Pubkey, groups, netblockName, e.Method)
@@ -597,19 +599,32 @@ func (c *Consumer) verify(ctx context.Context, cand queue.Candidate) (wire.Enrol
 }
 
 // approveNetblock resolves the netblock name for a pending enrollment being
-// approved: a join-key enrollment (JoinKeyID != 0) draws from the key's sub-range
-// (the netblock name, ADR 0010). Anything else (aws-sigv4) returns "" -> the
-// default block (cloud->netblock binding is Phase 2). A best-effort read failure
-// falls back to "" so an approval is never blocked on a transient lookup.
+// approved (ADR 0010 Phase 2):
+//   - a join-key enrollment (JoinKeyID != 0) draws from the key's sub-range (the
+//     netblock name);
+//   - an aws-sigv4 enrollment re-resolves the matched cloud-trust scope's netblock
+//     from the active config + the attestation evidence stored on the row, so a
+//     pending attested enrollment lands in the SAME block its auto-issue sibling
+//     would have;
+//   - anything else returns "" -> the bounded 'default' block.
+//
+// A best-effort read/match miss falls back to "" so an approval is never blocked on
+// a transient lookup or a since-removed scope.
 func (c *Consumer) approveNetblock(ctx context.Context, e Enrollment) string {
-	if e.JoinKeyID == 0 {
-		return ""
+	if e.JoinKeyID != 0 {
+		var jk joinkey.JoinKey
+		if err := c.cfg.Store.DB.WithContext(ctx).First(&jk, "id = ?", e.JoinKeyID).Error; err != nil {
+			return ""
+		}
+		return jk.SubRange
 	}
-	var jk joinkey.JoinKey
-	if err := c.cfg.Store.DB.WithContext(ctx).First(&jk, "id = ?", e.JoinKeyID).Error; err != nil {
-		return ""
+	if e.Method == wire.MethodAWSSigV4 && c.cfg.CloudTrust != nil && e.AttestProvider == cloudtrust.ProviderAWS {
+		_, netblock, _, ok := c.cfg.CloudTrust.MatchAWS(awsattest.Identity{Account: e.AttestAccount, Arn: e.AttestPrincipal})
+		if ok {
+			return netblock
+		}
 	}
-	return jk.SubRange
+	return ""
 }
 
 // issue allocates an overlay IP from the named netblock (empty -> the bounded
