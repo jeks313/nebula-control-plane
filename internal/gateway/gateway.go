@@ -47,18 +47,25 @@ type Config struct {
 	Limiter      *ratelimit.Limiter // nil = no edge limit
 	MaxBodyBytes int64              // <=0 -> default
 	TicketTTL    time.Duration      // <=0 -> default
-	Now          func() time.Time
+	// SSO is the OPTIONAL SSO enrollment portal (ADR 0004). When nil or not fully
+	// configured (no SAML SP / no signing key), the portal routes return 404 "SSO not
+	// enabled" and the rest of the gateway is unaffected — the gateway never holds a CA.
+	SSO *SSOConfig
+	Now func() time.Time
 }
 
 // Server is the gateway HTTP surface.
 type Server struct {
-	nonces    *nonce.Keyring
-	queue     queue.Queue
-	results   ResultReader
-	limiter   *ratelimit.Limiter
-	maxBody   int64
-	ticketTTL time.Duration
-	now       func() time.Time
+	nonces       *nonce.Keyring
+	queue        queue.Queue
+	results      ResultReader
+	limiter      *ratelimit.Limiter
+	maxBody      int64
+	ticketTTL    time.Duration
+	now          func() time.Time
+	sso          *SSOConfig
+	ssoSessions  *ssoSessions
+	assertionTTL time.Duration
 }
 
 // New builds a gateway from cfg.
@@ -71,6 +78,7 @@ func New(cfg Config) *Server {
 		maxBody:   cfg.MaxBodyBytes,
 		ticketTTL: cfg.TicketTTL,
 		now:       cfg.Now,
+		sso:       cfg.SSO,
 	}
 	if s.maxBody <= 0 {
 		s.maxBody = defaultMaxBody
@@ -81,6 +89,14 @@ func New(cfg Config) *Server {
 	if s.now == nil {
 		s.now = time.Now
 	}
+	// Stand up the SSO portal's session store + TTLs only when it is fully configured.
+	if s.sso.enabled() {
+		s.assertionTTL = s.sso.AssertionTTL
+		if s.assertionTTL <= 0 {
+			s.assertionTTL = defaultAssertionTTL
+		}
+		s.ssoSessions = newSSOSessions(s.sso.SessionTTL, s.now)
+	}
 	return s
 }
 
@@ -90,6 +106,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/nonce", s.handleNonce)
 	mux.HandleFunc("POST /v1/enroll", s.handleEnroll)
 	mux.HandleFunc("GET /v1/enroll/{id}", s.handlePoll)
+	// SSO enrollment portal (ADR 0004). The routes are always mounted; when SSO is not
+	// configured they answer 404 "SSO not enabled" (so the surface is uniform and a
+	// probe can't distinguish "off" from "missing route"). The gateway holds no CA.
+	mux.HandleFunc("GET /v1/sso/start", s.handleSSOStart)
+	mux.HandleFunc("POST /v1/sso/acs", s.handleSSOACS)
 	return mux
 }
 
