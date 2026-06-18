@@ -71,3 +71,20 @@ build could proceed; flagged here for review. **D#** = decided-by-default during
   per-grow events).
 - **D16 — `cloudtrust.AWSAccount.Netblock` deliberately NOT added** (Phase 2, per the ADR). The
   aws-sigv4 path passes netblock `""`; no `cloudtrust` change was needed for compilation.
+- **D17 — Cloud-trust netblock binding wired (Phase 2).** Added `Netblock string \`json:"netblock,omitempty"\``
+  to `cloudtrust.AWSAccount` and extended `MatchAWS` to return it:
+  `MatchAWS(id) (groups []string, netblock string, autoIssue, ok bool)` — netblock slots in
+  before the two existing bools (so the matched scope's binding rides alongside the groups/auto-issue
+  it already resolves). **Validate stays lenient on the name** (no format/existence check at
+  config-publish time): the netblock may be carved *after* the trust config is published, and an
+  unknown name resolves to `default` at allocation time anyway (the resolver's empty→default
+  fallback), so validating at publish would create an ordering trap. The enrollment auto-issue path
+  threads the matched netblock into `issue(..., netblock, "aws-sigv4")`. For the **Approve** path,
+  rather than add an `enrollments.netblock` column (out of Phase-2 scope, no migration), `approveNetblock`
+  re-resolves the binding from the active `CloudTrust` config + the row's stored attestation evidence
+  (`AttestAccount`/`AttestPrincipal` via `MatchAWS`), so a pending attested enrollment lands in the
+  SAME block its auto-issue sibling would have; a since-removed scope or absent config falls back to
+  `""`→default (approval never blocks). Propagation is just JSON: `omitempty` keeps old payloads
+  identical, `cloudtrust.Parse`'s `DisallowUnknownFields` now accepts the field, and propose/active
+  marshal the struct directly — round-trip verified by a `TestParseValid` assertion. `openapi.yaml`'s
+  `CloudTrustAccount` schema gains a `netblock` string property (contract guard stays green).

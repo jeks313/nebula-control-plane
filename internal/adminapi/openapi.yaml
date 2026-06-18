@@ -819,6 +819,7 @@ components:
         arn_patterns: { type: array, items: { type: string }, description: "allowed caller-ARN globs; empty = any ARN in the account" }
         groups: { type: array, items: { type: string }, description: "groups granted to hosts attesting from this account" }
         auto_issue: { type: boolean, description: "issue immediately vs queue for manual approval" }
+        netblock: { type: string, description: "named IPAM netblock hosts from this scope draw their overlay IP from (ADR 0010); empty = the default block" }
     CloudTrustActive:
       type: object
       required: [published]

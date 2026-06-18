@@ -46,6 +46,12 @@ type AWSAccount struct {
 	ARNPatterns []string `json:"arn_patterns,omitempty"` // allowed caller-ARN globs; empty = any ARN IN THIS ACCOUNT
 	Groups      []string `json:"groups,omitempty"`       // groups granted to hosts attesting from this account
 	AutoIssue   bool     `json:"auto_issue,omitempty"`   // true = issue immediately; false = queue for manual approval
+	// Netblock is the named IPAM netblock hosts attesting from this scope draw their
+	// overlay IP from (ADR 0010, per-scope binding). Empty = the bounded 'default'
+	// block. Not validated here: the netblock may be carved later, and the name is
+	// resolved at allocation time (an unknown name falls back to default there). Rides
+	// the existing cloudtrust.propose/active dual-control publish.
+	Netblock string `json:"netblock,omitempty"`
 }
 
 // Config is the full cloud-trust config (the dual-control change payload).
@@ -101,17 +107,18 @@ func Validate(c Config) error {
 
 // MatchAWS resolves a STS-verified AWS identity against the trusted accounts, reusing
 // awsattest's vetted account-exact + ARN-glob matching. On a match it returns the
-// resolved group set (DefaultGroups ∪ the matched account's groups, deduped+sorted) and
-// the auto-issue posture. ok=false means DENY — an identity matching no entry may not
-// attest (fail closed).
-func (c Config) MatchAWS(id awsattest.Identity) (groups []string, autoIssue, ok bool) {
+// resolved group set (DefaultGroups ∪ the matched account's groups, deduped+sorted),
+// the auto-issue posture, and the matched account's netblock name (empty = the default
+// block — ADR 0010, per-scope binding). ok=false means DENY — an identity matching no
+// entry may not attest (fail closed).
+func (c Config) MatchAWS(id awsattest.Identity) (groups []string, netblock string, autoIssue, ok bool) {
 	for _, a := range c.AWS {
 		gate := awsattest.Policy{Accounts: []string{a.Account}, ARNPatterns: a.ARNPatterns}
 		if gate.Check(id) == nil {
-			return c.resolveGroups(a.Groups), a.AutoIssue, true
+			return c.resolveGroups(a.Groups), a.Netblock, a.AutoIssue, true
 		}
 	}
-	return nil, false, false
+	return nil, "", false, false
 }
 
 func (c Config) resolveGroups(principalGroups []string) []string {
