@@ -201,6 +201,42 @@ posture already depend on, sharpened by offboarding.
 6. **Anti-relay UX** — exactly what the consent screen shows (device name, fingerprint,
    requested groups) and how a user is taught to reject an unexpected device.
 
+## Operator setup (live rollout)
+
+SSO enrollment needs a **second SAML app registration in the IdP (AD/Entra/ADFS), distinct
+from the admin-console app** — same tenant, same users, same directory groups, but its own
+registration. Two reasons:
+
+1. **Different ACS / Reply URL.** The IdP only POSTs the SAML response to a *registered* ACS.
+   The console's ACS is the **mesh-only** admin-api URL (reached via tunnel); the enrollment
+   portal's ACS is the **public** gateway: `https://<gateway-public-host>/v1/sso/acs`. One app
+   cannot serve both.
+2. **Trust-zone separation is load-bearing (ADR 0009).** The two surfaces are deliberately
+   **different audiences** (SP entity IDs). The SAML library enforces `audience == this SP`, so
+   a console-login assertion can never be replayed at the public portal (or vice-versa).
+   Sharing one app would collapse that boundary — a real security regression.
+
+**The new (enrollment-portal) app:**
+- **Identifier (Entity ID)** = the gateway portal's `-sso-entity-id` (distinct from the console's
+  `-saml-entity-id`).
+- **Reply URL (ACS)** = `https://<gateway-public-host>/v1/sso/acs`.
+- Emit the **group claim** (the same AD groups already surfaced to the console). The *claim* is
+  identical; only the **mapping** differs — the console maps groups → admin RBAC roles; the
+  portal maps groups → mesh groups via the published `user-trust` config (first-match-wins).
+- The assertion **issuer/realm** (the gateway's `-sso-issuer`, fed to `usertrust.Match`) is the
+  IdP's issuer — the same IdP backs both apps.
+
+**Other live-rollout prerequisites (deferred from the build):**
+- **Distribute the genesis-minted assertion keypair**: the **private** half → the gateway's
+  config/secret (`-sso-assert-key` / `$NCP_GW_SSO_ASSERT_KEY_PEM`); the **public** half is pinned
+  on Core (`-sso-assert-pub`). Genesis emits `sso-assert.key` / `sso-assert.pub` and records only
+  the public half in the key registry.
+- **Feed the gateway the portal SP**: `-sso-acs-url` (enables SSO), `-sso-idp-metadata-*` (the new
+  app's IdP metadata), `-sso-sp-cert`/`-sso-sp-key`, `-sso-entity-id`, `-sso-issuer`.
+- **Enable Core**: `-sso-assert-pub` (pin) + `-usertrust-db`, and **publish a user-trust config**
+  (`harbor usertrust publish`, or the dual-control UI) mapping the AD groups → mesh groups + CIDR.
+- `deploy/prod/bootstrap-genesis.sh` threading of all of the above is not yet wired.
+
 ## Relationship to other work
 
 - **`adminauth` (2.11)** — the IdP integration (`Authenticator`/`Subject`) reused directly;
