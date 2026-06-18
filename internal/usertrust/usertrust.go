@@ -43,8 +43,9 @@ func RegisterCommitter(dc *dualcontrol.Controller) {
 // the entry's mesh groups (merged with the config DefaultGroups), draws its overlay
 // IP from Netblock, and is issued immediately iff AutoIssue.
 type IDPEntry struct {
-	// Realm scopes the entry to one IdP/tenant; empty Realm is a wildcard matching
-	// any realm. Required for uniqueness only together with DirectoryGroup.
+	// Realm scopes the entry to one IdP/tenant and is matched EXACTLY against the
+	// assertion issuer/realm. Required (Validate rejects an empty realm); together with
+	// DirectoryGroup it is the entry's uniqueness key.
 	Realm string `json:"realm"`
 	// DirectoryGroup is the SAML/OIDC AD-group name this entry keys on (S2). Required.
 	DirectoryGroup string `json:"directory_group"`
@@ -127,15 +128,15 @@ func Validate(c Config) error {
 
 // Match resolves an SSO identity (its realm + the directory groups the IdP asserted)
 // against the ordered entries, FIRST-MATCH WINS for groups, netblock, AND auto-issue
-// (S4 — no union across entries). An entry matches when its Realm equals realm (an
-// empty entry.Realm is a wildcard matching any realm) AND its DirectoryGroup is one of
-// userGroups. On a match it returns the resolved group set (DefaultGroups ∪ the matched
-// entry's MeshGroups, deduped+sorted), the matched entry's Netblock (empty = default
-// block), the matched entry's AutoIssue, and ok=true. No entry matches → ok=false,
-// which means DENY (an identity in no trusted group may not enroll — fail closed).
+// (S4 — no union across entries). An entry matches when its Realm equals realm EXACTLY
+// AND its DirectoryGroup is one of userGroups. On a match it returns the resolved group
+// set (DefaultGroups ∪ the matched entry's MeshGroups, deduped+sorted), the matched
+// entry's Netblock (empty = default block), the matched entry's AutoIssue, and ok=true.
+// No entry matches → ok=false, which means DENY (an identity in no trusted group may not
+// enroll — fail closed).
 func Match(cfg Config, realm string, userGroups []string) (groups []string, netblock string, autoIssue, ok bool) {
 	for _, e := range cfg.IDPEntries {
-		if e.Realm != "" && e.Realm != realm {
+		if e.Realm != realm {
 			continue
 		}
 		if !contains(userGroups, e.DirectoryGroup) {

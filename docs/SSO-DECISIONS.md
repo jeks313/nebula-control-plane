@@ -92,14 +92,12 @@ build are **B#** (appended as phases land). Review at the end.
   would grant nothing (no `mesh_groups` and no config `default_groups`), since the UI guard
   is bypassable. Published via the `usertrust.publish` dual-control kind, re-parsed at commit.
 
-- **B4 — Realm-wildcard rule.** An entry's `Realm` is matched **exactly** against the
-  assertion issuer/realm, with one exception: an **empty `Realm` is a wildcard** that matches
-  any realm. Combined with first-match-wins (B3) this lets a config place realm-specific
-  entries ahead of a catch-all wildcard entry (e.g. `realm=corp → corp-eng`, then
-  `realm="" → any-eng`): a `corp` user takes the specific entry, a `partner` user falls
-  through to the wildcard. `Validate` still requires a non-empty `DirectoryGroup` on every
-  entry (the wildcard is on realm only, never on the group), so a wildcard entry never grants
-  blanket access — it still keys on AD-group membership.
+- **B4 — Realm-wildcard rule.** *(SUPERSEDED by B16 — the empty-realm wildcard was removed;
+  realm matching is now strictly exact.)* This originally allowed an **empty `Realm` to act
+  as a wildcard** matching any realm, so a config could place realm-specific entries ahead of
+  a catch-all. That branch was dead in any published config — `Validate` rejects an empty
+  realm (`ErrNoRealm`) — and a wildcard ordered first would have shadowed specific-realm
+  entries, so it was dropped. See B16.
 
 - **B5 — SSO credential envelope: `{"assertion":"<compact-jws>"}`.** The wire
   `EnrollRequest.Credential` for `method=oidc` is a typed JSON wrapper carrying the
@@ -335,3 +333,25 @@ build are **B#** (appended as phases land). Review at the end.
   and `sso-assert.pub` pinned on Core. No live SAML IdP was set up. The binaries now
   COMPILE and are fully configurable to run SSO, and a fresh genesis produces the
   assertion keypair; turning it on is deploy plumbing.
+
+- **B16 — Phase-1 review hardening: mandatory assertion expiry + exact-realm matching.**
+  Two review findings tightened, both fail-closed corrections to earlier decisions.
+  **(1) Mandatory expiry + bounded lifetime (revises B2/B12).** `ssoassert.Verify` no
+  longer treats a zero/absent `exp` as "valid forever" — it had been `if exp != 0 && now >
+  exp`, so an assertion with `exp == 0` slipped past the window check and was accepted
+  indefinitely, violating the package's own validity-window contract. Verify now REQUIRES a
+  positive window: `exp == 0` OR `iat <= 0` → `ErrExpired`; `now > exp` → `ErrExpired`;
+  `now < iat` → `ErrExpired` (not yet valid); and `exp - iat` greater than a generous
+  `maxLifetime` cap (**1h**, well above the B12 default 3 min / S5 2–5 min band) →
+  `ErrExpired` (an implausibly long window is treated as malformed). This is belt-and-
+  suspenders behind the signature (a forger past the pinned key is already inside the trust
+  boundary), but it closes the never-expires gap and bounds a misconfigured/over-broad
+  gateway TTL. **(2) Exact-realm matching, wildcard removed (supersedes B4).**
+  `usertrust.Match` no longer treats an empty `IDPEntry.Realm` as "match any realm" — an
+  entry now matches only when `e.Realm == realm`. The wildcard branch was already dead
+  (`Validate` rejects an empty realm with `ErrNoRealm`, so no published config could carry
+  one), the docs advertised a feature that couldn't exist, and a wildcard ordered first
+  would have shadowed every specific-realm entry — a quiet trust-widening. The package /
+  field / `Match` docs dropped the wildcard language; `TestMatchRealm` now builds its config
+  via `Parse` so it can only assert behavior `Validate` permits. No config-format change
+  (an empty realm was always invalid).

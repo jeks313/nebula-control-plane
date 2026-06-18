@@ -265,8 +265,9 @@ func Run(ctx context.Context, s *store.Store, caBackend, configBackend signer.Ba
 	// establishes the other roots also produces + distributes this one. Only the public
 	// half is recorded in the DB key registry (the gateway's private half lives off-mesh
 	// on the gateway, never centralized); both PEMs are returned for the operator to
-	// distribute. Skipped silently if it fails to generate — SSO is optional and Core
-	// fails closed (ErrSSONotConfigured) when AssertionVerifyKey is unset.
+	// distribute. A keygen failure aborts the whole genesis (acceptable — P-256 keygen
+	// effectively never fails; SSO being optional means Core fails closed with
+	// ErrSSONotConfigured later if the operator never distributes the resulting key).
 	ssoPriv, err := ssoassert.GenerateKey()
 	if err != nil {
 		return Result{}, fmt.Errorf("genesis: generate SSO assertion key: %w", err)

@@ -114,6 +114,51 @@ func TestVerifyNotYetValid(t *testing.T) {
 	}
 }
 
+func TestVerifyMissingExpiry(t *testing.T) {
+	priv, _ := GenerateKey()
+	now := time.Now()
+	a := sample(now)
+	a.ExpiresAt = 0 // no expiry must NOT be accepted as valid-forever
+	token, _ := Sign(priv, a)
+	if _, err := Verify(&priv.PublicKey, token, now); !errors.Is(err, ErrExpired) {
+		t.Fatalf("exp==0: want ErrExpired, got %v", err)
+	}
+}
+
+func TestVerifyMissingIssuedAt(t *testing.T) {
+	priv, _ := GenerateKey()
+	now := time.Now()
+	a := sample(now)
+	a.IssuedAt = 0 // a present exp with no iat is still rejected (no window)
+	token, _ := Sign(priv, a)
+	if _, err := Verify(&priv.PublicKey, token, now); !errors.Is(err, ErrExpired) {
+		t.Fatalf("iat==0: want ErrExpired, got %v", err)
+	}
+}
+
+func TestVerifyOverLongWindow(t *testing.T) {
+	priv, _ := GenerateKey()
+	now := time.Now()
+	a := sample(now)
+	// A window well beyond maxLifetime (1h) is rejected even though now is inside it.
+	a.IssuedAt = now.Unix()
+	a.ExpiresAt = now.Add(2 * time.Hour).Unix()
+	token, _ := Sign(priv, a)
+	if _, err := Verify(&priv.PublicKey, token, now); !errors.Is(err, ErrExpired) {
+		t.Fatalf("over-long window: want ErrExpired, got %v", err)
+	}
+}
+
+func TestVerifyShortWindowOK(t *testing.T) {
+	priv, _ := GenerateKey()
+	now := time.Now()
+	a := sample(now) // sample()'s 5-min window is well under the 1h cap
+	token, _ := Sign(priv, a)
+	if _, err := Verify(&priv.PublicKey, token, now); err != nil {
+		t.Fatalf("normal short window should verify, got %v", err)
+	}
+}
+
 func TestVerifyWrongKey(t *testing.T) {
 	priv, _ := GenerateKey()
 	other, _ := GenerateKey()
