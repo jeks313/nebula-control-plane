@@ -79,6 +79,89 @@ lighthouse:
 	}
 }
 
+// TestGatherInfoAutoDetectsSingleMeshDir: a node running the single-mesh `-dir` layout
+// (all state flat in one dir, e.g. /etc/nebula) is NOT under StateRoot, so the bare
+// `pilot info` (no -dir/-mesh) must still find it by auto-detecting defaultMeshDir and
+// report its overlay/cert — the live-on-AWS gap this fixes.
+func TestGatherInfoAutoDetectsSingleMeshDir(t *testing.T) {
+	dir := t.TempDir()
+	writeMeshDirState(t, dir, netip.MustParsePrefix("10.44.0.4/16"))
+
+	// Point the conventional single-mesh dir at our temp layout; StateRoot stays
+	// (typically) empty, so this exercises the auto-detect branch.
+	old := defaultMeshDir
+	defaultMeshDir = dir
+	t.Cleanup(func() { defaultMeshDir = old })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	info := gatherInfo(ctx, "", "") // bare `pilot info`
+
+	mi := findMesh(t, info, dir)
+	if mi.OverlayIP != "10.44.0.4" {
+		t.Fatalf("auto-detected single-mesh overlay = %q, want 10.44.0.4", mi.OverlayIP)
+	}
+	if mi.CommonName != "host" || mi.CertFP == "" {
+		t.Fatalf("single-mesh cert not surfaced: %+v", mi)
+	}
+}
+
+// TestGatherInfoDirFlag: `pilot info -dir <path>` reports exactly that arbitrary state
+// dir as one mesh (the explicit form of the single-mesh layout), reading its on-disk
+// identity even when it's neither under StateRoot nor the defaultMeshDir.
+func TestGatherInfoDirFlag(t *testing.T) {
+	dir := t.TempDir()
+	writeMeshDirState(t, dir, netip.MustParsePrefix("10.44.0.9/16"))
+
+	// defaultMeshDir points elsewhere (a dir with no state) — only -dir should match.
+	old := defaultMeshDir
+	defaultMeshDir = t.TempDir()
+	t.Cleanup(func() { defaultMeshDir = old })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	info := gatherInfo(ctx, "", dir)
+
+	if len(info.Meshes) != 1 {
+		t.Fatalf("-dir should report exactly one mesh, got %d: %+v", len(info.Meshes), info.Meshes)
+	}
+	mi := info.Meshes[0]
+	if mi.StateDir != dir {
+		t.Fatalf("-dir state dir = %q, want %q", mi.StateDir, dir)
+	}
+	if mi.OverlayIP != "10.44.0.9" || mi.CommonName != "host" {
+		t.Fatalf("-dir cert not surfaced: %+v", mi)
+	}
+}
+
+// findMesh returns the reported mesh whose StateDir is base, failing if absent.
+func findMesh(t *testing.T, info nodeInfo, base string) MeshInfo {
+	t.Helper()
+	for _, m := range info.Meshes {
+		if m.StateDir == base {
+			return m
+		}
+	}
+	t.Fatalf("no mesh reported for state dir %q (meshes: %+v)", base, info.Meshes)
+	return MeshInfo{}
+}
+
+// writeMeshDirState lays a real-ish single-mesh `-dir` layout (a signed host cert in
+// overlay's pool + a config.yml) directly in dir, mirroring the on-disk shape of an
+// /etc/nebula deployment so readMeshState surfaces the identity.
+func writeMeshDirState(t *testing.T, dir string, overlay netip.Prefix) {
+	t.Helper()
+	// writeMeshCert writes to <root>/<mesh>/host.crt; pass dir's parent + base so the
+	// cert lands directly in dir.
+	writeMeshCert(t, filepath.Dir(dir), filepath.Base(dir), overlay)
+	cfg := `static_host_map:
+  "10.44.0.1": ["198.51.100.1:4242"]
+`
+	if err := os.WriteFile(paths.New(dir).Config(), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestReadMeshStateNotEnrolled: an empty state dir yields a mostly-empty MeshInfo (no
 // panic, no error) — the "not joined / not enrolled" path.
 func TestReadMeshStateNotEnrolled(t *testing.T) {

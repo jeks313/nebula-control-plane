@@ -83,7 +83,7 @@ func usage() {
 usage:
   pilot install -gateway <url> -core <url> -config-pub <pem> (-join-key <secret> | -aws-sigv4) [-mesh <id>] [-name N] [-groups a,b]
   pilot status [-mesh <id>]
-  pilot info [--json] [-mesh <id>]
+  pilot info [--json] [-mesh <id>] [-dir <path>]
   pilot uninstall [-mesh <id>] [-purge] | -all
   pilot init [-dir <path>] [-values <values.yml>] [-am-lighthouse]
   pilot enroll -gateway <url> -join-key <secret> -config-pub <pem> [-dir <path>] [-name N] [-groups a,b]
@@ -102,7 +102,9 @@ commands:
               (overlay IP/cert/groups/expiry/lighthouses/bundle), best-effort
               Harbor reachability, and the CLOUD ATTESTATION IDENTITY this node
               would present (AWS account/role/ARN + a cloudtrust onboarding hint;
-              Azure is informational). --json for scripted onboarding.
+              Azure is informational). Scans the multi-mesh StateRoot AND
+              auto-detects the single-mesh -dir layout (/etc/nebula); -dir <path>
+              reports an arbitrary state dir. --json for scripted onboarding.
   uninstall   disable+stop a mesh's service (-purge deletes its identity; -all tears
               down every mesh + the shared unit for a full host cleanup).
   init        lay out the host dir, generate the host key (P256), and render
