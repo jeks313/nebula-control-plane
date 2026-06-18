@@ -32,6 +32,13 @@ import (
 // so a token minted for another purpose can't be replayed here.
 const typ = "ncp-sso-assertion-v1"
 
+// maxLifetime caps the validity window (exp - iat) an assertion may claim. The portal
+// mints short-lived assertions (B12 default 3 min, S5 "2-5 min" band); 1h is a generous
+// ceiling well above that, so a malformed or over-broad window is treated as invalid
+// (an attacker who could forge `exp` is already past the signature check — this is a
+// belt-and-suspenders sanity bound, not the primary control).
+const maxLifetime = time.Hour
+
 // Errors callers can branch on.
 var (
 	ErrSignature = errors.New("ssoassert: signature verification failed")
@@ -76,6 +83,11 @@ func Sign(priv *ecdsa.PrivateKey, a Assertion) ([]byte, error) {
 // its validity window at now (ErrExpired). On success it returns the parsed Assertion.
 // Core must still re-run its own checks (nonce single-use, usertrust.Match) — this only
 // proves the gateway vouched for these facts.
+//
+// A positive validity window is MANDATORY: a present, future exp AND a present, past iat
+// are both required, and the window (exp - iat) may not exceed maxLifetime. A missing
+// exp (exp == 0), a missing iat (iat == 0), or an implausibly long window is rejected as
+// ErrExpired rather than accepted — an assertion with no expiry is never valid forever.
 func Verify(pub *ecdsa.PublicKey, token []byte, now time.Time) (Assertion, error) {
 	p1, p2, ok := splitCompact(string(token))
 	if !ok {
@@ -102,12 +114,19 @@ func Verify(pub *ecdsa.PublicKey, token []byte, now time.Time) (Assertion, error
 		return Assertion{}, ErrMalformed
 	}
 
-	nowUnix := now.Unix()
-	if a.ExpiresAt != 0 && nowUnix > a.ExpiresAt {
-		return Assertion{}, ErrExpired
+	// A positive validity window is mandatory (no exp == "valid forever").
+	if a.ExpiresAt == 0 || a.IssuedAt <= 0 {
+		return Assertion{}, ErrExpired // missing/absent exp or iat is not a valid window
 	}
-	if a.IssuedAt != 0 && nowUnix < a.IssuedAt {
+	nowUnix := now.Unix()
+	if nowUnix > a.ExpiresAt {
+		return Assertion{}, ErrExpired // expired
+	}
+	if nowUnix < a.IssuedAt {
 		return Assertion{}, ErrExpired // not yet valid
+	}
+	if a.ExpiresAt-a.IssuedAt > int64(maxLifetime/time.Second) {
+		return Assertion{}, ErrExpired // implausibly long window -> malformed/expired
 	}
 	return a, nil
 }

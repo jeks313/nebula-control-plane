@@ -505,6 +505,9 @@ func (c *Consumer) processSSO(ctx context.Context, cand queue.Candidate, req wir
 		c.deny(ctx, cand, req, pubBytes, "enroll-denied", "SSO assertion is bound to a different enrollment nonce")
 		return Result{EnrollmentID: cand.EnrollmentID, Status: StatusDenied}, fmt.Errorf("%w: nonce mismatch", ErrSSOBinding)
 	}
+	// This only RE-CONFIRMS the authenticity verify() already established for req.Nonce
+	// (a.Nonce == req.Nonce above) — it adds no anti-replay of its own. The single-use
+	// property comes solely from verify()'s replay observer, which consumed req.Nonce once.
 	if err := c.cfg.Nonces.Verify(a.Nonce, []byte(pubkeyHash)); err != nil {
 		c.deny(ctx, cand, req, pubBytes, "enroll-denied", "SSO assertion nonce is not authentic for this device")
 		return Result{EnrollmentID: cand.EnrollmentID, Status: StatusDenied}, fmt.Errorf("%w: %w", ErrSSOBinding, err)
@@ -522,16 +525,19 @@ func (c *Consumer) processSSO(ctx context.Context, cand queue.Candidate, req wir
 
 	// Evidence (provider-agnostic columns, M5): provider=sso, account=the IdP issuer/realm,
 	// principal=email when present else subject, region=the IdP-asserted directory groups
-	// (so the pending row shows what membership drove the match). No cloud STS here.
+	// (so the pending row shows what membership drove the match). No cloud STS here. The
+	// groups are JSON-encoded (not comma-joined) into AttestRegion so a group name
+	// containing a comma round-trips exactly on the approve path's re-derivation.
 	principal := a.Email
 	if principal == "" {
 		principal = a.Subject
 	}
+	idpGroupsJSON, _ := json.Marshal(a.IdPGroups)
 	ev := evidence{
 		provider:   providerSSO,
 		account:    a.Issuer,
 		principal:  principal,
-		region:     strings.Join(a.IdPGroups, ","),
+		region:     string(idpGroupsJSON),
 		verifiedAt: c.now().UnixNano(),
 	}
 	if groupsSlice == nil {
@@ -798,12 +804,12 @@ func (c *Consumer) approveNetblock(ctx context.Context, e Enrollment) string {
 	}
 	// An SSO enrollment re-resolves the matched user-trust entry's netblock from the
 	// active config + the row's stored evidence (issuer = AttestAccount, the
-	// IdP-asserted groups recorded comma-joined in AttestRegion), so a pending SSO
+	// IdP-asserted groups recorded JSON-encoded in AttestRegion), so a pending SSO
 	// enrollment lands in the SAME block its auto-issue sibling would have (ADR 0010
 	// per-scope binding, mirroring the aws-sigv4 case above).
 	if e.Method == wire.MethodOIDC && c.cfg.UserTrustActive != nil && e.AttestProvider == providerSSO {
 		if active := c.cfg.UserTrustActive(); active != nil {
-			groups := splitGroups(e.AttestRegion)
+			groups := decodeGroups(e.AttestRegion)
 			if _, netblock, _, ok := usertrust.Match(*active, e.AttestAccount, groups); ok {
 				return netblock
 			}
@@ -812,13 +818,18 @@ func (c *Consumer) approveNetblock(ctx context.Context, e Enrollment) string {
 	return ""
 }
 
-// splitGroups reverses the comma-join used to store an SSO enrollment's IdP groups in
-// the AttestRegion evidence column (empty -> nil, so no spurious "" group).
-func splitGroups(s string) []string {
+// decodeGroups reverses the JSON-encode used to store an SSO enrollment's IdP groups in
+// the AttestRegion evidence column (empty/invalid -> nil), so a group name containing a
+// comma round-trips exactly (unlike a comma-split).
+func decodeGroups(s string) []string {
 	if s == "" {
 		return nil
 	}
-	return strings.Split(s, ",")
+	var groups []string
+	if err := json.Unmarshal([]byte(s), &groups); err != nil {
+		return nil
+	}
+	return groups
 }
 
 // provenanceMethod maps the WIRE enrollment method (recorded on the row) to the IPAM

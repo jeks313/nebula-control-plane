@@ -77,6 +77,9 @@ func (e enrollEnv) ssoCandidate(t *testing.T, gw *ecdsa.PrivateKey, name string,
 		bindNonce = o.nonce
 	}
 	iat := o.issuedAt
+	if iat == 0 {
+		iat = time.Now().Unix() // a real gateway always stamps iat; Verify now requires it
+	}
 	exp := o.expiresAt
 	if exp == 0 {
 		exp = time.Now().Add(10 * time.Minute).Unix()

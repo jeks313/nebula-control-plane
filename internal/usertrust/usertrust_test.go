@@ -139,26 +139,37 @@ func TestMatchFirstWins(t *testing.T) {
 }
 
 func TestMatchRealm(t *testing.T) {
-	cfg := Config{
-		IDPEntries: []IDPEntry{
-			{Realm: "corp", DirectoryGroup: "eng", MeshGroups: []string{"corp-eng"}},
-			{Realm: "", DirectoryGroup: "eng", MeshGroups: []string{"any-eng"}}, // wildcard realm
-		},
+	// Build via Parse so the config is one Validate would actually accept — an
+	// empty-realm entry is rejected (ErrNoRealm), so realm matching is EXACT: an entry
+	// only matches its own realm, never any other. Same group name in two realms.
+	cfg, err := Parse([]byte(`{
+		"idp_entries":[
+			{"realm":"corp","directory_group":"eng","mesh_groups":["corp-eng"]},
+			{"realm":"partner","directory_group":"eng","mesh_groups":["partner-eng"]}
+		]
+	}`))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
 	}
 
-	// realm "corp" -> the specific entry (it precedes the wildcard)
+	// realm "corp" -> only the corp entry
 	groups, _, _, ok := Match(cfg, "corp", []string{"eng"})
 	if !ok || !reflect.DeepEqual(groups, []string{"corp-eng"}) {
 		t.Fatalf("corp realm: ok=%v groups=%v", ok, groups)
 	}
 
-	// realm "partner" -> only the wildcard entry matches
+	// realm "partner" -> only the partner entry (no wildcard fall-through)
 	groups, _, _, ok = Match(cfg, "partner", []string{"eng"})
-	if !ok || !reflect.DeepEqual(groups, []string{"any-eng"}) {
-		t.Fatalf("partner realm wildcard: ok=%v groups=%v", ok, groups)
+	if !ok || !reflect.DeepEqual(groups, []string{"partner-eng"}) {
+		t.Fatalf("partner realm: ok=%v groups=%v", ok, groups)
 	}
 
-	// wrong realm + non-wildcard-only config -> no match
+	// a realm matching NO entry -> no match (fail closed), even though the group exists
+	if _, _, _, ok := Match(cfg, "stranger", []string{"eng"}); ok {
+		t.Fatal("unknown realm should not match any entry")
+	}
+
+	// wrong realm against a single realm-specific entry -> no match
 	specific := Config{IDPEntries: []IDPEntry{{Realm: "corp", DirectoryGroup: "eng", MeshGroups: []string{"x"}}}}
 	if _, _, _, ok := Match(specific, "partner", []string{"eng"}); ok {
 		t.Fatal("wrong realm should not match a realm-specific entry")
