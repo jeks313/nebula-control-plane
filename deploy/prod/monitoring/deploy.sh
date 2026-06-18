@@ -36,7 +36,7 @@ HARBOR_OVERLAY="${HARBOR_OVERLAY:-10.44.0.2}"
 LH_OVERLAY="${LH_OVERLAY:-10.44.0.1}"
 CORE_PORT="${CORE_PORT:-8444}"
 ADMIN_PORT="${ADMIN_PORT:-443}" # MUST match bootstrap-genesis.sh's ADMIN_PORT default (the console moved to 443); else the admin-api scrape target is a dead port
-LH_STATS_PORT="${LH_STATS_PORT:-8080}"
+LH_STATS_PORT="${LH_STATS_PORT:-4280}"
 
 for t in terraform jq go ssh scp aws session-manager-plugin; do command -v "$t" >/dev/null || { echo "missing tool: $t" >&2; exit 1; }; done
 [[ -f "$SSH_KEY" ]] || { echo "ssh key not found: $SSH_KEY (set SSH_KEY=...)" >&2; exit 1; }

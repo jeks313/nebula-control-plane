@@ -152,7 +152,7 @@ variable "lighthouse_fargate_memory" {
 variable "lighthouse_stats_port" {
   description = "TCP port the Fargate lighthouse exposes nebula's prometheus stats on, used ONLY as the UDP target group's health check (NLB UDP target groups require a TCP/HTTP health check). Internal — reachable from the NLB only, never public."
   type        = number
-  default     = 8080
+  default     = 4280
 }
 
 variable "gateway_cidr" {

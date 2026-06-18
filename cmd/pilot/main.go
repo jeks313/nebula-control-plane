@@ -461,6 +461,10 @@ func cmdSupervise(args []string) {
 			ExpectedSHA256: *sha,
 			AdoptPID:       adoptPID,
 		}
+		// Fail-open on the nebula stats port: if it's already taken, nebula would refuse to
+		// start (fatal) and take the data plane with it — so disable stats instead and bring
+		// the tunnel up regardless. A metrics port must never sink the tunnel.
+		disableStatsOnPortConflict(*configPath, log)
 		// ADR 0003 Phase 2: on a fresh host with no nebula binary yet, materialize the
 		// one embedded in this pilot (offline first-boot). No-op once a binary exists
 		// (Phase 1 owns updates from then on) or in a build that embedded nothing.
