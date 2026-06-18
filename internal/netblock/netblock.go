@@ -148,6 +148,18 @@ func (r *Registry) List(ctx context.Context) ([]Netblock, error) {
 	return rows, nil
 }
 
+// Count returns the number of netblock rows. Boot-seeding (the existing-mesh
+// upgrade path) uses this to decide whether to seed central/default: an empty table
+// means a migrated-but-not-genesis'd store, a non-empty table is genesis'd or
+// operator-curated and is left untouched.
+func (r *Registry) Count(ctx context.Context) (int64, error) {
+	var n int64
+	if err := r.db.WithContext(ctx).Model(&Netblock{}).Count(&n).Error; err != nil {
+		return 0, fmt.Errorf("netblock: count: %w", err)
+	}
+	return n, nil
+}
+
 // Get returns a netblock by name.
 func (r *Registry) Get(ctx context.Context, name string) (Netblock, error) {
 	var row Netblock

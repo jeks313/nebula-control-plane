@@ -211,6 +211,40 @@ build could proceed; flagged here for review. **D#** = decided-by-default during
   for a server that omits `pool` (forward/back compat). `pool` is `omitempty`/optional, so the
   contract guard stays green and an unconfigured-pool server simply returns `""` → UI falls back.
 
+- **D22 — Boot-seed `central`/`default` when the netblocks table is empty — the existing-mesh
+  upgrade path; genesis-only seeding left a deployability gap.** `central`/`default` were seeded
+  only during `harbor genesis` (the netblock registry's `Seed`). An ALREADY-genesis'd mesh that
+  upgrades to the IPAM build runs migrations `000022`/`000023` (creating an empty `netblocks`
+  table) but never re-runs genesis — so `default` is missing and `ipam.Allocate` (which resolves
+  unbound enrollments to `default`) breaks every new enrollment. The feature must be deployable
+  onto an existing mesh, so harbor's long-running services now boot-seed:
+  - **Where it hooks in:** `cmd/harbor/serve.go` — both `cmdAdminAPI` (after it builds the
+    netblock `Registry` + allocator from `-pool`) and `cmdCoreAPI` (which builds a registry just
+    for the seed, right after `openStore`), AFTER migrations have run (the serve commands assume
+    `harbor migrate up` already ran — admin-api already fails fast on a missing `sessions` table).
+    Either or both services may boot first; whichever wins seeds, the other no-ops.
+  - **Empty-only:** a new `(*Registry).Count` does a `COUNT(*)`; `genesis.BootSeedNetblocks` seeds
+    only when the count is 0. A genesis'd or operator-curated set (any rows) is left untouched —
+    boot-seeding never re-derives or "repairs" an existing layout.
+  - **Race/duplicate-tolerant:** `Seed` is already idempotent on the name and folds a lost
+    `UNIQUE(name)` race back to the existing row (`gorm.ErrDuplicatedKey` → re-`Get`), so two
+    services boot-seeding at once is safe — a concurrent insert is swallowed as success, not a
+    crash.
+  - **Fail-soft, not fatal:** a seed failure is logged as a `Warn` but does NOT abort startup. A
+    missing `default` surfaces as enrollment errors that are already audited + metered, and the
+    next boot retries — taking the whole control plane down over a transient seed error would be
+    strictly worse. Seeding success logs an `Info` line so the upgrade is visible in operator logs.
+  - **No CIDR math duplicated:** the placement math (`central` = pool's first `/27`, `default` =
+    the `/18` placed clear of central via `Suggest`) was extracted from `genesis.Run`'s inline body
+    into a shared `genesis.SeedNetblocks` helper (with `centralBlock`/`defaultBlock`); `Run` and
+    `BootSeedNetblocks` both call it, so the seeded values are byte-for-byte what genesis would use.
+    The serve commands carry only `-pool` (no `-central-cidr`/`-default-cidr`), so boot-seeding uses
+    the genesis defaults — exactly the values a genesis run without those override flags produces.
+  - **Test:** `genesis.TestBootSeedNetblocksUpgradePath` — a migrated-but-not-genesis'd store has
+    an empty table; after the first boot-seed it holds `central` (`/27`, reserved, protected) +
+    `default` (kind=default, protected, clear of central); a second invocation (modelling the other
+    service booting) reports `seeded=false`, leaves the count at 2, and does not churn the rows.
+
 ## Review fixes applied (correctness/robustness, no behavior regressions)
 
 - **Resolver cache lost-update race (FIX 1).** `snapshot()` rebuilt the cache outside the lock and

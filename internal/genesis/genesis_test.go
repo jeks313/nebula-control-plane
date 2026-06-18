@@ -145,6 +145,77 @@ func TestGenesisRejectsSameTrustRoot(t *testing.T) {
 	}
 }
 
+// TestBootSeedNetblocksUpgradePath is the existing-mesh upgrade case (D22): a store
+// that has been MIGRATED but never genesis'd has an empty netblocks table, so the
+// 'default' block unbound enrollments resolve to is missing. BootSeedNetblocks (run
+// at harbor startup, after migrations) must seed central+default from the pool the
+// same way genesis would, and a second invocation — modelling core-api and admin-api
+// both booting — must be a no-op (idempotent), not a duplicate or a crash.
+func TestBootSeedNetblocksUpgradePath(t *testing.T) {
+	s := newStore(t) // migrated, but Run/genesis never invoked
+	pool := netip.MustParsePrefix("10.44.0.0/16")
+
+	alloc, err := ipam.NewAllocator(s, ipam.Pool{Prefix: pool})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := netblock.New(s.DB, pool, nil, alloc, nil)
+
+	// Pre-condition: a migrated-but-not-genesis'd store has no netblocks.
+	if n, err := reg.Count(context.Background()); err != nil || n != 0 {
+		t.Fatalf("pre-seed count = %d, err = %v; want an empty netblocks table", n, err)
+	}
+
+	// First boot: the table is empty, so it seeds.
+	seeded, err := BootSeedNetblocks(context.Background(), reg, pool, netip.Prefix{}, netip.Prefix{}, "boot-seed", nil)
+	if err != nil {
+		t.Fatalf("first boot-seed: %v", err)
+	}
+	if !seeded {
+		t.Fatal("first boot-seed reported seeded=false on an empty table; want true")
+	}
+
+	got := map[string]netblock.Netblock{}
+	rows, err := reg.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range rows {
+		got[b.Name] = b
+	}
+	if len(got) != 2 {
+		t.Fatalf("after boot-seed: %d netblocks, want 2 (central + default): %+v", len(got), rows)
+	}
+	central, ok := got[netblock.NameCentral]
+	if !ok || central.CIDR != "10.44.0.0/27" || central.Kind != netblock.KindReserved || !central.Protected {
+		t.Fatalf("central = %+v, want 10.44.0.0/27 reserved protected", central)
+	}
+	def, ok := got[netblock.NameDefault]
+	if !ok || def.Kind != netblock.KindDefault || !def.Protected {
+		t.Fatalf("default = %+v, want kind=default protected", def)
+	}
+	if def.CIDR == "10.44.0.0/18" {
+		t.Fatalf("default %s overlaps central — should be placed clear of it", def.CIDR)
+	}
+
+	// Second boot (models the other service booting): table non-empty → no-op. The set
+	// is unchanged, and Seed's duplicate tolerance means it does not error or duplicate.
+	seeded, err = BootSeedNetblocks(context.Background(), reg, pool, netip.Prefix{}, netip.Prefix{}, "boot-seed", nil)
+	if err != nil {
+		t.Fatalf("second boot-seed: %v", err)
+	}
+	if seeded {
+		t.Fatal("second boot-seed reported seeded=true on a populated table; want false (idempotent no-op)")
+	}
+	if n, err := reg.Count(context.Background()); err != nil || n != 2 {
+		t.Fatalf("after second boot-seed: count = %d, err = %v; want 2 unchanged", n, err)
+	}
+	// The central row is byte-identical (no churn from the no-op second call).
+	if again, _ := reg.Get(context.Background(), netblock.NameCentral); again.CIDR != central.CIDR || again.CreatedAt != central.CreatedAt {
+		t.Fatalf("central changed across the idempotent second boot-seed: %+v vs %+v", again, central)
+	}
+}
+
 func TestVerifyControlPlaneCertRejectsGarbage(t *testing.T) {
 	if _, err := VerifyControlPlaneCert([]byte("-----BEGIN NEBULA CERTIFICATE-----\nnope\n-----END NEBULA CERTIFICATE-----")); err == nil {
 		t.Error("garbage must not verify")
