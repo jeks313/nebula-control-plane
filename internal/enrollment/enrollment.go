@@ -299,8 +299,9 @@ func (c *Consumer) Process(ctx context.Context, cand queue.Candidate) (Result, e
 		return Result{EnrollmentID: cand.EnrollmentID, Status: StatusPending}, nil
 	}
 
-	// auto_issue: mint immediately.
-	ip, certPEM, fp, notAfter, err := c.issue(ctx, "enroll-auto", deviceName, pubBytes, jk.GroupList())
+	// auto_issue: mint immediately. The join key's sub-range carries the netblock
+	// name (ADR 0010 — reusing join_keys.sub_range); empty -> the default block.
+	ip, certPEM, fp, notAfter, err := c.issue(ctx, "enroll-auto", deviceName, pubBytes, jk.GroupList(), jk.SubRange, "token")
 	if err != nil {
 		return Result{}, err
 	}
@@ -380,7 +381,9 @@ func (c *Consumer) processAttested(ctx context.Context, cand queue.Candidate, re
 		return Result{EnrollmentID: cand.EnrollmentID, Status: StatusPending}, nil
 	}
 
-	ip, certPEM, fp, notAfter, err := c.issue(ctx, "enroll-attested", deviceName, pubBytes, groupsSlice)
+	// Cloud-trust -> netblock binding is Phase 2 (AWSAccount.Netblock); for now the
+	// aws-sigv4 path draws from the default block. Method records the join source.
+	ip, certPEM, fp, notAfter, err := c.issue(ctx, "enroll-attested", deviceName, pubBytes, groupsSlice, "", "aws-sigv4")
 	if err != nil {
 		return Result{}, err
 	}
@@ -430,7 +433,12 @@ func (c *Consumer) Approve(ctx context.Context, enrollmentID, approver string) (
 
 	var groups []string
 	_ = json.Unmarshal([]byte(e.Groups), &groups)
-	ip, certPEM, fp, notAfter, err := c.issue(ctx, approver, e.DeviceName, e.Pubkey, groups)
+	// Re-derive the netblock binding from the pending row: a join-key enrollment draws
+	// from the key's sub-range (netblock name); other methods (aws-sigv4) draw from the
+	// default block (cloud->netblock is Phase 2). The wire method recorded on the row
+	// (token|aws-sigv4) is the provenance method.
+	netblockName := c.approveNetblock(ctx, e)
+	ip, certPEM, fp, notAfter, err := c.issue(ctx, approver, e.DeviceName, e.Pubkey, groups, netblockName, e.Method)
 	if err != nil {
 		return Result{}, err
 	}
@@ -588,9 +596,36 @@ func (c *Consumer) verify(ctx context.Context, cand queue.Candidate) (wire.Enrol
 	return req, pubBytes, nil
 }
 
-func (c *Consumer) issue(ctx context.Context, actor, deviceName string, pubBytes []byte, groups []string) (ip netip.Addr, certPEM []byte, fingerprint string, notAfter time.Time, err error) {
-	ip, err = c.cfg.Allocator.Allocate(ctx, deviceName, "")
+// approveNetblock resolves the netblock name for a pending enrollment being
+// approved: a join-key enrollment (JoinKeyID != 0) draws from the key's sub-range
+// (the netblock name, ADR 0010). Anything else (aws-sigv4) returns "" -> the
+// default block (cloud->netblock binding is Phase 2). A best-effort read failure
+// falls back to "" so an approval is never blocked on a transient lookup.
+func (c *Consumer) approveNetblock(ctx context.Context, e Enrollment) string {
+	if e.JoinKeyID == 0 {
+		return ""
+	}
+	var jk joinkey.JoinKey
+	if err := c.cfg.Store.DB.WithContext(ctx).First(&jk, "id = ?", e.JoinKeyID).Error; err != nil {
+		return ""
+	}
+	return jk.SubRange
+}
+
+// issue allocates an overlay IP from the named netblock (empty -> the bounded
+// 'default' block) recording the join method as provenance, then signs the leaf.
+// netblockName comes from the join source (a join key's sub-range, a cloud-trust
+// scope, or — later — an SSO entry); method is token | aws-sigv4 | sso (ADR 0010).
+func (c *Consumer) issue(ctx context.Context, actor, deviceName string, pubBytes []byte, groups []string, netblockName, method string) (ip netip.Addr, certPEM []byte, fingerprint string, notAfter time.Time, err error) {
+	ip, err = c.cfg.Allocator.Allocate(ctx, deviceName, netblockName, method)
 	if err != nil {
+		// An exhaustion denial is a clean terminal "no addresses available" — surface
+		// it (the allocator already bumped the exhaustion metric); audit so the
+		// operator can make room before the host re-enrolls.
+		if errors.Is(err, ipam.ErrPoolExhausted) {
+			_ = c.audit(ctx, "system", "enroll-exhausted", deviceName,
+				fmt.Sprintf(`{"netblock":%q,"method":%q,"reason":"no addresses available"}`, netblockName, method))
+		}
 		return netip.Addr{}, nil, "", time.Time{}, fmt.Errorf("enrollment: allocate IP: %w", err)
 	}
 	nb := c.now().Add(-5 * time.Minute)

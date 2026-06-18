@@ -19,6 +19,7 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/ipam"
 	"github.com/jeks313/nebula-control-plane/internal/lighthouse"
 	"github.com/jeks313/nebula-control-plane/internal/nebularelease"
+	"github.com/jeks313/nebula-control-plane/internal/netblock"
 	"github.com/jeks313/nebula-control-plane/internal/nonce"
 	"github.com/jeks313/nebula-control-plane/internal/obs"
 	"github.com/jeks313/nebula-control-plane/internal/pilotrelease"
@@ -186,6 +187,10 @@ func (cf *coreFlags) buildConsumer(s *store.Store, results enrollment.ResultSink
 	if err != nil {
 		fatalf("ipam: %v", err)
 	}
+	// IPAM (ADR 0010): resolve netblock names via the DB-backed registry (cached,
+	// invalidated on CRUD) so per-join-method CIDRs + provenance + auto-grow are live.
+	nbReg := netblock.New(s.DB, pool, nil, alloc, audit)
+	alloc = alloc.WithResolver(nbReg)
 	ring, err := nonce.NewKeyring([][]byte{readB64Key(*cf.hmacKey)}, 0, 0)
 	if err != nil {
 		fatalf("nonce key: %v", err)
