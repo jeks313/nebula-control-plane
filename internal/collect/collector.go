@@ -131,11 +131,27 @@ func (c *Collector) clientFor(gw Gateway) *http.Client {
 // back → ack/nack. Results are shipped BEFORE acking (at-least-once: a failed ship
 // leaves the candidates leased for redelivery, and PutResult is an idempotent
 // upsert). Returns the number of candidates claimed.
-func (c *Collector) CollectOnce(ctx context.Context, gw Gateway) (int, error) {
+func (c *Collector) CollectOnce(ctx context.Context, gw Gateway) (claimed int, err error) {
+	// One cycle = one CollectOnce. The defer records its duration and tallies it as
+	// ok/error from the returned err, stamping last-success on a clean cycle (so a
+	// stalled collector shows up as a stale ncp_collect_last_success_seconds). An
+	// empty claim is still a healthy heartbeat, so it counts as ok.
+	start := time.Now()
+	defer func() {
+		metricCollectCycleSeconds.WithLabelValues(gw.Name).Observe(time.Since(start).Seconds())
+		if err != nil {
+			metricCollectCycles.WithLabelValues(gw.Name, "error").Inc()
+			return
+		}
+		metricCollectCycles.WithLabelValues(gw.Name, "ok").Inc()
+		metricCollectLastSuccess.WithLabelValues(gw.Name).Set(float64(time.Now().Unix()))
+	}()
+
 	client := c.clientFor(gw)
 
 	var cr ClaimResponse
 	if err := c.post(ctx, client, gw, "/collect/v1/claim", ClaimRequest{Limit: c.batch, LeaseMs: c.leaseTTL.Milliseconds()}, &cr); err != nil {
+		metricCollectErrors.WithLabelValues(gw.Name, "claim").Inc()
 		return 0, fmt.Errorf("claim: %w", err)
 	}
 	if len(cr.Candidates) == 0 {
@@ -145,10 +161,11 @@ func (c *Collector) CollectOnce(ctx context.Context, gw Gateway) (int, error) {
 	c.sink.Drain() // discard anything stale before this batch
 	var ackIDs, nackIDs []int64
 	for _, cand := range cr.Candidates {
-		_, perr := c.proc.Process(ctx, queue.Candidate{
+		res, perr := c.proc.Process(ctx, queue.Candidate{
 			EnrollmentID: cand.EnrollmentID, PubkeyHash: cand.PubkeyHash,
 			RequestJWS: cand.RequestJWS, RetrievalSecretHash: cand.RetrievalSecretHash, ReceivedAt: cand.ReceivedAt,
 		})
+		metricCollectProcessed.WithLabelValues(gw.Name, outcomeLabel(res, perr)).Inc()
 		if perr == nil || enrollment.Terminal(perr) {
 			ackIDs = append(ackIDs, cand.LeaseID)
 		} else {
@@ -162,10 +179,12 @@ func (c *Collector) CollectOnce(ctx context.Context, gw Gateway) (int, error) {
 	// to deliver, or the host would never get its bundle.
 	if results := c.sink.Drain(); len(results) > 0 {
 		if err := c.post(ctx, client, gw, "/collect/v1/results", PutResultsRequest{Results: results}, nil); err != nil {
+			metricCollectErrors.WithLabelValues(gw.Name, "ship").Inc()
 			return len(cr.Candidates), fmt.Errorf("ship results: %w", err)
 		}
 	}
 	if err := c.post(ctx, client, gw, "/collect/v1/ack", AckRequest{Ack: ackIDs, Nack: nackIDs}, nil); err != nil {
+		metricCollectErrors.WithLabelValues(gw.Name, "ack").Inc()
 		return len(cr.Candidates), fmt.Errorf("ack: %w", err)
 	}
 	return len(cr.Candidates), nil
