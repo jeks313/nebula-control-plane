@@ -384,6 +384,87 @@ func TestNetblockUsedCountsOnlyFreshHeartbeats(t *testing.T) {
 	}
 }
 
+// TestNetblockAllocatedExcludesExpiredQuarantine: `allocated` counts only genuinely-live
+// rows — allocated, OR quarantined with an unexpired window (matching ipam.LiveAddrs).
+// An expired-but-unpurged quarantine row (state='quarantined', quarantine_until in the
+// past; quarantine is purged lazily on the next allocation, not on a list) must NOT be
+// counted. A block with one allocated row + one expired-quarantine row → allocated==1.
+func TestNetblockAllocatedExcludesExpiredQuarantine(t *testing.T) {
+	s, err := store.Open(store.Config{Driver: "sqlite", DSN: store.DefaultSQLiteDSN(t.TempDir() + "/quarantine.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := migrate.Up(s.DB); err != nil {
+		t.Fatal(err)
+	}
+	audit := func(ctx context.Context, a, ac, tgt, d string) error {
+		_, e := s.AppendAudit(ctx, a, ac, tgt, d)
+		return e
+	}
+	pool := mustPrefix(t, ipamPool)
+	alloc, err := ipam.NewAllocator(s, ipam.Pool{Prefix: pool})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := netblock.New(s.DB, pool, nil, alloc, audit)
+	alloc = alloc.WithResolver(reg)
+	ctx := context.Background()
+	if _, err := reg.Seed(ctx, netblock.NameDefault, mustPrefix(t, "10.44.64.0/18"), netblock.KindDefault, "fallback", "genesis"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reg.Add(ctx, "office", mustPrefix(t, "10.44.20.0/24"), "office", "op"); err != nil {
+		t.Fatal(err)
+	}
+	// One live allocation + one allocation we then mark as an EXPIRED quarantine.
+	liveIP := netip.MustParseAddr("10.44.20.1")
+	expiredIP := netip.MustParseAddr("10.44.20.2")
+	if err := alloc.AllocateSpecific(ctx, "host-live", liveIP, "token"); err != nil {
+		t.Fatal(err)
+	}
+	if err := alloc.AllocateSpecific(ctx, "host-expired", expiredIP, "token"); err != nil {
+		t.Fatal(err)
+	}
+	// Mark expiredIP as a quarantine whose window already closed (quarantine_until in the
+	// past). It is unpurged (no allocation has run since), so a naive "every row" count
+	// would still include it — the live predicate must exclude it.
+	past := time.Now().Add(-time.Hour).UnixNano()
+	if err := s.DB.Exec(`UPDATE ip_allocations SET state='quarantined', released_at=?, quarantine_until=? WHERE ip=?`,
+		past, past, expiredIP.String()).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	srv := adminapi.New(adminapi.Config{
+		Store:     s,
+		Identity:  adminapi.DevHeaderProvider{Roles: []string{"admin"}},
+		Netblocks: reg, Allocator: alloc, Pool: pool,
+	})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	code, list := req(t, ts, "GET", "/admin/v1/ipam/netblocks", "alice", nil)
+	if code != http.StatusOK {
+		t.Fatalf("list status = %d (%v)", code, list)
+	}
+	blocks, _ := list["netblocks"].([]any)
+	var office map[string]any
+	for _, b := range blocks {
+		if m, ok := b.(map[string]any); ok && m["name"] == "office" {
+			office = m
+		}
+	}
+	if office == nil {
+		t.Fatalf("office netblock missing from list: %v", list)
+	}
+	if got := office["allocated"].(float64); got != 1 {
+		t.Errorf("office allocated = %v, want 1 (the expired-quarantine row is excluded)", got)
+	}
+	// used ⊆ allocated, and there are no heartbeats → used must be 0.
+	if got := office["used"].(float64); got != 0 {
+		t.Errorf("office used = %v, want 0", got)
+	}
+}
+
 // TestIPAMOperatorCanManage: the operator role carries ipam:manage.
 func TestIPAMOperatorCanManage(t *testing.T) {
 	ts := ipamSrv(t, "operator")

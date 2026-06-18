@@ -326,11 +326,15 @@ func (s *Server) handleIPAMAllocations(w http.ResponseWriter, r *http.Request) {
 
 // ── store reads ──────────────────────────────────────────────────────────────
 
-// allocationIPs plucks every allocation IP (live or quarantined) for the
-// utilization bucketing.
+// allocationIPs plucks every LIVE allocation IP — allocated, OR quarantined with an
+// unexpired window — for the utilization bucketing. This matches ipam.LiveAddrs'
+// predicate, so an expired-but-unpurged quarantine row (its IP is reusable, purged
+// lazily on the next allocation) is excluded and not briefly counted as allocated.
 func (s *Server) allocationIPs(ctx context.Context) ([]netip.Addr, error) {
 	var ips []string
-	if err := s.cfg.Store.DB.WithContext(ctx).Model(&ipam.Allocation{}).Pluck("ip", &ips).Error; err != nil {
+	if err := s.cfg.Store.DB.WithContext(ctx).Model(&ipam.Allocation{}).
+		Where("state = ? OR quarantine_until > ?", "allocated", s.now().UnixNano()).
+		Pluck("ip", &ips).Error; err != nil {
 		return nil, err
 	}
 	out := make([]netip.Addr, 0, len(ips))

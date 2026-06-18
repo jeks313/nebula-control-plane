@@ -136,6 +136,61 @@ func TestNetblockCollectorUsedFreshnessBoundary(t *testing.T) {
 	}
 }
 
+// TestNetblockCollectorAllocatedExcludesExpiredQuarantine: `allocated` counts only
+// genuinely-live rows (allocated, OR quarantined with an unexpired window), matching
+// ipam.LiveAddrs. With three rows in a block — one allocated, one UNEXPIRED-quarantine,
+// one EXPIRED-but-unpurged quarantine — `allocated` is 2 (the expired-quarantine row,
+// whose IP is reusable, is excluded). Uses an injected clock so the quarantine windows
+// land deterministically; QuarantineTTL>0 so a release quarantines (rather than reuses).
+func TestNetblockCollectorAllocatedExcludesExpiredQuarantine(t *testing.T) {
+	a := newAllocator(t, Pool{
+		Prefix:        netip.MustParsePrefix("10.44.20.0/24"),
+		QuarantineTTL: time.Hour,
+	})
+	now := time.Unix(1_700_000_000, 0).UTC()
+	a.now = func() time.Time { return now }
+	ctx := context.Background()
+
+	live := netip.MustParseAddr("10.44.20.1")    // stays allocated
+	fresh := netip.MustParseAddr("10.44.20.2")   // released → quarantine still open (unexpired)
+	expired := netip.MustParseAddr("10.44.20.3") // released → quarantine will expire
+
+	if err := a.AllocateSpecific(ctx, "live", live, "token"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.AllocateSpecific(ctx, "fresh", fresh, "token"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.AllocateSpecific(ctx, "expired", expired, "token"); err != nil {
+		t.Fatal(err)
+	}
+	// Release `expired` first, then advance the clock past its quarantine window, so by
+	// scrape time its quarantine_until is in the past (expired-but-unpurged).
+	if err := a.Release(ctx, expired); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(2 * time.Hour) // expired's 1h window has now passed
+	// Release `fresh` now — its window opens at the (advanced) clock, so it is unexpired.
+	if err := a.Release(ctx, fresh); err != nil {
+		t.Fatal(err)
+	}
+
+	lister := staticLister{{Name: "office", CIDR: netip.MustParsePrefix("10.44.20.0/24")}}
+	c := NewNetblockCollector(a.db, lister, 5*time.Minute)
+	c.now = func() time.Time { return now } // same scrape-time clock as the allocator
+
+	reg := prometheus.NewRegistry()
+	if err := reg.Register(c); err != nil {
+		t.Fatalf("register collector: %v", err)
+	}
+
+	lbl := map[string]string{"netblock": "office"}
+	// allocated = live + unexpired-quarantine = 2; the expired-quarantine row is excluded.
+	if got := gauge(t, reg, "ncp_ipam_netblock_allocated", lbl); got != 2 {
+		t.Errorf("ncp_ipam_netblock_allocated = %v, want 2 (allocated + unexpired quarantine; expired-quarantine excluded)", got)
+	}
+}
+
 // TestNetblockCollectorNilSafe: a collector with a nil store/lister emits nothing and
 // does not panic on Collect (Describe/Collect must be robust to an unwired collector).
 func TestNetblockCollectorNilSafe(t *testing.T) {
