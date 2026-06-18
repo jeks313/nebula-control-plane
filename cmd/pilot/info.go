@@ -84,18 +84,26 @@ type CloudSection struct {
 	Azure    *AzureMeta `json:"azure,omitempty"`
 }
 
+// defaultMeshDir is the conventional single-mesh `-dir` layout (the `pilot supervise
+// -dir /etc/nebula` deployment, where ALL state — config.yml, ca.crt, host.crt,
+// host.key, bundle.json — sits flat in one dir rather than under StateRoot/<mesh>).
+// `pilot info` auto-detects it so a `-dir` host (common on servers) isn't reported as
+// "not joined to any mesh". A package-level var so tests can point it at a temp dir.
+var defaultMeshDir = "/etc/nebula"
+
 // cmdInfo gathers + prints the node report. It never fails on a down Harbor or an
 // off-cloud host — `info` is a diagnostic, so partial data is the norm.
 func cmdInfo(args []string) {
 	fs := flag.NewFlagSet("info", flag.ExitOnError)
 	asJSON := fs.Bool("json", false, "emit the full report as JSON (for scripted onboarding)")
 	mesh := fs.String("mesh", "", "report only this mesh (default: every joined mesh)")
+	dir := fs.String("dir", "", "report exactly this state dir as one mesh (the single-mesh `-dir` layout); bypasses the StateRoot scan")
 	_ = fs.Parse(args)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	info := gatherInfo(ctx, *mesh)
+	info := gatherInfo(ctx, *mesh, *dir)
 
 	if *asJSON {
 		enc := json.NewEncoder(os.Stdout)
@@ -108,8 +116,9 @@ func cmdInfo(args []string) {
 	printInfo(os.Stdout, info)
 }
 
-// gatherInfo collects the whole report. meshFilter "" means every joined mesh.
-func gatherInfo(ctx context.Context, meshFilter string) nodeInfo {
+// gatherInfo collects the whole report. meshFilter "" means every joined mesh; meshDir
+// (the -dir flag) "" means scan StateRoot + auto-detect the conventional single-mesh dir.
+func gatherInfo(ctx context.Context, meshFilter, meshDir string) nodeInfo {
 	host, _ := os.Hostname()
 	info := nodeInfo{
 		Node: NodeSection{
@@ -121,8 +130,27 @@ func gatherInfo(ctx context.Context, meshFilter string) nodeInfo {
 		},
 	}
 
-	for _, m := range infoMeshes(meshFilter) {
-		info.Meshes = append(info.Meshes, gatherMesh(ctx, m))
+	switch {
+	case meshDir != "":
+		// Explicit -dir: report exactly that directory as one mesh, bypassing both the
+		// StateRoot scan and the single-mesh auto-detect.
+		info.Meshes = append(info.Meshes, gatherMeshAt(ctx, filepath.Base(meshDir), meshDir))
+	case meshFilter != "":
+		// -mesh x: just that mesh under StateRoot (works even before its dir exists).
+		info.Meshes = append(info.Meshes, gatherMeshAt(ctx, meshFilter, filepath.Join(pilotservice.StateRoot, meshFilter)))
+	default:
+		// The multi-mesh StateRoot scan...
+		seen := map[string]bool{}
+		for _, m := range infoMeshes("") {
+			base := filepath.Join(pilotservice.StateRoot, m)
+			seen[filepath.Clean(base)] = true
+			info.Meshes = append(info.Meshes, gatherMeshAt(ctx, m, base))
+		}
+		// ...plus the conventional single-mesh `-dir` dir, if it holds mesh state and
+		// isn't already covered by a StateRoot entry (the no-double-report guard).
+		if !seen[filepath.Clean(defaultMeshDir)] && hasMeshState(defaultMeshDir) {
+			info.Meshes = append(info.Meshes, gatherMeshAt(ctx, filepath.Base(defaultMeshDir), defaultMeshDir))
+		}
 	}
 
 	info.Cloud = gatherCloud(ctx, "", nil)
@@ -140,16 +168,28 @@ func infoMeshes(filter string) []string {
 	return ms
 }
 
-// gatherMesh reads one mesh's local state, then layers on the OS service state and a
-// best-effort Harbor probe. It splits the pure on-disk reads (readMeshState, testable
-// against any base dir) from the side-effecting OS/network calls.
-func gatherMesh(ctx context.Context, mesh string) MeshInfo {
-	base := filepath.Join(pilotservice.StateRoot, mesh)
-	mi := readMeshState(base)
-	mi.Mesh = mesh
+// hasMeshState reports whether base looks like a real mesh state dir — used to decide
+// whether to auto-detect the conventional single-mesh `-dir` layout. A host.crt or a
+// config.yml is enough to count it as a deployment worth reporting.
+func hasMeshState(base string) bool {
+	layout := paths.New(base)
+	return fileExists(layout.HostCert()) || fileExists(layout.Config())
+}
 
-	// Local service state (same source as `pilot status`).
-	if rep, err := pilotservice.Status(mesh); err != nil {
+// gatherMeshAt reads one mesh's local state from baseDir, then layers on the OS service
+// state and a best-effort Harbor probe. It splits the pure on-disk reads (readMeshState,
+// testable against any base dir) from the side-effecting OS/network calls. label is the
+// reported mesh name; for a StateRoot mesh it's the mesh id, for a `-dir`/auto-detected
+// single-mesh deployment it's filepath.Base(baseDir) (the StateDir is shown too, so the
+// exact label is secondary).
+func gatherMeshAt(ctx context.Context, label, baseDir string) MeshInfo {
+	mi := readMeshState(baseDir)
+	mi.Mesh = label
+
+	// Local service state (same source as `pilot status`). For a `-dir` deployment the
+	// service label may not match the install's service name — keep it best-effort
+	// (show the lookup error rather than failing; the on-disk identity is the headline).
+	if rep, err := pilotservice.Status(label); err != nil {
 		mi.Service = err.Error()
 	} else {
 		mi.Service = rep
