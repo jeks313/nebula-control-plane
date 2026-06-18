@@ -157,6 +157,8 @@ build could proceed; flagged here for review. **D#** = decided-by-default during
     smallest aligned power-of-two CIDR enclosing all blocks. Caveat: free space *above* the highest
     block is invisible until a block reaches that far — acceptable for a guide, and the server is
     authoritative on bounds anyway. If a bare-pool field is later added to the API, swap it in.
+    **RESOLVED in D21:** the list response now carries `pool`; the overlay prefers it and the
+    block-derived extent is now only a fallback for an older server.
   - **The four overlay colors** are explicit `@theme` tokens in `index.css`, deliberately distinct
     from the status hues (permit/warn/danger) so the *growth-headroom* overlay never reads as a
     *health* signal: `--color-ipam-green #3fb950` (free+clear, the suggester's target),
@@ -183,3 +185,47 @@ build could proceed; flagged here for review. **D#** = decided-by-default during
   - **Gates:** `tsc --noEmit` clean; `npm run build` succeeds; full vitest suite green (61 tests,
     incl. the new 15 `ipam.test.ts` cases). No eslint/biome/prettier is configured in the repo, so
     `tsc` is the static-check gate.
+
+## Review-fix decisions (post phases 1–4)
+
+- **D20 — Unknown/deleted netblock name falls back to `default` at resolution time (runtime,
+  not publish-time).** `Resolve`/`ResolveFull` resolve a non-empty name that no longer exists
+  (deleted block, typo'd binding) to the `default` netblock instead of returning `ErrNotFound`,
+  and emit a `slog` warning so the fallback is visible. This makes the documented
+  `AWSAccount.Netblock` contract true: deleting or mis-typing a netblock that a join-key
+  `sub_range` or cloud-trust scope references must NOT break enrollment — the host simply draws
+  from the bounded fallback. `ResolveFull` returns the resolved block's own identity, so an
+  unknown name surfaces as `Named=false` (kind=default): it must **not** become auto-grow-eligible
+  as if it were a named block — it draws from `default`, which deliberately never auto-grows (D2).
+  Only a missing `default` itself (shouldn't happen post-genesis) still yields `ErrNotFound`.
+  **Delete-time reference checking was considered and deferred:** scanning every join-key
+  `sub_range` + cloud-trust scope on each netblock delete (and refusing the delete, or cascading)
+  is brittle against the publish-ordering trap already noted in D17 (a binding may name a block
+  carved later) and races config edits. The runtime fallback is the robust, ordering-independent
+  choice; an operator-facing "bound sources" view (D19) already surfaces references for awareness.
+- **D21 — List response carries the configured `pool` prefix; supersedes the D19 extent workaround.**
+  `GET /admin/v1/ipam/netblocks` now returns a top-level `pool` string (from `adminapi.Config.Pool`)
+  alongside `netblocks`/`count`; the `NetblockList` schema + regenerated `schema.d.ts` follow. The
+  UI overlay (`resolvePoolExtent`) uses this as the address-map extent, so free space *above* the
+  highest block is now visible. The block-derived `poolExtent` (D19) is retained only as a fallback
+  for a server that omits `pool` (forward/back compat). `pool` is `omitempty`/optional, so the
+  contract guard stays green and an unconfigured-pool server simply returns `""` → UI falls back.
+
+## Review fixes applied (correctness/robustness, no behavior regressions)
+
+- **Resolver cache lost-update race (FIX 1).** `snapshot()` rebuilt the cache outside the lock and
+  stored it unconditionally, so a concurrent `invalidate()` from Add/Update/Remove/Grow could be
+  overwritten by a stale snapshot — `Resolve`/`Carves`/`ResolveFull` could then return stale
+  CIDRs/carves indefinitely after a mutation. Fixed with a `gen uint64` generation counter:
+  `invalidate()` does `cache=nil; gen++` under the lock; `snapshot()` captures `startGen` before the
+  unlocked `List`, and only publishes the rebuilt cache if `gen == startGen` on re-acquire (else it
+  returns the fresh snapshot to its caller but leaves `cache=nil` so the next reader rebuilds). No
+  lock is held across `List` (avoids the single-writer SQLite deadlock).
+- **Double audit on netblock CRUD (FIX 4).** Create/update/remove were audited twice — once by the
+  registry (`recordAudit`) and once by the handler (which carries the principal). Removed the
+  registry's audit for Add/Update/Remove (the handler's is authoritative — it has the principal),
+  keeping the registry's audit for `Grow` (auto-grow has no handler/principal and must stay audited)
+  and for `Seed` (genesis, no handler). CRUD now produces exactly one audit entry, with the principal.
+- **Stranding guard counted expired quarantine (FIX 5).** `LiveAddrs` returned every `ip_allocations`
+  row, so an expired-but-unpurged quarantine row could falsely trip `ErrStranded` on a netblock
+  edit/remove. Now filtered to `state='allocated' OR quarantine_until > now`.

@@ -69,13 +69,25 @@ export function envelopeBits(p: number, poolBits: number): number {
 
 // ── pool extent ───────────────────────────────────────────────────────────────────
 //
-// The API doesn't return the bare pool prefix, but `central` (kind reserved) starts at
-// the pool's network address and `default` is inside the pool, so the pool's extent is
-// the smallest power-of-two CIDR that contains every netblock and is aligned to the
-// lowest block's base. We derive it from the netblock list (the single source of truth).
+// The list response now carries the configured `pool` prefix (D21), so the overlay
+// extent shows free space ABOVE the highest block. `resolvePoolExtent` prefers that
+// authoritative value and only falls back to the block-derived `poolExtent` when the
+// API omits it (an older server) — the legacy D19 workaround, kept as a fallback.
 
-// poolExtent returns the enclosing pool CIDR for a set of netblocks, or null if there
-// are none / all unparsable.
+// resolvePoolExtent returns the address-map extent: the API-provided pool when present
+// and parsable, else the smallest CIDR enclosing all blocks (the D19 fallback).
+export function resolvePoolExtent(pool: string | undefined, blocks: Netblock[]): Cidr | null {
+  if (pool) {
+    const p = parseCidr(pool)
+    if (p) return p
+  }
+  return poolExtent(blocks)
+}
+
+// poolExtent derives the enclosing pool CIDR from the netblock list alone: the smallest
+// power-of-two CIDR that contains every netblock, aligned to the lowest block's base.
+// The D19 fallback for when the API omits the bare `pool` field. Returns null if there
+// are no blocks / all are unparsable.
 export function poolExtent(blocks: Netblock[]): Cidr | null {
   const cidrs = blocks.map((b) => parseCidr(b.cidr)).filter((c): c is Cidr => c !== null)
   if (cidrs.length === 0) return null

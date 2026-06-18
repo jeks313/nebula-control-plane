@@ -23,6 +23,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/netip"
 	"sync"
 	"time"
@@ -115,9 +116,11 @@ type Registry struct {
 	allocs   allocationLister
 	audit    AuditFunc
 	now      func() time.Time
+	log      *slog.Logger
 
 	mu    sync.Mutex
 	cache *resolverCache // lazily built; invalidated on every mutation
+	gen   uint64         // bumped on every invalidate so a stale snapshot can't overwrite a fresh cache
 }
 
 // New builds a Registry over pool. reserved are addresses that may not be carved
@@ -132,6 +135,7 @@ func New(db *gorm.DB, pool netip.Prefix, reserved []netip.Addr, allocs allocatio
 		allocs:   allocs,
 		audit:    audit,
 		now:      time.Now,
+		log:      slog.Default(),
 	}
 }
 
@@ -181,7 +185,9 @@ func (r *Registry) Add(ctx context.Context, name string, cidr netip.Prefix, desc
 		return Netblock{}, fmt.Errorf("netblock: add: %w", err)
 	}
 	r.invalidate()
-	r.recordAudit(ctx, actor, "netblock-add", name, fmt.Sprintf(`{"cidr":%q,"kind":%q}`, row.CIDR, KindNamed))
+	// Note: admin CRUD is audited by the handler (it carries the principal). The
+	// registry deliberately does NOT audit Add/Update/Remove to avoid a double entry;
+	// only Grow (auto-grow, no handler/principal) is audited here.
 	return row, nil
 }
 
@@ -258,7 +264,7 @@ func (r *Registry) Update(ctx context.Context, name string, cidr netip.Prefix, d
 		return Netblock{}, ErrNotFound // row vanished or its CIDR changed under us
 	}
 	r.invalidate()
-	r.recordAudit(ctx, actor, "netblock-update", name, fmt.Sprintf(`{"cidr":%q}`, newCIDR))
+	// Admin CRUD is audited by the handler (see Add).
 	row.CIDR = newCIDR
 	row.Description = description
 	return row, nil
@@ -283,7 +289,7 @@ func (r *Registry) Remove(ctx context.Context, name, actor string) error {
 		return fmt.Errorf("netblock: remove: %w", err)
 	}
 	r.invalidate()
-	r.recordAudit(ctx, actor, "netblock-remove", name, "")
+	// Admin CRUD is audited by the handler (see Add).
 	return nil
 }
 
@@ -341,8 +347,12 @@ func (r *Registry) Grow(ctx context.Context, name, actor string) (netip.Prefix, 
 	return next, nil
 }
 
-// Resolve returns the CIDR for name; "" resolves to the 'default' netblock. It
-// implements ipam.NetblockResolver. Backed by a small cache invalidated on CRUD.
+// Resolve returns the CIDR for name; "" resolves to the 'default' netblock. An
+// unknown/deleted non-empty name ALSO falls back to 'default' (with a warning), so a
+// join-key/cloud-trust binding to a since-deleted or mistyped netblock never breaks
+// enrollment (the documented AWSAccount.Netblock contract + ADR intent; D20). Only a
+// missing 'default' (shouldn't happen post-genesis) yields ErrNotFound. It implements
+// ipam.NetblockResolver. Backed by a small cache invalidated on CRUD.
 func (r *Registry) Resolve(ctx context.Context, name string) (netip.Prefix, error) {
 	c, err := r.snapshot(ctx)
 	if err != nil {
@@ -351,11 +361,17 @@ func (r *Registry) Resolve(ctx context.Context, name string) (netip.Prefix, erro
 	if name == "" {
 		name = NameDefault
 	}
-	p, ok := c.byName[name]
-	if !ok {
-		return netip.Prefix{}, fmt.Errorf("%w: %q", ErrNotFound, name)
+	if p, ok := c.byName[name]; ok {
+		return p, nil
 	}
-	return p, nil
+	// Unknown/deleted name -> fall back to 'default'.
+	if name != NameDefault {
+		r.logFallback(name)
+		if p, ok := c.byName[NameDefault]; ok {
+			return p, nil
+		}
+	}
+	return netip.Prefix{}, fmt.Errorf("%w: %q", ErrNotFound, name)
 }
 
 // Carves returns the 'named' netblock CIDRs (for the allocator's overlap checks
@@ -382,7 +398,20 @@ func (r *Registry) ResolveFull(ctx context.Context, name string) (ipam.Resolved,
 	}
 	row, ok := c.rows[name]
 	if !ok {
-		return ipam.Resolved{}, fmt.Errorf("%w: %q", ErrNotFound, name)
+		// Unknown/deleted name -> fall back to 'default' (D20). The resolved block is
+		// 'default' (kind=default), so Named=false: an unknown binding must NOT become
+		// auto-grow-eligible as if it were a named block — it draws from the bounded
+		// fallback, which never auto-grows.
+		if name != NameDefault {
+			r.logFallback(name)
+			if def, ok := c.rows[NameDefault]; ok {
+				row = def
+			} else {
+				return ipam.Resolved{}, fmt.Errorf("%w: %q", ErrNotFound, name)
+			}
+		} else {
+			return ipam.Resolved{}, fmt.Errorf("%w: %q", ErrNotFound, name)
+		}
 	}
 	return ipam.Resolved{
 		ID:    row.ID,
@@ -390,6 +419,18 @@ func (r *Registry) ResolveFull(ctx context.Context, name string) (ipam.Resolved,
 		CIDR:  row.Prefix(),
 		Named: row.Kind == KindNamed,
 	}, nil
+}
+
+// logFallback emits a warning that an unknown/deleted netblock name fell back to the
+// 'default' block at resolution time (D20), so the silent-but-safe fallback stays
+// visible to operators.
+func (r *Registry) logFallback(name string) {
+	log := r.log
+	if log == nil {
+		log = slog.Default()
+	}
+	log.Warn("netblock: unknown binding name fell back to default",
+		"requested", name, "fallback", NameDefault)
 }
 
 // --- internals ---
@@ -405,9 +446,17 @@ type resolverCache struct {
 func (r *Registry) invalidate() {
 	r.mu.Lock()
 	r.cache = nil
+	r.gen++ // a snapshot in flight against the old gen must not store its stale result
 	r.mu.Unlock()
 }
 
+// snapshot returns the parsed netblock table, building (and caching) it on a miss.
+// The build runs OUTSIDE the lock (List touches the DB; holding r.mu across it would
+// serialize every reader and risk a deadlock with the single SQLite writer). A
+// generation counter guards the lost-update race: invalidate() bumps r.gen, so a
+// snapshot that began before a concurrent mutation refuses to store its now-stale
+// result — it returns the freshly-built snapshot to its own caller but leaves the
+// cache nil so the NEXT reader rebuilds against the mutated table.
 func (r *Registry) snapshot(ctx context.Context) (*resolverCache, error) {
 	r.mu.Lock()
 	if r.cache != nil {
@@ -415,6 +464,7 @@ func (r *Registry) snapshot(ctx context.Context) (*resolverCache, error) {
 		r.mu.Unlock()
 		return c, nil
 	}
+	startGen := r.gen
 	r.mu.Unlock()
 
 	rows, err := r.List(ctx)
@@ -438,7 +488,11 @@ func (r *Registry) snapshot(ctx context.Context) (*resolverCache, error) {
 		}
 	}
 	r.mu.Lock()
-	r.cache = c
+	if r.gen == startGen {
+		r.cache = c // no mutation raced us — safe to publish
+	}
+	// else: a mutation invalidated mid-read; leave cache nil so the next reader
+	// rebuilds. We still return c (a consistent point-in-time view) to this caller.
 	r.mu.Unlock()
 	return c, nil
 }

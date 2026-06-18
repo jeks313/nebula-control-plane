@@ -5,6 +5,7 @@ import {
   cidrSize,
   envelopeBits,
   poolExtent,
+  resolvePoolExtent,
   overlaySegments,
   utilizationTone,
   type Cidr,
@@ -82,6 +83,28 @@ describe('poolExtent', () => {
   })
   it('returns null when there are no parsable blocks', () => {
     expect(poolExtent([])).toBeNull()
+  })
+})
+
+describe('resolvePoolExtent', () => {
+  // The API now returns the configured pool (D21); the overlay prefers it so free space
+  // ABOVE the highest block is visible — the block-derived extent is only a fallback.
+  const blocks = [
+    nb({ name: 'central', cidr: '10.44.0.0/27', kind: 'reserved' }),
+    nb({ name: 'default', cidr: '10.44.64.0/18', kind: 'default' }),
+  ]
+  it('prefers the API pool prefix (shows free space above the highest block)', () => {
+    // Blocks only reach a /17, but the API pool is the full /16 — the extent is the /16.
+    expect(formatCidr(resolvePoolExtent('10.44.0.0/16', blocks) as Cidr)).toBe('10.44.0.0/16')
+  })
+  it('falls back to the block-derived extent when pool is absent (older server)', () => {
+    expect(formatCidr(resolvePoolExtent(undefined, blocks) as Cidr)).toBe('10.44.0.0/17')
+  })
+  it('falls back to the block-derived extent when pool is unparsable', () => {
+    expect(formatCidr(resolvePoolExtent('garbage', blocks) as Cidr)).toBe('10.44.0.0/17')
+  })
+  it('returns null when neither a pool nor blocks are available', () => {
+    expect(resolvePoolExtent(undefined, [])).toBeNull()
   })
 })
 
