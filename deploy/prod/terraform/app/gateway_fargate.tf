@@ -193,6 +193,13 @@ resource "aws_security_group" "gateway_task" {
     protocol    = "udp"
     cidr_blocks = ["0.0.0.0/0"]
   }
+  egress {
+    description = "Ship logs to Loki on the monitoring node (the FireLens sidecar pushes to the client tier)"
+    from_port   = 3100
+    to_port     = 3100
+    protocol    = "tcp"
+    cidr_blocks = [local.tier_cidr["client"]]
+  }
   # NFS to the ACME cert-cache EFS — only when auto-TLS is on. Targets the edge subnet
   # CIDR (the mount target lives there), not the EFS SG, so the two SGs don't reference
   # each other (cycle); the EFS SG already source-matches this task SG on ingress.
@@ -353,14 +360,35 @@ resource "aws_ecs_task_definition" "gateway" {
     mountPoints = local.gateway_acme == 1 ? [
       { sourceVolume = "acme", containerPath = "/var/lib/gateway/acme", readOnly = false },
     ] : []
+    # Route the gateway's logs to Loki via the FireLens sidecar below (so the off-mesh gateway's
+    # logs land in the same Grafana as the mesh nodes). fluent-bit buffers/retries on a Loki
+    # outage, so a logging hiccup never sinks the gateway.
     logConfiguration = {
-      logDriver = "awslogs"
+      logDriver = "awsfirelens"
       options = {
-        "awslogs-group"         = aws_cloudwatch_log_group.gateway[0].name
-        "awslogs-region"        = var.region
-        "awslogs-stream-prefix" = "gateway"
+        Name   = "loki"
+        Host   = aws_instance.node["monitoring"].private_ip
+        Port   = "3100"
+        Labels = "job=fargate-gateway, host=gateway"
       }
     }
+    },
+    # FireLens (fluent-bit) sidecar: forwards the gateway container's stdout/stderr to Loki on the
+    # monitoring node over the VPC. Its OWN logs go to CloudWatch so FireLens itself stays debuggable.
+    {
+      name                  = "log_router"
+      image                 = "public.ecr.aws/aws-observability/aws-for-fluent-bit:stable"
+      essential             = true
+      user                  = "0"
+      firelensConfiguration = { type = "fluentbit" }
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.gateway[0].name
+          "awslogs-region"        = var.region
+          "awslogs-stream-prefix" = "firelens"
+        }
+      }
   }])
 
   # EFS-backed ACME cert cache, mounted at /var/lib/gateway/acme (auto-TLS only). Transit
