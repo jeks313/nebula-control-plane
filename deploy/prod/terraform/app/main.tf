@@ -50,6 +50,13 @@ resource "aws_security_group" "lighthouse" {
     cidr_blocks = ["0.0.0.0/0"]
   }
   egress {
+    description = "Ship journald logs to Loki on the monitoring node (Phase 7c, client tier)"
+    from_port   = 3100
+    to_port     = 3100
+    protocol    = "tcp"
+    cidr_blocks = [local.tier_cidr["client"]]
+  }
+  egress {
     description = "Bootstrap package fetch (https/http)"
     from_port   = 443
     to_port     = 443
@@ -259,11 +266,11 @@ resource "aws_security_group" "monitoring" {
     cidr_blocks = ["0.0.0.0/0"]
   }
   ingress {
-    description     = "Loki log ingest from harbor promtail (Phase 7c) - harbor SG only"
-    from_port       = 3100
-    to_port         = 3100
-    protocol        = "tcp"
-    security_groups = [aws_security_group.harbor.id]
+    description = "Loki log ingest (Phase 7c): Grafana Alloy on harbor/monitoring/the EC2 lighthouse + the Fargate gateway FireLens sidecar. In-VPC only (ingest is never public)."
+    from_port   = 3100
+    to_port     = 3100
+    protocol    = "tcp"
+    cidr_blocks = [var.vpc_cidr]
   }
   egress {
     description = "Nebula data plane + DNS (UDP) - the scrape traffic to mesh-only targets rides this tunnel"
