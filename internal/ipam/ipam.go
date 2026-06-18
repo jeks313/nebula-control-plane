@@ -204,7 +204,6 @@ func (a *Allocator) Allocate(ctx context.Context, deviceName, netblockName, meth
 		return netip.Addr{}, err
 	}
 
-	grew := false
 	for attempt := 0; attempt < maxAllocAttempts; attempt++ {
 		ip, ferr := a.firstFree(ctx, res)
 		if errors.Is(ferr, ErrPoolExhausted) {
@@ -214,7 +213,6 @@ func (a *Allocator) Allocate(ctx context.Context, deviceName, netblockName, meth
 				if gerr == nil && grown.IsValid() {
 					metricAutogrow.WithLabelValues(res.Name).Inc()
 					res.CIDR = grown
-					grew = true
 					continue
 				}
 			}
@@ -242,7 +240,6 @@ func (a *Allocator) Allocate(ctx context.Context, deviceName, netblockName, meth
 		}
 		return netip.Addr{}, fmt.Errorf("ipam: allocate: %w", err)
 	}
-	_ = grew
 	return netip.Addr{}, ErrContended
 }
 
@@ -314,12 +311,17 @@ func (a *Allocator) Release(ctx context.Context, ip netip.Addr) error {
 	return nil
 }
 
-// LiveAddrs returns every live (allocated or quarantined) overlay address. It
-// backs netblock.Registry's stranding guard (an edit/remove that would leave a
-// live allocation outside the new range is blocked).
+// LiveAddrs returns every live overlay address — allocated, OR quarantined with an
+// unexpired window. It backs netblock.Registry's stranding guard (an edit/remove that
+// would leave a live allocation outside the new range is blocked). An expired-but-
+// unpurged quarantine row is NOT live (its IP is reusable), so it's excluded here to
+// avoid falsely tripping ErrStranded on a netblock edit/remove.
 func (a *Allocator) LiveAddrs(ctx context.Context) ([]netip.Addr, error) {
 	var ips []string
-	if err := a.db.WithContext(ctx).Model(&Allocation{}).Pluck("ip", &ips).Error; err != nil {
+	err := a.db.WithContext(ctx).Model(&Allocation{}).
+		Where("state = ? OR quarantine_until > ?", stateAllocated, a.now().UnixNano()).
+		Pluck("ip", &ips).Error
+	if err != nil {
 		return nil, fmt.Errorf("ipam: live addrs: %w", err)
 	}
 	out := make([]netip.Addr, 0, len(ips))

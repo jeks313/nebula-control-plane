@@ -1108,6 +1108,8 @@ export interface components {
         NetblockList: {
             netblocks: components["schemas"]["Netblock"][];
             count: number;
+            /** @description the configured overlay pool CIDR (e.g. 10.44.0.0/16); the UI uses this as the address-map extent. Absent/empty when no pool is configured. */
+            pool?: string;
         };
         NetblockCreateRequest: {
             name: string;

@@ -68,6 +68,54 @@ func TestReleaseNoQuarantineReuses(t *testing.T) {
 	}
 }
 
+func TestLiveAddrsExcludesExpiredQuarantine(t *testing.T) {
+	a := newAllocator(t, Pool{
+		Prefix:        netip.MustParsePrefix("100.64.0.0/24"),
+		QuarantineTTL: time.Hour,
+	})
+	now := time.Now()
+	a.now = func() time.Time { return now }
+	ctx := context.Background()
+
+	keep, _ := a.Allocate(ctx, "keep", "", "token")     // stays allocated
+	expire, _ := a.Allocate(ctx, "expire", "", "token") // will be quarantined then expire
+	if err := a.Release(ctx, expire); err != nil {
+		t.Fatal(err)
+	}
+
+	// While the quarantine window is open, both are live (allocated + unexpired quarantine).
+	live, err := a.LiveAddrs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(live, keep) || !contains(live, expire) {
+		t.Fatalf("during quarantine LiveAddrs = %v, want both %s and %s", live, keep, expire)
+	}
+
+	// After the window passes, the (unpurged) quarantine row must NOT count as live —
+	// it would otherwise falsely trip the netblock stranding guard.
+	now = now.Add(2 * time.Hour)
+	live, err = a.LiveAddrs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contains(live, expire) {
+		t.Fatalf("expired quarantine %s still reported live: %v", expire, live)
+	}
+	if !contains(live, keep) {
+		t.Fatalf("allocated %s missing from LiveAddrs: %v", keep, live)
+	}
+}
+
+func contains(addrs []netip.Addr, want netip.Addr) bool {
+	for _, a := range addrs {
+		if a == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestReleaseQuarantineHonored(t *testing.T) {
 	a := newAllocator(t, Pool{
 		Prefix:        netip.MustParsePrefix("100.64.0.0/24"),

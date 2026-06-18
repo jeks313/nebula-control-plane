@@ -17,7 +17,7 @@ import { Dialog } from '../components/Dialog'
 import { fmtDateTime } from '../lib/format'
 import {
   parseCidr,
-  poolExtent,
+  resolvePoolExtent,
   overlaySegments,
   utilizationTone,
   type Cidr,
@@ -39,6 +39,9 @@ export function IPAM() {
   const [createOpen, setCreateOpen] = useState(false)
 
   const blocks = q.data?.netblocks ?? []
+  // The API now returns the configured pool prefix (D21) so the overlay can show free
+  // space above the highest block; the block-derived extent is the older fallback.
+  const poolCidr = q.data?.pool
   // Derive "bound sources" client-side: a join-key's sub_range or a cloud-trust scope's
   // netblock that names this block. The API doesn't surface bindings on the netblock, so
   // we join the two existing lists here (D19).
@@ -77,7 +80,7 @@ export function IPAM() {
           </div>
         ))}
 
-      {createOpen && <CreateDialog blocks={blocks} onClose={() => setCreateOpen(false)} />}
+      {createOpen && <CreateDialog blocks={blocks} poolCidr={poolCidr} onClose={() => setCreateOpen(false)} />}
     </Page>
   )
 }
@@ -214,10 +217,10 @@ function Legend({ color, label }: { color: SegmentColor; label: string }) {
 
 // ── create ──────────────────────────────────────────────────────────────────────────
 
-function CreateDialog({ blocks, onClose }: { blocks: Netblock[]; onClose: () => void }) {
+function CreateDialog({ blocks, poolCidr, onClose }: { blocks: Netblock[]; poolCidr?: string; onClose: () => void }) {
   const toast = useToast()
   const create = useCreateNetblock()
-  const pool = useMemo(() => poolExtent(blocks), [blocks])
+  const pool = useMemo(() => resolvePoolExtent(poolCidr, blocks), [poolCidr, blocks])
 
   const [name, setName] = useState('')
   const [prefix, setPrefix] = useState(24)

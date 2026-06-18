@@ -79,6 +79,11 @@ func TestNetblockLifecycleOverHTTP(t *testing.T) {
 	if list["count"].(float64) != 2 {
 		t.Fatalf("seeded count = %v, want 2 (central+default)", list["count"])
 	}
+	// The configured pool prefix rides along so the UI overlay can show free space
+	// above the highest block (D21, supersedes the D19 block-derived extent workaround).
+	if list["pool"] != ipamPool {
+		t.Fatalf("list pool = %v, want %q", list["pool"], ipamPool)
+	}
 
 	// Create a named carve.
 	code, nb := req(t, ts, "POST", "/admin/v1/ipam/netblocks", "alice",

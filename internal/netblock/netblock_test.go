@@ -54,8 +54,9 @@ func TestRegistryAddListResolve(t *testing.T) {
 	if err != nil || def != mustP("10.44.64.0/18") {
 		t.Fatalf(`Resolve("") = %s, %v; want default`, def, err)
 	}
-	if _, err := r.Resolve(ctx, "nope"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("Resolve(nope) err = %v, want ErrNotFound", err)
+	// An unknown name now falls back to default (D20), not ErrNotFound.
+	if got, err := r.Resolve(ctx, "nope"); err != nil || got != mustP("10.44.64.0/18") {
+		t.Fatalf("Resolve(nope) = %s, %v; want default 10.44.64.0/18 (fallback)", got, err)
 	}
 
 	// Carves returns only named.
@@ -207,6 +208,160 @@ func TestRegistryGrowBlockedByOccupiedBuddy(t *testing.T) {
 	}
 	if _, err := r.Grow(ctx, "office", "op"); !errors.Is(err, ErrPoolFull) {
 		t.Fatalf("grow with occupied buddy err = %v, want ErrPoolFull", err)
+	}
+}
+
+// TestRegistrySnapshotGenGuard exercises the lost-update race directly: a mutation
+// that bumps r.gen while a snapshot is in flight (between the unlocked List and the
+// re-acquire) must NOT let the stale snapshot poison the cache — the next reader must
+// see the mutation. We simulate the in-flight snapshot by manipulating r.gen under the
+// lock the same way invalidate() does, then assert a freshly built cache published with
+// a now-stale startGen is rejected.
+func TestRegistrySnapshotGenGuard(t *testing.T) {
+	ctx := context.Background()
+	r := newRegistry(t, "10.44.0.0/16", nil)
+	if _, err := r.Add(ctx, "a", mustP("10.44.1.0/24"), "", "op"); err != nil {
+		t.Fatal(err)
+	}
+	// Warm + read the cache once.
+	if _, err := r.Carves(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Capture the current gen, then simulate a snapshot that started against this gen
+	// while a mutation invalidates mid-build.
+	r.mu.Lock()
+	startGen := r.gen
+	r.mu.Unlock()
+
+	// A concurrent mutation invalidates: cache=nil, gen++.
+	r.invalidate()
+
+	// Now a stale snapshot finishing its build sees gen != startGen and must leave the
+	// cache nil. Build a bogus stale cache and try to publish it under the stale gen.
+	stale := &resolverCache{byName: map[string]netip.Prefix{}, rows: map[string]Netblock{}}
+	r.mu.Lock()
+	if r.gen == startGen {
+		r.cache = stale
+	}
+	cacheAfter := r.cache
+	r.mu.Unlock()
+	if cacheAfter != nil {
+		t.Fatalf("stale snapshot poisoned the cache; want cache=nil so the next reader rebuilds")
+	}
+
+	// The next real read must rebuild from the table and still see the carve.
+	carves, err := r.Carves(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(carves) != 1 || carves[0] != mustP("10.44.1.0/24") {
+		t.Fatalf("after gen-guarded invalidate, Carves = %v, want [10.44.1.0/24]", carves)
+	}
+}
+
+func TestRegistryResolveUnknownFallsBackToDefault(t *testing.T) {
+	ctx := context.Background()
+	r := newRegistry(t, "10.44.0.0/16", nil)
+	if _, err := r.Seed(ctx, NameDefault, mustP("10.44.64.0/18"), KindDefault, "fallback", "genesis"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Add(ctx, "office", mustP("10.44.20.0/24"), "", "op"); err != nil {
+		t.Fatal(err)
+	}
+
+	// An unknown/deleted/typo'd non-empty name resolves to the default CIDR (D20) —
+	// it must NOT return ErrNotFound (that would break enrollment for a stale binding).
+	got, err := r.Resolve(ctx, "does-not-exist")
+	if err != nil {
+		t.Fatalf("Resolve(does-not-exist) err = %v, want nil (fall back to default)", err)
+	}
+	if got != mustP("10.44.64.0/18") {
+		t.Fatalf("Resolve(does-not-exist) = %s, want default 10.44.64.0/18", got)
+	}
+
+	// ResolveFull on an unknown name resolves to default's identity, and crucially
+	// Named=false so an unknown binding is NOT auto-grow-eligible.
+	full, err := r.ResolveFull(ctx, "does-not-exist")
+	if err != nil {
+		t.Fatalf("ResolveFull(does-not-exist) err = %v, want nil", err)
+	}
+	if full.Name != NameDefault || full.CIDR != mustP("10.44.64.0/18") {
+		t.Fatalf("ResolveFull(does-not-exist) = %+v, want default block", full)
+	}
+	if full.Named {
+		t.Fatalf("ResolveFull(does-not-exist).Named = true, want false (unknown name must not be auto-grow-eligible)")
+	}
+
+	// Deleting a referenced block also falls back (the runtime-fallback contract).
+	if err := r.Remove(ctx, "office", "op"); err != nil {
+		t.Fatal(err)
+	}
+	got, err = r.Resolve(ctx, "office")
+	if err != nil || got != mustP("10.44.64.0/18") {
+		t.Fatalf("Resolve(office) after delete = %s, %v; want default", got, err)
+	}
+}
+
+func TestRegistryResolveErrNotFoundWhenDefaultMissing(t *testing.T) {
+	ctx := context.Background()
+	r := newRegistry(t, "10.44.0.0/16", nil)
+	// No default seeded: a name miss has nowhere to fall back to.
+	if _, err := r.Resolve(ctx, "office"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Resolve with no default err = %v, want ErrNotFound", err)
+	}
+	if _, err := r.ResolveFull(ctx, "office"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("ResolveFull with no default err = %v, want ErrNotFound", err)
+	}
+}
+
+// countingAudit records every (action) it sees, for the audit-count assertions.
+type countingAudit struct{ actions []string }
+
+func (c *countingAudit) fn(ctx context.Context, actor, action, target, details string) error {
+	c.actions = append(c.actions, action)
+	return nil
+}
+
+func (c *countingAudit) count(action string) int {
+	n := 0
+	for _, a := range c.actions {
+		if a == action {
+			n++
+		}
+	}
+	return n
+}
+
+func TestRegistryAuditOnGrowNotOnCRUD(t *testing.T) {
+	ctx := context.Background()
+	ca := &countingAudit{}
+	r := New(newStore(t).DB, mustP("10.44.0.0/16"), nil, &fakeAllocs{}, ca.fn)
+
+	if _, err := r.Add(ctx, "office", mustP("10.44.1.0/27"), "", "op"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Update(ctx, "office", mustP("10.44.1.0/27"), "edited", "op"); err != nil {
+		t.Fatal(err)
+	}
+	// CRUD must NOT be audited by the registry (the handler audits with the principal).
+	if got := ca.count("netblock-add") + ca.count("netblock-update"); got != 0 {
+		t.Fatalf("registry audited CRUD %d time(s), want 0 (handler owns CRUD audit)", got)
+	}
+
+	// Grow MUST be audited by the registry (auto-grow has no handler/principal).
+	if _, err := r.Grow(ctx, "office", "ipam-autogrow"); err != nil {
+		t.Fatal(err)
+	}
+	if got := ca.count("netblock-autogrow"); got != 1 {
+		t.Fatalf("Grow audited %d time(s), want exactly 1", got)
+	}
+
+	if err := r.Remove(ctx, "office", "op"); err != nil {
+		t.Fatal(err)
+	}
+	if got := ca.count("netblock-remove"); got != 0 {
+		t.Fatalf("registry audited remove %d time(s), want 0", got)
 	}
 }
 

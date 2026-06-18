@@ -1249,6 +1249,7 @@ components:
       properties:
         netblocks: { type: array, items: { $ref: "#/components/schemas/Netblock" } }
         count: { type: integer }
+        pool: { type: string, description: "the configured overlay pool CIDR (e.g. 10.44.0.0/16); the UI uses this as the address-map extent. Absent/empty when no pool is configured." }
     NetblockCreateRequest:
       type: object
       required: [name, cidr]

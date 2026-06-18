@@ -106,10 +106,13 @@ func (s *Server) ipamConfigured(w http.ResponseWriter) bool {
 
 // ── netblocks ───────────────────────────────────────────────────────────────
 
-// GET /admin/v1/ipam/netblocks — list netblocks with per-block utilization.
+// GET /admin/v1/ipam/netblocks — list netblocks with per-block utilization. The
+// configured pool prefix rides along as a top-level `pool` so the UI overlay can show
+// free space above the highest block (it no longer has to derive the extent from the
+// block list — D21 supersedes the D19 workaround).
 func (s *Server) handleNetblocks(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.Netblocks == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"netblocks": []NetblockView{}, "count": 0})
+		writeJSON(w, http.StatusOK, map[string]any{"netblocks": []NetblockView{}, "count": 0, "pool": s.poolString()})
 		return
 	}
 	ctx := r.Context()
@@ -141,7 +144,16 @@ func (s *Server) handleNetblocks(w http.ResponseWriter, r *http.Request) {
 			Pct: pctOf(allocated, capacity), CreatedAt: rfc3339(row.CreatedAt), CreatedBy: row.CreatedBy,
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"netblocks": out, "count": len(out)})
+	writeJSON(w, http.StatusOK, map[string]any{"netblocks": out, "count": len(out), "pool": s.poolString()})
+}
+
+// poolString renders the configured overlay pool prefix for the list response, or ""
+// if no pool is configured (the UI then falls back to the block-derived extent).
+func (s *Server) poolString() string {
+	if s.cfg.Pool.IsValid() {
+		return s.cfg.Pool.String()
+	}
+	return ""
 }
 
 // POST /admin/v1/ipam/netblocks — carve a new named netblock.
