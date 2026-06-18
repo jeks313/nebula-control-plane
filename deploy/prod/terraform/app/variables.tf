@@ -126,18 +126,19 @@ variable "gateway_fargate_memory" {
   default     = 512
 }
 
-# ── Lighthouse runtime (SPIKE) ────────────────────────────────────────────────
+# ── Lighthouse runtime ────────────────────────────────────────────────────────
 # A dedicated lighthouse does only control-plane work (discovery + hole-punch
 # coordination over UDP) and passes no data-plane traffic to/from itself, so it can
 # run nebula with `tun.disabled` — no TUN, no CAP_NET_ADMIN, no privilege — which
 # makes it Fargate-eligible (unlike Core, which routes core-api over the overlay and
-# needs a real TUN). Default 'ec2' because the Fargate path is an unproven spike: it
-# needs a UDP NLB that PRESERVES the client address (the lighthouse learns each
-# host's post-NAT underlay address from the packet source) — see deploy/fargate/README.
+# needs a real TUN). Defaults to 'fargate' (serverless, like the gateway): a UDP NLB
+# with preserve_client_ip=true fronts the container so the lighthouse still learns each
+# host's post-NAT underlay address from the packet source. Override to 'ec2' for a VM
+# with an Elastic IP — see deploy/fargate/README.
 variable "lighthouse_runtime" {
-  description = "How to host the lighthouse: 'ec2' (a VM, the default) or 'fargate' (a serverless tun.disabled nebula container behind a UDP NLB — SPIKE, see deploy/fargate/README.md)."
+  description = "How to host the lighthouse: 'fargate' (a serverless tun.disabled nebula container behind a client-IP-preserving UDP NLB — the DEFAULT) or 'ec2' (a VM with an Elastic IP). Fargate needs lighthouse_image pushed (deploy/fargate/build-push.sh lighthouse); the genesis bootstrap does it."
   type        = string
-  default     = "ec2"
+  default     = "fargate"
 
   validation {
     condition     = contains(["ec2", "fargate"], var.lighthouse_runtime)
