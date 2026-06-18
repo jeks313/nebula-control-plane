@@ -22,6 +22,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
@@ -30,9 +31,11 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/dualcontrol"
 	"github.com/jeks313/nebula-control-plane/internal/enrollment"
 	"github.com/jeks313/nebula-control-plane/internal/fleet"
+	"github.com/jeks313/nebula-control-plane/internal/ipam"
 	"github.com/jeks313/nebula-control-plane/internal/lighthouse"
 	"github.com/jeks313/nebula-control-plane/internal/nebulaconfig"
 	"github.com/jeks313/nebula-control-plane/internal/nebularelease"
+	"github.com/jeks313/nebula-control-plane/internal/netblock"
 	"github.com/jeks313/nebula-control-plane/internal/pilotrelease"
 	"github.com/jeks313/nebula-control-plane/internal/policy"
 	"github.com/jeks313/nebula-control-plane/internal/rollout"
@@ -113,6 +116,15 @@ type Config struct {
 	// (issues a cert). CanIssue gates the approve endpoint.
 	Enrollment *enrollment.Consumer
 	CanIssue   bool
+	// Netblocks + Allocator back the IPAM admin surface (ADR 0010): the netblock
+	// registry (CRUD + Suggest) and the allocator that reads allocations for
+	// utilization/overlay + backs the registry's stranding guard. Optional — when
+	// both are nil the IPAM endpoints behave as "not configured" (empty list, 503 on
+	// mutate), mirroring the Lighthouses guard. Pool is the overlay CIDR used to
+	// default the registry from the store when Netblocks is nil.
+	Netblocks  *netblock.Registry
+	Allocator  *ipam.Allocator
+	Pool       netip.Prefix
 	Thresholds fleet.Thresholds // health thresholds (sensible defaults if zero)
 	// MFAFreshness gates the most privileged actions (dual-control approve, policy
 	// publish) on recent MFA: the session's mfa_satisfied_at must be within this
@@ -169,6 +181,27 @@ func New(cfg Config) *Server {
 		if s.cfg.Enrollment == nil {
 			// Store-only: list + deny work; approve is gated by CanIssue (false here).
 			s.cfg.Enrollment = enrollment.New(enrollment.Config{Store: cfg.Store})
+		}
+		// IPAM (ADR 0010): default the netblock registry + allocator from the store so
+		// the IPAM admin endpoints always have them. The allocator backs the registry's
+		// stranding guard (and the utilization/allocation reads); the registry is its
+		// netblock resolver. A caller may still inject its own (e.g. one already wired
+		// for enrollment). Requires a pool — default to the genesis convention if unset.
+		if s.cfg.Allocator == nil || s.cfg.Netblocks == nil {
+			pool := s.cfg.Pool
+			if !pool.IsValid() {
+				pool, _ = netip.ParsePrefix("100.64.0.0/16")
+			}
+			if alloc, aerr := ipam.NewAllocator(cfg.Store, ipam.Pool{Prefix: pool}); aerr == nil {
+				reg := netblock.New(cfg.Store.DB, pool, nil, alloc, audit)
+				alloc = alloc.WithResolver(reg)
+				if s.cfg.Allocator == nil {
+					s.cfg.Allocator = alloc
+				}
+				if s.cfg.Netblocks == nil {
+					s.cfg.Netblocks = reg
+				}
+			}
 		}
 		// Commit-time validation for the dual-control publish kinds (defense in
 		// depth; the active config is the latest committed change of each kind). The
@@ -246,6 +279,14 @@ func (s *Server) routeTable() []route {
 		{"GET", "/admin/v1/enrollments", s.handleEnrollments},
 		{"POST", "/admin/v1/enrollments/{id}/approve", s.handleEnrollApprove},
 		{"POST", "/admin/v1/enrollments/{id}/deny", s.handleEnrollDeny},
+		// IPAM netblocks (ADR 0010 Phase 3). The literal /netblocks/suggest is more
+		// specific than /netblocks/{name}, so the 1.22 mux routes it first.
+		{"GET", "/admin/v1/ipam/netblocks", s.handleNetblocks},
+		{"POST", "/admin/v1/ipam/netblocks", s.handleNetblockCreate},
+		{"GET", "/admin/v1/ipam/netblocks/suggest", s.handleNetblockSuggest},
+		{"PATCH", "/admin/v1/ipam/netblocks/{name}", s.handleNetblockUpdate},
+		{"DELETE", "/admin/v1/ipam/netblocks/{name}", s.handleNetblockRemove},
+		{"GET", "/admin/v1/ipam/allocations", s.handleIPAMAllocations},
 	}
 }
 

@@ -155,9 +155,11 @@ func TestResponsesConformToSpec(t *testing.T) {
 
 	for _, r := range srv.Routes() {
 		method, path := splitRoute(r)
-		// Generic conformance covers GET endpoints with no path params; POST
-		// (mutations) and parameterized paths are exercised by dedicated flow tests.
-		if method != "GET" || strings.Contains(path, "{") {
+		// Generic conformance covers GET endpoints with no path params and no required
+		// query inputs; POST (mutations), parameterized paths, and query-driven reads
+		// (e.g. ipam suggest/allocations) are exercised by dedicated flow tests that
+		// supply the inputs and call conform().
+		if method != "GET" || strings.Contains(path, "{") || hasRequiredQuery(doc, method, path) {
 			continue
 		}
 		t.Run(r, func(t *testing.T) {
@@ -203,6 +205,26 @@ func responseSchema(t *testing.T, doc *openapi3.T, method, path string, code int
 		t.Fatalf("spec %s %s %d has no application/json schema", method, path, code)
 	}
 	return mt.Schema.Value
+}
+
+// hasRequiredQuery reports whether the documented operation declares a required
+// query parameter (so the generic, input-less conformance walk would 400 it —
+// such reads are covered by dedicated flow tests that supply the query).
+func hasRequiredQuery(doc *openapi3.T, method, path string) bool {
+	item := doc.Paths.Find(path)
+	if item == nil {
+		return false
+	}
+	op := item.GetOperation(method)
+	if op == nil {
+		return false
+	}
+	for _, p := range op.Parameters {
+		if p.Value != nil && p.Value.In == "query" && p.Value.Required {
+			return true
+		}
+	}
+	return false
 }
 
 func splitRoute(r string) (method, path string) {

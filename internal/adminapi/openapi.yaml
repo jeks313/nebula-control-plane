@@ -614,6 +614,114 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
+  /admin/v1/ipam/netblocks:
+    get:
+      summary: List netblocks with per-block utilization (ADR 0010 IPAM).
+      operationId: listNetblocks
+      responses:
+        "200":
+          description: All netblocks (central, default, named carves) + utilization.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NetblockList" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      summary: Carve a new named netblock. Requires ipam:manage + step-up MFA.
+      operationId: createNetblock
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NetblockCreateRequest" }
+      responses:
+        "201":
+          description: The created netblock.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Netblock" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /admin/v1/ipam/netblocks/suggest:
+    get:
+      summary: Growth-aware placement suggestion for a new /N netblock.
+      operationId: suggestNetblock
+      parameters:
+        - { name: prefix, in: query, required: true, description: "requested prefix length (1-32)", schema: { type: integer } }
+      responses:
+        "200":
+          description: A suggested CIDR for the requested size.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NetblockSuggestion" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /admin/v1/ipam/netblocks/{name}:
+    patch:
+      summary: Edit a netblock's CIDR/description. Both optional; protected blocks refused. Requires ipam:manage + step-up MFA.
+      operationId: updateNetblock
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/NetblockUpdateRequest" }
+      responses:
+        "200":
+          description: The updated netblock.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Netblock" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+    delete:
+      summary: Remove a netblock (protected or in-use blocks are refused). Requires ipam:manage + step-up MFA.
+      operationId: removeNetblock
+      parameters:
+        - { name: name, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Removed.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [name, removed]
+                properties:
+                  name: { type: string }
+                  removed: { type: boolean }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "409": { $ref: "#/components/responses/Problem" }
+        "422": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+  /admin/v1/ipam/allocations:
+    get:
+      summary: Allocations within a netblock (overlay/heat data).
+      operationId: listIPAMAllocations
+      parameters:
+        - { name: netblock, in: query, required: true, description: "the netblock name", schema: { type: string } }
+      responses:
+        "200":
+          description: Allocations inside the netblock's CIDR.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AllocationList" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
 components:
   securitySchemes:
     DevActor:
@@ -1120,6 +1228,62 @@ components:
       properties:
         secret: { type: string, description: "the join-key secret — shown ONCE" }
         joinkey: { $ref: "#/components/schemas/JoinKey" }
+    Netblock:
+      type: object
+      required: [name, cidr, kind, protected, capacity, allocated, used, pct, created_at]
+      properties:
+        name: { type: string }
+        cidr: { type: string, description: "the netblock's IPv4 CIDR, e.g. 10.44.20.0/24" }
+        kind: { type: string, enum: [reserved, default, named] }
+        description: { type: string }
+        protected: { type: boolean, description: "central/default cannot be edited or removed" }
+        capacity: { type: integer, description: "usable host count (CIDR size minus the network address)" }
+        allocated: { type: integer, description: "current allocations inside the CIDR" }
+        used: { type: integer, description: "live (heartbeat-confirmed) addresses; 0 until the fleet wiring lands (Phase 4)" }
+        pct: { type: number, description: "allocated / capacity * 100 (one decimal)" }
+        created_at: { type: string, format: date-time }
+        created_by: { type: string }
+    NetblockList:
+      type: object
+      required: [netblocks, count]
+      properties:
+        netblocks: { type: array, items: { $ref: "#/components/schemas/Netblock" } }
+        count: { type: integer }
+    NetblockCreateRequest:
+      type: object
+      required: [name, cidr]
+      properties:
+        name: { type: string }
+        cidr: { type: string, description: "the IPv4 CIDR to carve, e.g. 10.44.20.0/24" }
+        description: { type: string }
+    NetblockUpdateRequest:
+      type: object
+      description: "Both fields optional; an omitted field is left unchanged. Protected (central/default) blocks are refused."
+      properties:
+        cidr: { type: string }
+        description: { type: string }
+    NetblockSuggestion:
+      type: object
+      required: [prefix, cidr]
+      properties:
+        prefix: { type: integer, description: "the requested prefix length" }
+        cidr: { type: string, description: "a growth-aware placement CIDR for that size" }
+    Allocation:
+      type: object
+      required: [ip]
+      properties:
+        ip: { type: string }
+        device: { type: string }
+        method: { type: string, description: "token | aws-sigv4 | sso | genesis" }
+        allocated_at: { type: string, format: date-time }
+    AllocationList:
+      type: object
+      required: [netblock, cidr, allocations, count]
+      properties:
+        netblock: { type: string }
+        cidr: { type: string }
+        allocations: { type: array, items: { $ref: "#/components/schemas/Allocation" } }
+        count: { type: integer }
     EnrollmentView:
       type: object
       required: [enrollment_id, device_name, pubkey_hash, method, groups, status, created_at]

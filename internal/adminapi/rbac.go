@@ -29,6 +29,7 @@ const (
 	PermPolicyPropose     Permission = "policy:propose"     // open a policy-publish change
 	PermApprovalDecide    Permission = "approval:decide"    // approve/deny a dual-control change
 	PermCloudTrustPropose Permission = "cloudtrust:propose" // open a cloud-trust-publish change
+	PermIPAMManage        Permission = "ipam:manage"        // carve/edit/remove netblocks (ADR 0010)
 )
 
 // RoleAdmin, RoleOperator, RoleViewer, RoleBreakGlass are the named roles. They
@@ -50,6 +51,7 @@ var rolePerms = map[string]map[Permission]bool{
 		PermRolloutControl:   true,
 		PermJoinKeyManage:    true,
 		PermEnrollDecide:     true,
+		PermIPAMManage:       true,
 	},
 }
 
