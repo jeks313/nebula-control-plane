@@ -175,20 +175,28 @@ func cmdGenesis(args []string) {
 	if res.CoreCertPEM != nil {
 		writeOut(filepath.Join(*outDir, *coreName+".crt"), res.CoreCertPEM)
 	}
+	// SSO assertion-signing keypair (ADR 0004, S6): the gateway is distributed the
+	// PRIVATE half (its Config.SSO -sso-assert-key); Core PINS the PUBLIC half
+	// (-sso-assert-pub). The private half is a key, so O_EXCL 0600 like the CA keys —
+	// never clobber it; the public half is world-readable like the other certs/pubs.
+	writeKeyExcl(filepath.Join(*outDir, "sso-assert.key"), res.SSOAssertPrivPEM)
+	writeOut(filepath.Join(*outDir, "sso-assert.pub"), res.SSOAssertPubPEM)
 	writeOut(filepath.Join(*outDir, "genesis.json"), res.ManifestJSON)
 
 	fmt.Printf("genesis complete (%s backend), operators: %s + %s\n", *backend, *opA, *opB)
 	fmt.Printf("  CA fingerprint:        %s\n", res.CAFingerprint)
 	fmt.Printf("  config-signing key id: %s\n", res.ConfigSigningKeyID)
 	fmt.Printf("  lighthouse %s @ %s, cert %s\n", *lhName, res.LighthouseIP, res.LighthouseFingerprint)
+	fmt.Printf("  SSO assertion key: %s/sso-assert.key (gateway, private) + %s/sso-assert.pub (Core pins, public)\n", *outDir, *outDir)
 	if res.CoreCertPEM != nil {
 		fmt.Printf("  core %s @ %s, cert %s (group: control-plane)\n", *coreName, res.CoreIP, res.CoreFingerprint)
-		fmt.Printf("  wrote: %s/{ca.crt,config-signing.pub,%s.crt,%s.crt,genesis.json}\n", *outDir, *lhName, *coreName)
+		fmt.Printf("  wrote: %s/{ca.crt,config-signing.pub,%s.crt,%s.crt,sso-assert.key,sso-assert.pub,genesis.json}\n", *outDir, *lhName, *coreName)
 		fmt.Printf("  -> run core-api with -host-cert %s/%s.crt so it verifies its control-plane identity at boot.\n", *outDir, *coreName)
 	} else {
-		fmt.Printf("  wrote: %s/{ca.crt,config-signing.pub,%s.crt,genesis.json}\n", *outDir, *lhName)
+		fmt.Printf("  wrote: %s/{ca.crt,config-signing.pub,%s.crt,sso-assert.key,sso-assert.pub,genesis.json}\n", *outDir, *lhName)
 		fmt.Fprintln(os.Stderr, "  WARNING: no -core-pub given, so Core's control-plane cert was NOT issued. The firewall baseline routes the fleet to group:control-plane; issue Core's cert (re-run with -core-pub, or `harbor issue-cert -groups control-plane`) before bring-up or heartbeat/renew will be unreachable.")
 	}
+	fmt.Println("  -> SSO (ADR 0004, optional): distribute sso-assert.key to the gateway (its -sso-assert-key) and pin sso-assert.pub on Core (-sso-assert-pub). Leave both unset to run without SSO.")
 }
 
 func writeKeyExcl(path string, b []byte) {

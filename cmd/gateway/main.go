@@ -81,6 +81,12 @@ func main() {
 	collectKey := fs.String("collect-key", "", "gateway's collect server key PEM; or set $"+envCollectKey)
 	harborClientCert := fs.String("harbor-client-cert", "", "Harbor's pinned client cert PEM — the only client allowed to drain this gateway; or set $"+envHarborClient)
 	obsAddr := fs.String("obs-addr", "", "internal listener for /metrics + /healthz + /readyz (e.g. :9091); served plaintext, NEVER the public enroll port. Empty disables.")
+	// SSO enrollment portal (ADR 0004, OPTIONAL). Absent SSO flags -> the portal stays
+	// disabled (Config.SSO=nil) and the gateway is unaffected; -sso-acs-url enables it
+	// and the rest become required (fail closed on partial config). The gateway holds
+	// NO CA either way (ADR 0009): the portal only runs the IdP flow + signs a
+	// short-lived assertion Core re-verifies.
+	ssoF := addSSOFlags(fs)
 	_ = fs.Parse(os.Args[1:])
 	log := clilog.Setup(clilog.Options{Format: *logFormat, Level: *logLevel})
 	// The enroll endpoint is public, so demand an explicit transport posture (P8: fail
@@ -137,6 +143,17 @@ func main() {
 	// dev queue has none, so poll is unavailable there.
 	if rr, ok := q.(gateway.ResultReader); ok {
 		gwCfg.Results = rr
+	}
+	// SSO enrollment portal (ADR 0004): nil unless -sso-acs-url is set; a partial config
+	// is fatal (fail closed). When enabled, Core must pin the matching assertion-signing
+	// public key (harbor -sso-assert-pub) or it denies the resulting oidc enrollments.
+	ssoCfg, err := ssoF.build()
+	if err != nil {
+		fatalf("SSO: %v", err)
+	}
+	gwCfg.SSO = ssoCfg
+	if ssoCfg != nil {
+		log.Info("gateway SSO enrollment portal enabled", "acs", *ssoF.acsURL, "routes", "/v1/sso/start /v1/sso/acs")
 	}
 	gw := gateway.New(gwCfg)
 

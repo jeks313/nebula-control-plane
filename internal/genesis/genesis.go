@@ -25,6 +25,7 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/netblock"
 	"github.com/jeks313/nebula-control-plane/internal/policy"
 	"github.com/jeks313/nebula-control-plane/internal/signer"
+	"github.com/jeks313/nebula-control-plane/internal/ssoassert"
 	"github.com/jeks313/nebula-control-plane/internal/store"
 	"github.com/slackhq/nebula/cert"
 )
@@ -71,7 +72,17 @@ type Result struct {
 	CoreCertPEM     []byte
 	CoreFingerprint string
 	CoreIP          netip.Addr
-	ManifestJSON    []byte
+	// SSO assertion-signing keypair (ADR 0004, S6): a DEDICATED ECDSA P-256 keypair,
+	// distinct from the CA, minted by the ceremony so the off-mesh enrollment gateway
+	// and Core get their halves from the same bootstrap that mints the other roots. The
+	// gateway is given the PRIVATE half (Config.SSO.SigningKey via
+	// ssoassert.ParsePrivateKeyPEM); Core PINS the PUBLIC half
+	// (enrollment.Config.AssertionVerifyKey via ssoassert.ParsePublicKeyPEM). The
+	// private half is never stored in the DB (the gateway holds no CA, ADR 0009);
+	// genesis only emits the PEMs for the operator to distribute.
+	SSOAssertPrivPEM []byte
+	SSOAssertPubPEM  []byte
+	ManifestJSON     []byte
 }
 
 type manifestNode struct {
@@ -246,6 +257,39 @@ func Run(ctx context.Context, s *store.Store, caBackend, configBackend signer.Ba
 		}
 	}
 
+	// 3c. SSO assertion-signing keypair (ADR 0004, S6). A dedicated ECDSA P-256 key,
+	// distinct from the two CA trust roots: the gateway signs short-lived enrollment
+	// assertions with the private half, Core pins the public half and re-verifies. The
+	// gateway holds NO CA (ADR 0009), so this key cannot mint certs — it only lets the
+	// gateway vouch "the IdP said this". Minted here so the same ceremony that
+	// establishes the other roots also produces + distributes this one. Only the public
+	// half is recorded in the DB key registry (the gateway's private half lives off-mesh
+	// on the gateway, never centralized); both PEMs are returned for the operator to
+	// distribute. Skipped silently if it fails to generate — SSO is optional and Core
+	// fails closed (ErrSSONotConfigured) when AssertionVerifyKey is unset.
+	ssoPriv, err := ssoassert.GenerateKey()
+	if err != nil {
+		return Result{}, fmt.Errorf("genesis: generate SSO assertion key: %w", err)
+	}
+	ssoPrivPEM, err := ssoassert.MarshalPrivateKeyPEM(ssoPriv)
+	if err != nil {
+		return Result{}, fmt.Errorf("genesis: marshal SSO assertion private key: %w", err)
+	}
+	ssoPubPEM, err := ssoassert.MarshalPublicKeyPEM(&ssoPriv.PublicKey)
+	if err != nil {
+		return Result{}, fmt.Errorf("genesis: marshal SSO assertion public key: %w", err)
+	}
+	ssoKeyID := keyID(ssoPubPEM)
+	if err := s.DB.Create(&store.Key{
+		Name: p.CAName + "-sso-assertion", Kind: "sso-assertion", Backend: "genesis", Curve: "P256",
+		PublicKey: ssoPubPEM, State: "active", CreatedAt: now.UnixNano(),
+	}).Error; err != nil {
+		return Result{}, fmt.Errorf("genesis: record SSO assertion key: %w", err)
+	}
+	if err := audit(p.OperatorA, "genesis-sso-assertion-key", ssoKeyID, ""); err != nil {
+		return Result{}, err
+	}
+
 	// 4. Manifest + completion record.
 	var m manifest
 	m.CreatedAt = now.UTC().Format(time.RFC3339)
@@ -282,6 +326,8 @@ func Run(ctx context.Context, s *store.Store, caBackend, configBackend signer.Ba
 		CoreCertPEM:           corePEM,
 		CoreFingerprint:       coreFP,
 		CoreIP:                p.CoreIP,
+		SSOAssertPrivPEM:      ssoPrivPEM,
+		SSOAssertPubPEM:       ssoPubPEM,
 		ManifestJSON:          manifestJSON,
 	}, nil
 }
