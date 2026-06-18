@@ -10,6 +10,7 @@ import {
   TrustIntegrityCard,
   LighthousesCard,
   IPAMHealthCard,
+  RecentReapsCard,
   RecentActivityCard,
 } from '../components/fleet'
 
@@ -47,6 +48,7 @@ export function Dashboard() {
         <TrustIntegrityCard />
         <LighthousesCard />
         <IPAMHealthCard />
+        <RecentReapsCard />
         <RecentActivityCard />
       </div>
     </Page>

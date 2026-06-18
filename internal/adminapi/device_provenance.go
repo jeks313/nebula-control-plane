@@ -77,6 +77,39 @@ func (s *Server) deviceProvenance(ctx context.Context, ips []string) (map[string
 	return out, nil
 }
 
+// deviceReap is the reaper soft-mark for one device (impl 2.12), read from the
+// devices table keyed by name. reaped_at = 0 means never reaped.
+type deviceReap struct {
+	Name       string `gorm:"column:name"`
+	ReapedAt   int64  `gorm:"column:reaped_at"`   // unix ns; 0 = never reaped
+	ReapReason string `gorm:"column:reap_reason"` // cert-expired | silent | ""
+}
+
+func (deviceReap) TableName() string { return "devices" }
+
+// deviceReapMarks resolves the reaper soft-mark (reaped_at / reap_reason) for the
+// given device names, keyed by name. Only reaped rows (reaped_at != 0) are returned —
+// a live or never-reaped device is simply absent. The heartbeat-driven device list
+// rarely contains a reaped host (its heartbeat is deleted at reap), so this is for
+// completeness / a future include-reaped view (impl 2.12).
+func (s *Server) deviceReapMarks(ctx context.Context, names []string) (map[string]deviceReap, error) {
+	out := make(map[string]deviceReap, 0)
+	if len(names) == 0 {
+		return out, nil
+	}
+	var rows []deviceReap
+	if err := s.cfg.Store.DB.WithContext(ctx).
+		Select("name, reaped_at, reap_reason").
+		Where("name IN ? AND reaped_at <> 0", names).
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		out[r.Name] = r
+	}
+	return out, nil
+}
+
 // overlayIPsForScope returns the SET of overlay IPs whose AUTHORITATIVE (latest
 // issued) enrollment matches the active scope filters, as an O(1)-lookup allow-set.
 // Empty args are ignored; the result is the intersection of the active filters.
