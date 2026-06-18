@@ -12,6 +12,7 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/nebulaconfig"
 	"github.com/jeks313/nebula-control-plane/internal/policy"
 	"github.com/jeks313/nebula-control-plane/internal/store"
+	"github.com/jeks313/nebula-control-plane/internal/usertrust"
 )
 
 // Harbor firewall-policy subcommands + the dual-control controller wiring (split from main.go for cohesion).
@@ -65,6 +66,7 @@ func newPolicyController(s *store.Store) *dualcontrol.Controller {
 	// definition, shared with the admin API + demo seeder so the gate can't drift).
 	policy.RegisterCommitter(dc)
 	cloudtrust.RegisterCommitter(dc)
+	usertrust.RegisterCommitter(dc)
 	return dc
 }
 
@@ -82,6 +84,28 @@ func activeCloudTrust(ctx context.Context, s *store.Store) (cloudtrust.Config, b
 	c, err := cloudtrust.Parse(ch.Payload)
 	if err != nil {
 		fatalf("cloudtrust: active config #%d is unparseable: %v", ch.ID, err)
+	}
+	return c, true
+}
+
+// activeUserTrust returns the currently published user-trust config (latest committed
+// usertrust.publish, S1), if any. Peer to activeCloudTrust: the active user-trust config
+// is the latest committed usertrust.publish dual-control change, read the same way. The
+// enrollment consumer reads this LIVE per enrollment via a getter (cf. cloud-trust's
+// build-time snapshot) so the dual-control flow can change who may enroll without a Core
+// restart — see (cf).userTrustActive.
+func activeUserTrust(ctx context.Context, s *store.Store) (usertrust.Config, bool) {
+	dc := newPolicyController(s)
+	ch, ok, err := dc.LatestCommitted(ctx, usertrust.PublishKind)
+	if err != nil {
+		fatalf("usertrust: read active: %v", err)
+	}
+	if !ok {
+		return usertrust.Config{}, false
+	}
+	c, err := usertrust.Parse(ch.Payload)
+	if err != nil {
+		fatalf("usertrust: active config #%d is unparseable: %v", ch.ID, err)
 	}
 	return c, true
 }

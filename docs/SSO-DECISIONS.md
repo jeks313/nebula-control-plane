@@ -272,3 +272,66 @@ build are **B#** (appended as phases land). Review at the end.
   fetch the bundle (no second sign-in needed)" and **exits 0**. A re-run with a live
   ticket short-circuits straight to the poll: no second browser round-trip and no second
   nonce (the ticket is removed only on `issued`/`denied`).
+
+- **B15 — End-to-end binary wiring of the SSO config seams (the B8 seam, now fed).**
+  The pieces from B1–B14 are joined to real flags/env across the two binaries; the
+  control-plane invariant (ADR 0009) is unchanged — the gateway gains no CA, Core still
+  re-verifies everything. **Gateway (`cmd/gateway`, new `sso.go`):** an OPTIONAL SSO
+  flag group builds `gateway.Config.SSO`. The trigger is **`-sso-acs-url`** (the PUBLIC
+  ACS URL, e.g. `https://<gateway>/v1/sso/acs`); when it is unset `Config.SSO` stays
+  **nil** (portal disabled, gateway unaffected). When it IS set the rest become
+  required and the builder **fails closed** with a clear error on any missing piece:
+  the SAML SP keypair (`-sso-sp-cert`/`-sso-sp-key` or `$NCP_GW_SSO_SP_CERT_PEM` /
+  `$NCP_GW_SSO_SP_KEY_PEM`), the IdP metadata (`-sso-idp-metadata-url` /
+  `-sso-idp-metadata-file` / `$NCP_GW_SSO_IDP_METADATA`), and the gateway's
+  **assertion-signing private key** (`-sso-assert-key` or `$NCP_GW_SSO_ASSERT_KEY_PEM`,
+  loaded via `ssoassert.ParsePrivateKeyPEM`). `-sso-issuer` sets the assertion realm
+  (`iss`); `-sso-assertion-ttl` / `-sso-session-ttl` tune the windows (B12 defaults). The
+  SP is built by **reusing `adminauth.NewSAML`** (decision B13 — no hand-rolled SAML),
+  deriving the SP BaseURL + `ACSPath` from `-sso-acs-url` so the IdP auto-POSTs to the
+  portal's own `/v1/sso/acs`. The env-first material precedence and the small IdP-metadata
+  parser mirror `cmd/harbor/adminauth_wire.go` (duplicated, not shared — two separate
+  `main` packages). Unlike admin-api, the gateway does **not** mint an ephemeral SP
+  keypair: a public, restartable surface needs a stable SP identity the IdP trusts, so a
+  missing keypair is an error, not a warning. **Core (`cmd/harbor`):** two new core-flags
+  feed the B8 seam on BOTH consumers (the `cmdCollect` consumer where `processSSO` runs
+  AND the `cmdAdminAPI` approve-path consumer — both go through `buildConsumer`):
+  **(a)** `-sso-assert-pub` (PEM → `ssoassert.ParsePublicKeyPEM` →
+  `enrollment.Config.AssertionVerifyKey`), the **pinned** gateway public key, read once at
+  startup like the CA cert (a deploy-time trust anchor, not live-rotated); unset →
+  `AssertionVerifyKey` nil → the existing terminal `ErrSSONotConfigured`. **(b)**
+  `-usertrust-db` wires `enrollment.Config.UserTrustActive` to a **getter closure** over a
+  new `activeUserTrust` reader — the exact peer of `activeCloudTrust` (same
+  `newPolicyController().LatestCommitted(usertrust.PublishKind)` + `usertrust.Parse`
+  pattern, and `usertrust.RegisterCommitter` is now installed in `newPolicyController`
+  alongside policy/cloudtrust). The ONE deliberate difference from cloud-trust: cloud-trust
+  is read **once** at consumer build (`cf.cloudTrust(s)` → a snapshot `*Config`), whereas
+  user-trust is passed as a **getter** (`cf.userTrustActive(s)` → `func() *usertrust.Config`
+  reading `activeUserTrust` per call) — so the dual-control-published config is read **live
+  per enrollment** and changing who may enroll needs no Core restart (the seam's whole
+  point, B8); a getter returning nil (nothing published yet) is treated as not-configured
+  (fail closed). **Key generation — chose GENESIS over a new subcommand.** Genesis now
+  mints the dedicated ECDSA P-256 assertion keypair (S6) via `ssoassert.GenerateKey`,
+  surfaces both PEMs in `genesis.Result` (`SSOAssertPrivPEM`/`SSOAssertPubPEM`), and
+  `cmdGenesis` writes `sso-assert.key` (0600, O_EXCL — the gateway's private half) +
+  `sso-assert.pub` (0644 — Core pins). Only the PUBLIC half is recorded in the DB key
+  registry (kind `sso-assertion`, audited `genesis-sso-assertion-key`); the gateway's
+  private half never touches the DB (the gateway holds no CA). This mirrors exactly how
+  genesis already mints + distributes the CA / config-signing / lighthouse / Core
+  material, so it added two `[]byte` Result fields and ~25 lines — strictly less coupling
+  than a standalone `harbor sso-keygen` subcommand, which would also have needed a new
+  entry in the CLI-surface fixture (`cli_surface_test.go`). The integration test's genesis
+  key-set assertion was updated to expect the third (`sso-assertion`) key. **Tests:**
+  gateway `cmd/gateway/sso_test.go` proves `Config.SSO` is nil when the flags are absent,
+  is fully built (SAML + signing key) when present, and **fails closed** on each partial
+  config (missing assert key / SP keypair / IdP metadata / non-absolute ACS URL); Core
+  `cmd/harbor/usertrust_test.go` proves the `-usertrust-db` getter reads the published
+  config LIVE (nil before publish → the committed config after, same getter, no rebuild),
+  is nil without the flag, enforces two-person control on the publish, and that
+  `-sso-assert-pub` pins the matching public key (nil when unset). **DEFERRED to deploy
+  (live rollout, NOT done here):** wiring `deploy/prod/bootstrap-genesis.sh` to thread the
+  new files; the operator-provided **IdP SAML metadata** + SP registration; and the
+  **key distribution** itself — `sso-assert.key` to the gateway's Fargate config secret
+  and `sso-assert.pub` pinned on Core. No live SAML IdP was set up. The binaries now
+  COMPILE and are fully configurable to run SSO, and a fresh genesis produces the
+  assertion keypair; turning it on is deploy plumbing.

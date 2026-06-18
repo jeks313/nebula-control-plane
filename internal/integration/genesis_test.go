@@ -72,13 +72,15 @@ func TestGenesisRun(t *testing.T) {
 		t.Fatalf("config-signing pub invalid: curve=%v err=%v", curve, err)
 	}
 
-	// Two trust roots recorded.
+	// Trust roots recorded: the CA, the config-signing key, and the SSO
+	// assertion-signing public key (ADR 0004 S6 — genesis mints the dedicated keypair
+	// and records only its PUBLIC half; the gateway holds the private half off-mesh).
 	var keys []store.Key
 	if err := s.DB.Order("id").Find(&keys).Error; err != nil {
 		t.Fatal(err)
 	}
-	if len(keys) != 2 || keys[0].Kind != "ca" || keys[1].Kind != "config-signing" {
-		t.Fatalf("keys = %+v, want [ca, config-signing]", keys)
+	if len(keys) != 3 || keys[0].Kind != "ca" || keys[1].Kind != "config-signing" || keys[2].Kind != "sso-assertion" {
+		t.Fatalf("keys = %+v, want [ca, config-signing, sso-assertion]", keys)
 	}
 
 	// Audit chain intact, with the genesis events present.

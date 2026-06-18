@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/tls"
 	"flag"
 	"fmt"
@@ -29,7 +30,9 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/revocation"
 	"github.com/jeks313/nebula-control-plane/internal/rollout"
 	"github.com/jeks313/nebula-control-plane/internal/signer"
+	"github.com/jeks313/nebula-control-plane/internal/ssoassert"
 	"github.com/jeks313/nebula-control-plane/internal/store"
+	"github.com/jeks313/nebula-control-plane/internal/usertrust"
 	"github.com/jeks313/nebula-control-plane/internal/wire"
 )
 
@@ -56,6 +59,8 @@ type coreFlags struct {
 	policyFile                             *string
 	policyDB                               *bool
 	cloudTrustDB                           *bool
+	userTrustDB                            *bool
+	ssoAssertPub                           *string
 }
 
 func addCoreFlags(fs *flag.FlagSet) *coreFlags {
@@ -93,6 +98,10 @@ func addCoreFlags(fs *flag.FlagSet) *coreFlags {
 	cf.policyFile = fs.String("policy", "", "central firewall policy file (M6); omit for Pilot's local default")
 	cf.policyDB = fs.Bool("policy-db", false, "use the dual-control published policy from the DB (6.5) instead of -policy")
 	cf.cloudTrustDB = fs.Bool("cloudtrust-db", false, "enable AWS SigV4 attestation using the dual-control published cloud-trust config from the DB (M5)")
+	// SSO enrollment (ADR 0004). Both pieces are required for SSO; with either unset the
+	// enroll consumer fails closed (ErrSSONotConfigured) and oidc enrollments are denied.
+	cf.userTrustDB = fs.Bool("usertrust-db", false, "enable SSO enrollment using the dual-control published user-trust config from the DB (ADR 0004 S1); read live per enrollment")
+	cf.ssoAssertPub = fs.String("sso-assert-pub", "", "PINNED gateway assertion-signing PUBLIC key PEM (ADR 0004 S6 — from genesis sso-assert.pub); enables SSO assertion verification. Unset -> SSO enrollments are denied (fail closed)")
 	return cf
 }
 
@@ -129,6 +138,45 @@ func (cf *coreFlags) cloudTrust(s *store.Store) *cloudtrust.Config {
 		return nil
 	}
 	return &c
+}
+
+// assertionVerifyKey resolves the PINNED gateway assertion-signing public key (ADR 0004
+// S6) from -sso-assert-pub. nil (flag unset) means SSO verification is disabled and the
+// enroll consumer fails closed (ErrSSONotConfigured) on an oidc enrollment. Read once at
+// startup, like the CA cert — the pinned key is a deploy-time trust anchor, not a
+// live-rotated value.
+func (cf *coreFlags) assertionVerifyKey() *ecdsa.PublicKey {
+	if *cf.ssoAssertPub == "" {
+		return nil
+	}
+	pem, err := os.ReadFile(*cf.ssoAssertPub)
+	if err != nil {
+		fatalf("read -sso-assert-pub: %v", err)
+	}
+	pub, err := ssoassert.ParsePublicKeyPEM(pem)
+	if err != nil {
+		fatalf("-sso-assert-pub: %v", err)
+	}
+	return pub
+}
+
+// userTrustActive returns the LIVE active user-trust source for the enroll consumer (ADR
+// 0004 S1). Unlike cloudTrust (a snapshot pointer read once at consumer build), this is a
+// GETTER closure so the dual-control-published config is read live per enrollment —
+// changing who may enroll needs no Core restart (the seam UserTrustActive expects, B8).
+// nil (flag unset) means SSO is disabled and the consumer fails closed. The getter itself
+// returns nil until a config is published; the consumer treats that as not-configured.
+func (cf *coreFlags) userTrustActive(s *store.Store) func() *usertrust.Config {
+	if !*cf.userTrustDB {
+		return nil
+	}
+	return func() *usertrust.Config {
+		c, ok := activeUserTrust(context.Background(), s)
+		if !ok {
+			return nil // not published yet -> SSO not configured (fail closed)
+		}
+		return &c
+	}
 }
 
 // lighthouseSource returns the live registry source when -lighthouse-db is set,
@@ -240,6 +288,11 @@ func (cf *coreFlags) buildConsumer(s *store.Store, results enrollment.ResultSink
 		BlocklistSource: cf.blocklistSource(s),
 		Results:         results, ResultTTL: time.Hour,
 		CloudTrust: ct, AWSSigV4Enabled: ct != nil,
+		// SSO enrollment (ADR 0004): the PINNED gateway assertion-signing public key (S6,
+		// read once) + the LIVE user-trust source (S1, a getter read per enrollment). With
+		// either unset, processSSO returns the terminal ErrSSONotConfigured (fail closed).
+		AssertionVerifyKey: cf.assertionVerifyKey(),
+		UserTrustActive:    cf.userTrustActive(s),
 	})
 }
 
