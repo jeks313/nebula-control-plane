@@ -96,8 +96,10 @@ func cmdSeedDemo(args []string) {
 	}
 
 	// Join keys (one auto-issue, varied caps/expiry). Capture the assigned ids so the
-	// issued fleet enrollments below can carry join_key_id (the device-provenance link).
+	// issued fleet enrollments below can carry join_key_id (the device-provenance link),
+	// and which keys are ephemeral so a join via one stamps enrollment.ephemeral=true.
 	jkIDs := map[string]int64{}
+	jkEphemeral := map[string]bool{}
 	for _, p := range []joinkey.Params{
 		// SubRange binds the key to a named netblock (the office key -> office-vpn), so the
 		// JoinKeys UI binding selector shows a real binding (and hosts cluster there).
@@ -110,6 +112,7 @@ func cmdSeedDemo(args []string) {
 			fatalf("seed joinkey %s: %v", p.Name, err)
 		}
 		jkIDs[p.Name] = jk.ID
+		jkEphemeral[p.Name] = p.Ephemeral
 	}
 	// Show non-zero usage on one key (Create always starts at 0).
 	s.DB.WithContext(ctx).Table("join_keys").Where("name = ?", "laptops-2026").Update("used_count", 17)
@@ -122,6 +125,8 @@ func cmdSeedDemo(args []string) {
 		groups                []string
 	}{
 		{"new-laptop-07", "laptops-2026", enrollment.StatusPending, []string{"laptops"}},
+		// ci-runner-07 joined via the ephemeral ci-runners key, so its enrollment records
+		// ephemeral=true (jkEphemeral lookup below) — mirrors what the live path now stamps.
 		{"ci-runner-07", "ci-runners", enrollment.StatusPending, []string{"ci", "ephemeral"}},
 		{"edge-syd-01", "datacenter-iad", enrollment.StatusPending, []string{"servers", "iad"}},
 		{"old-contractor-vm", "laptops-2026", enrollment.StatusDenied, []string{"laptops"}},
@@ -136,6 +141,7 @@ func cmdSeedDemo(args []string) {
 			JoinKeyID:    jkIDs[e.joinKey],
 			Groups:       string(groups),
 			Status:       e.status,
+			Ephemeral:    jkEphemeral[e.joinKey],
 			CreatedAt:    ts,
 		}
 		if e.status != enrollment.StatusPending {
@@ -469,6 +475,7 @@ func cmdSeedDemo(args []string) {
 		switch p.method {
 		case "token":
 			row.JoinKeyID = jkIDs[p.joinKey]
+			row.Ephemeral = jkEphemeral[p.joinKey] // an ephemeral-key join records ephemeral=true
 		case "sso":
 			// Mirror the SSO enroll path's evidence: provider=sso, account=issuer,
 			// principal=email, region=JSON-encoded IdP groups. So the Devices/Enrollments

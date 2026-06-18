@@ -23,10 +23,13 @@ type EnrollmentView struct {
 	JoinKeyName  string   `json:"join_key_name,omitempty"` // resolved from join_key_id; user-friendly provenance
 	Groups       []string `json:"groups"`
 	Status       string   `json:"status"`
-	OverlayIP    string   `json:"overlay_ip,omitempty"`
-	CreatedAt    string   `json:"created_at"`
-	DecidedAt    string   `json:"decided_at,omitempty"`
-	Approver     string   `json:"approver,omitempty"`
+	// Ephemeral marks an enrollment via an ephemeral join key (shorter cert TTL; foundation
+	// for the auto-reaping lifecycle, impl 2.12). Always false for cloud-sigv4 / SSO.
+	Ephemeral bool   `json:"ephemeral,omitempty"`
+	OverlayIP string `json:"overlay_ip,omitempty"`
+	CreatedAt string `json:"created_at"`
+	DecidedAt string `json:"decided_at,omitempty"`
+	Approver  string `json:"approver,omitempty"`
 	// Cloud-attestation evidence (M5; provider-agnostic). Present only for attested hosts.
 	AttestProvider  string `json:"attest_provider,omitempty"`
 	AttestAccount   string `json:"attest_account,omitempty"`
@@ -44,6 +47,7 @@ func enrollmentView(e enrollment.Enrollment) EnrollmentView {
 	return EnrollmentView{
 		EnrollmentID: e.EnrollmentID, DeviceName: e.DeviceName, PubkeyHash: e.PubkeyHash,
 		Method: e.Method, JoinKeyID: e.JoinKeyID, Groups: groups, Status: e.Status,
+		Ephemeral: e.Ephemeral,
 		OverlayIP: e.OverlayIP, CreatedAt: rfc3339(e.CreatedAt), DecidedAt: rfc3339(e.DecidedAt),
 		Approver:        e.Approver,
 		AttestProvider:  e.AttestProvider,

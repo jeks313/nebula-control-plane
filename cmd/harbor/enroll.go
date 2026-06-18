@@ -52,6 +52,7 @@ type coreFlags struct {
 	nebulaVersion, nebulaSHA256, nebulaURL *string
 	pilotVersion, pilotSHA256, pilotURL    *string
 	certLifetime                           *time.Duration
+	ephemeralCertLifetime                  *time.Duration
 	maxPerHour                             *int
 	lighthouse                             *string
 	lighthouseDB                           *bool
@@ -91,6 +92,7 @@ func addCoreFlags(fs *flag.FlagSet) *coreFlags {
 	cf.pilotSHA256 = fs.String("pilot-sha256", "", "hex SHA-256 of the pilot binary (the integrity anchor pilots verify before re-exec); required with -pilot-url")
 	cf.pilotURL = fs.String("pilot-url", "", "URL pilots fetch the new pilot binary from (sha-verified)")
 	cf.certLifetime = fs.Duration("cert-lifetime", 30*24*time.Hour, "issued cert validity")
+	cf.ephemeralCertLifetime = fs.Duration("ephemeral-cert-lifetime", 24*time.Hour, "issued cert validity for hosts joining via an ephemeral join key (shorter than -cert-lifetime; foundation for the auto-reaping lifecycle, impl 2.12)")
 	cf.maxPerHour = fs.Int("max-certs-per-hour", 0, "signing circuit-breaker ceiling (0=unlimited)")
 	cf.lighthouse = fs.String("lighthouse", "", "lighthouses for the bundle: overlayIP=host:port[,...]")
 	cf.lighthouseDB = fs.Bool("lighthouse-db", false, "source lighthouses from the DB registry (6.8) instead of -lighthouse")
@@ -278,7 +280,8 @@ func (cf *coreFlags) buildConsumer(s *store.Store, results enrollment.ResultSink
 		// (a per-process cache would let a nonce be reused once per Core).
 		Store: s, Nonces: ring, Replay: replay.NewSQLStore(s.DB, 2*time.Minute),
 		Signer: sg, Allocator: alloc, Pool: pool, CertLifetime: *cf.certLifetime,
-		TunDev: *cf.tunDev, ListenPort: *cf.listenPort,
+		EphemeralCertTTL: *cf.ephemeralCertLifetime,
+		TunDev:           *cf.tunDev, ListenPort: *cf.listenPort,
 		NebulaVersion: *cf.nebulaVersion, NebulaSHA256: *cf.nebulaSHA256, NebulaURL: *cf.nebulaURL,
 		NebulaReleaseFor: nebulaReleaseFor,
 		PilotVersion:     *cf.pilotVersion, PilotSHA256: *cf.pilotSHA256, PilotURL: *cf.pilotURL,

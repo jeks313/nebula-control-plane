@@ -448,6 +448,9 @@ type Device struct {
 	AttestRegion    string   `json:"attest_region,omitempty"`
 	JoinKeyName     string   `json:"join_key_name,omitempty"`
 	Groups          []string `json:"groups,omitempty"`
+	// Ephemeral marks a host that joined via an ephemeral join key (shorter cert TTL;
+	// foundation for the auto-reaping lifecycle, impl 2.12). From the authoritative enrollment.
+	Ephemeral bool `json:"ephemeral,omitempty"`
 }
 
 // GET /admin/v1/devices?limit=N&after=OVERLAY_IP — device inventory from
@@ -585,6 +588,7 @@ func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
 		}
 		if p, ok := prov[h.OverlayIP]; ok {
 			d.Groups = p.Groups
+			d.Ephemeral = p.Ephemeral
 			switch {
 			case p.AttestProvider != "":
 				d.AttestProvider, d.AttestAccount = p.AttestProvider, p.AttestAccount

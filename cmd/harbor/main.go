@@ -141,7 +141,7 @@ usage:
 
 core flags (enroll worker/approve): -ca-cert, -ca-key/-config-key (software) or
   -pkcs11-* labels or -kms-ca-key-id/-kms-config-key-id [-kms-region] (kms),
-  -hmac-key, -queue-dsn, -queue-key, -pool, -cert-lifetime,
+  -hmac-key, -queue-dsn, -queue-key, -pool, -cert-lifetime, -ephemeral-cert-lifetime,
   -lighthouse "overlayIP=host:port[,...]", -blocklist-db (source pki.blocklist
   from the revocations registry, 7.1). For SSO enrollment (ADR 0004):
   -sso-assert-pub PEM (pin the gateway assertion-signing public key) +

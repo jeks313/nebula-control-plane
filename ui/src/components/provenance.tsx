@@ -6,6 +6,9 @@ export type Provenance = {
   attest_principal?: string
   attest_region?: string
   join_key_name?: string
+  // ephemeral marks a host that joined via an ephemeral join key (shorter cert TTL;
+  // foundation for the auto-reaping device lifecycle, impl 2.12). Shown as a small badge.
+  ephemeral?: boolean
 }
 
 // JoinedVia renders how a host joined the mesh — its attestation site (provider +
@@ -95,10 +98,23 @@ export function JoinedVia({
         ) : (
           <Chip>{p.join_key_name}</Chip>
         )}
+        {p.ephemeral && <EphemeralBadge />}
       </span>
     )
   }
   return fallback ? <span className="text-ink-dim">{fallback}</span> : <span className="text-ink-faint">—</span>
+}
+
+// EphemeralBadge marks a host that joined via an ephemeral join key — it holds a
+// short-lived cert (Config.EphemeralCertTTL) and is the foundation for the auto-reaping
+// device lifecycle (impl 2.12, still future). Uses the warn tone so it reads as a
+// transient/short-lived hint, mirroring the existing join-key chip styling.
+function EphemeralBadge() {
+  return (
+    <span title="Joined via an ephemeral join key — short-lived cert (auto-reaping is future, impl 2.12)">
+      <Chip tone="warn">ephemeral</Chip>
+    </span>
+  )
 }
 
 export function attestLabel(provider?: string): string {

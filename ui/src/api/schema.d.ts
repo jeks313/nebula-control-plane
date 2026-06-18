@@ -743,6 +743,8 @@ export interface components {
             join_key_name?: string;
             /** @description groups the host was issued (from its authoritative enrollment) */
             groups?: string[];
+            /** @description host joined via an ephemeral join key (shorter cert TTL; foundation for auto-reaping, impl 2.12) */
+            ephemeral?: boolean;
         };
         DeviceList: {
             devices: components["schemas"]["Device"][];
@@ -1214,6 +1216,8 @@ export interface components {
             groups: string[];
             /** @description pending | issued | denied */
             status: string;
+            /** @description enrollment via an ephemeral join key (shorter cert TTL; foundation for auto-reaping, impl 2.12) */
+            ephemeral?: boolean;
             overlay_ip?: string;
             /** Format: date-time */
             created_at: string;
