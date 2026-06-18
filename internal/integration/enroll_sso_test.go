@@ -122,6 +122,66 @@ func signSSOBody(t *testing.T, priv *ecdsa.PrivateKey, nonce string, cred []byte
 	return body
 }
 
+// ssoCandidateBound builds an SSO candidate from an EXPLICIT device key + pkh + nonce
+// (rather than minting a fresh one like ssoCandidate), so two candidates can be built that
+// reuse the SAME single-use nonce + assertion — the setup the end-to-end replay test needs.
+// The assertion is gateway-signed and bound to the given pkh + nonce; the request JWS is
+// signed by the device key over that same nonce.
+func (e enrollEnv) ssoCandidateBound(t *testing.T, gw, priv *ecdsa.PrivateKey, pkh, nonce, eid string, groups []string) queue.Candidate {
+	t.Helper()
+	assertion, err := ssoassert.Sign(gw, ssoassert.Assertion{
+		Subject: "u-123", Email: "alice@corp.example", Issuer: "https://idp.corp.example/realm",
+		IdPGroups: groups, PubkeyHash: pkh, Nonce: nonce,
+		IssuedAt: time.Now().Unix(), ExpiresAt: time.Now().Add(10 * time.Minute).Unix(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cred, _ := json.Marshal(struct {
+		Assertion string `json:"assertion"`
+	}{Assertion: string(assertion)})
+	return queue.Candidate{EnrollmentID: eid, PubkeyHash: pkh, RequestJWS: signSSOBody(t, priv, nonce, cred, eid), ReceivedAt: time.Now()}
+}
+
+// TestEnrollSSOReplayRejected is the end-to-end SSO replay acceptance: the SAME signed
+// assertion + single-use nonce, replayed through Process as TWO distinct candidates (so the
+// idempotency short-circuit on enrollment_id does NOT fire), is a TERMINAL ErrReplay on the
+// second attempt — proving the single-use nonce/replay control covers the SSO path (the
+// token + aws-sigv4 paths already exercise it; this closes the SSO gap). Mirrors
+// TestEnrollNonceReplayRejected, adapted to the SSO setup (pinned assertion key + injected
+// user-trust + the shared replay observer in the consumer config).
+func TestEnrollSSOReplayRejected(t *testing.T) {
+	e := setupEnroll(t)
+	ctx := context.Background()
+	gw, _ := ssoassert.GenerateKey()
+	ut := &usertrust.Config{IDPEntries: []usertrust.IDPEntry{
+		{Realm: "https://idp.corp.example/realm", DirectoryGroup: "engineers", MeshGroups: []string{"eng"}, AutoIssue: true},
+	}}
+	cons := e.ssoConsumer(t, &gw.PublicKey, ut)
+
+	// One device key + one minted nonce, reused across two candidates (the assertion is
+	// bound to this nonce + pkh, so both carry the identical, well-bound assertion).
+	priv, pkh, n := e.fresh(t)
+
+	c1 := e.ssoCandidateBound(t, gw, priv, pkh, n, "eid-sso-replay-1", []string{"engineers"})
+	if r1, err := cons.Process(ctx, c1); err != nil {
+		t.Fatalf("first SSO enrollment should succeed: %v (status=%s)", err, r1.Status)
+	}
+
+	// Replay the same nonce/assertion under a DIFFERENT enrollment_id -> terminal ErrReplay.
+	c2 := e.ssoCandidateBound(t, gw, priv, pkh, n, "eid-sso-replay-2", []string{"engineers"})
+	res, err := cons.Process(ctx, c2)
+	if !errors.Is(err, enrollment.ErrReplay) {
+		t.Fatalf("err = %v, want ErrReplay on the replayed nonce", err)
+	}
+	if !enrollment.Terminal(err) {
+		t.Fatal("ErrReplay must be terminal (acked, not redelivered)")
+	}
+	if res.CertPEM != nil {
+		t.Fatalf("replayed enrollment must not mint a cert, got %+v", res)
+	}
+}
+
 // TestEnrollSSOPending is the S8 acceptance: a valid SSO enrollment whose matched
 // user-trust entry does NOT auto-issue lands PENDING with the resolved groups + evidence,
 // issuing no cert. usertrust.Match first-match-wins picks the entry.

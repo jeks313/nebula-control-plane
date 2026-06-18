@@ -448,3 +448,50 @@ build are **B#** (appended as phases land). Review at the end.
   path); on Enrollments they are static. **Gates:** `tsc --noEmit` clean, `npm run build`
   succeeds, `npm test` 65/65 green; `gen:api` re-run produced no diff (the committed schema
   already tracked the B17 user-trust types). No Go touched.
+
+- **B19 — SSO final-security-review hardening: live getter fails closed (not fatal) +
+  privileged-group auto-issue rejected at Validate.** Two non-blocking robustness /
+  defense-in-depth items from the SSO final security review (verdict: "holds, 0 blockers").
+  **(1) `activeUserTrust` (the LIVE per-enrollment getter) must never exit (FIX A).**
+  `cmd/harbor/policy.go`'s `activeUserTrust` is wired into `enrollment.Config.UserTrustActive`
+  via the `-usertrust-db` getter (`(cf).userTrustActive`) and is read LIVE on every SSO
+  enrollment by a long-running harbor process (core-api/collect). It had mirrored
+  `activeCloudTrust` and called `fatalf`/`os.Exit` on a `LatestCommitted` DB error or an
+  unparseable committed config — so a transient DB blip or one malformed committed config
+  would crash the running control plane (a self-inflicted DoS). It now logs a clear
+  `slog.Warn` and returns not-found on ANY error (DB error OR parse failure), so SSO
+  enrollment fails closed via the existing `ErrSSONotConfigured` deny (the getter sees nil)
+  instead of taking the process down. The deliberate asymmetry with `activeCloudTrust`
+  stands: cloud-trust is a build-time snapshot read ONCE at startup, where a `fatalf`
+  fail-fast on a bad config is acceptable startup strictness; user-trust is the live path
+  and must degrade, not exit. Startup fail-fast elsewhere (e.g. genesis/boot config checks)
+  is unchanged — only the per-enrollment live getter was made resilient. Test
+  `TestActiveUserTrustResilientOnDBError` closes the store's connection pool to force a
+  `LatestCommitted` DB error and asserts the getter returns nil rather than terminating the
+  test binary. **(2) S8 enforced at `usertrust.Validate` — privileged groups never
+  auto-issue (FIX B).** The `IDPEntry.AutoIssue` doc says "admin/privileged groups never
+  auto-issue" but nothing enforced it. `usertrust.Validate` now rejects (new sentinel
+  `ErrAutoIssuePrivileged`) any `auto_issue=true` entry whose GRANTED mesh groups — the
+  entry's `MeshGroups` ∪ the config `DefaultGroups` — include a reserved/privileged group.
+  The reserved set is owned by `internal/policy` (the canonical definition used by the
+  genesis baseline + the policy invariants): a new `policy.IsReservedGroup` /
+  `policy.GrantsReservedGroup` predicate over `GroupControlPlane`/`GroupLighthouse` (the same
+  constants `CheckInvariants` uses, now routed through the predicate so the set can't drift).
+  `internal/policy` does NOT import `internal/usertrust`, so importing policy into usertrust
+  is cycle-free; the literals are NOT re-spelled. Because `Validate` runs at `Parse` →
+  dual-control commit, no published config can carry such an auto-issue grant. A non-
+  duplicative belt-and-suspenders guard was also added in `enrollment.processSSO`: a resolved
+  auto-issue set that somehow includes a reserved group is FORCED to pending
+  (`policy.GrantsReservedGroup`, a cheap slice scan at a different layer — issuance vs config
+  time — behind the `Validate` gate). Test `TestValidateRejectsAutoIssuePrivileged`: an entry
+  granting a reserved group with `auto_issue=true` (via mesh_groups AND via default_groups) →
+  rejected; the same grant with `auto_issue=false` → allowed (privileged via manual
+  approval); a normal `auto_issue=true` entry → allowed. **(3) End-to-end SSO replay
+  regression (FIX C).** `internal/integration/enroll_sso_test.go` gained
+  `TestEnrollSSOReplayRejected`: the SAME gateway-signed assertion + single-use nonce
+  replayed through `Consumer.Process` as TWO distinct candidates (different `enrollment_id`,
+  so the idempotency short-circuit does not fire) is a TERMINAL `ErrReplay` on the second
+  attempt and mints no cert — proving the single-use nonce/replay control (the shared
+  `replay.Observe` in `verify()`) covers the SSO path end-to-end (token + aws-sigv4 already
+  did; this closes the SSO gap). Mirrors `TestEnrollNonceReplayRejected`. No wire/config
+  format change; all three items are behind the existing fail-closed posture.

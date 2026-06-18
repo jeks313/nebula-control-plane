@@ -546,6 +546,15 @@ func (c *Consumer) processSSO(ctx context.Context, cand queue.Candidate, req wir
 	groupsJSON, _ := json.Marshal(groupsSlice)
 	deviceName := deviceName(req, cand.PubkeyHash)
 
+	// Defense-in-depth (S8, security-review FIX B): usertrust.Validate already rejects a
+	// published auto_issue config that grants a reserved/privileged group, so this should
+	// be unreachable for any committed config — but a resolved auto-issue set that somehow
+	// includes a reserved group is FORCED to pending here (never minted unattended), behind
+	// the config-time gate. Cheap (a slice scan) and a different layer, so not duplicative.
+	if autoIssue && policy.GrantsReservedGroup(groupsSlice) {
+		autoIssue = false
+	}
+
 	// 4) Admission (S8): default PENDING — Phase 1 issues nothing automatically; an admin
 	// approves in the existing queue. Honor the matched entry's auto-issue ONLY when set.
 	// JoinKeyID stays 0 (there is no join key). The wire method is "oidc" (req.Method);

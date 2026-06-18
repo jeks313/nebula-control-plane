@@ -23,6 +23,24 @@ const (
 	GroupLighthouse   = "lighthouse"
 )
 
+// IsReservedGroup reports whether g is a reserved/privileged mesh group (control-plane
+// or lighthouse) — the baseline owns its reachability. This is the single canonical
+// predicate; callers outside policy (e.g. usertrust's S8 auto-issue gate) reuse it rather
+// than re-spelling the literals, so the reserved set can't drift across packages.
+func IsReservedGroup(g string) bool {
+	return g == GroupControlPlane || g == GroupLighthouse
+}
+
+// GrantsReservedGroup reports whether any group in the set is reserved/privileged.
+func GrantsReservedGroup(groups []string) bool {
+	for _, g := range groups {
+		if IsReservedGroup(g) {
+			return true
+		}
+	}
+	return false
+}
+
 // PublishKind is the dual-control change kind for firewall-policy publish (6.5).
 // The active fleet policy is the latest committed change of this kind. Shared by
 // the CLI and the admin API so both write/read the same records.
@@ -138,7 +156,7 @@ func validatePort(p string) error {
 func CheckInvariants(p Policy) error {
 	for i, r := range p.Rules {
 		for _, g := range []string{r.FromGroup, r.ToGroup} {
-			if g == GroupControlPlane || g == GroupLighthouse {
+			if IsReservedGroup(g) {
 				return fmt.Errorf("policy: rule %d references reserved group %q — its reachability is guaranteed by the baseline and cannot be shaped by policy", i, g)
 			}
 		}

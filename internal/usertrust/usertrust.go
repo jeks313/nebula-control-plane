@@ -21,7 +21,14 @@ import (
 	"sort"
 
 	"github.com/jeks313/nebula-control-plane/internal/dualcontrol"
+	"github.com/jeks313/nebula-control-plane/internal/policy"
 )
+
+// The reserved/privileged mesh group set an SSO entry must never AUTO-issue into (the
+// IDPEntry.AutoIssue doc: "admin/privileged groups never auto-issue", S8) is owned by
+// internal/policy — the single canonical definition the genesis + policy invariants use.
+// We reuse policy.IsReservedGroup rather than re-spelling the literals so the set can't
+// drift; policy does NOT import usertrust, so the import is clean (no cycle).
 
 // PublishKind is the dual-control change kind for a user-trust config publish.
 const PublishKind = "usertrust.publish"
@@ -79,6 +86,12 @@ var (
 	ErrNoGroup        = errors.New("usertrust: each IdP entry needs a directory_group")
 	ErrDuplicateGroup = errors.New("usertrust: duplicate (realm, directory_group) entry")
 	ErrGrantsNothing  = errors.New("usertrust: entry grants no groups (no mesh_groups and no default_groups)")
+	// ErrAutoIssuePrivileged enforces S8 ("admin/privileged groups never auto-issue"):
+	// an auto_issue=true entry whose GRANTED mesh groups (its mesh_groups ∪ the config
+	// default_groups) include a reserved/privileged group is rejected. Such a host must
+	// go through manual approval (auto_issue=false), never mint a privileged identity
+	// unattended. Security-review final hardening (FIX B).
+	ErrAutoIssuePrivileged = errors.New("usertrust: auto_issue entry grants a reserved/privileged group (admin/privileged groups never auto-issue)")
 )
 
 // Parse decodes and validates a payload (rejects unknown fields so a typo can't
@@ -121,6 +134,22 @@ func Validate(c Config) error {
 		seen[k] = true
 		if len(e.MeshGroups) == 0 && len(c.DefaultGroups) == 0 {
 			return fmt.Errorf("%w: realm=%s directory_group=%s", ErrGrantsNothing, e.Realm, e.DirectoryGroup)
+		}
+		// S8: an auto_issue entry must not grant a reserved/privileged group — neither via
+		// its own mesh_groups nor via the fleet-wide default_groups merged into it. A
+		// privileged host must be queued for manual approval (auto_issue=false), never
+		// minted unattended. Non-auto entries may reference these groups (an admin approves).
+		if e.AutoIssue {
+			for _, g := range e.MeshGroups {
+				if policy.IsReservedGroup(g) {
+					return fmt.Errorf("%w: realm=%s directory_group=%s group=%s", ErrAutoIssuePrivileged, e.Realm, e.DirectoryGroup, g)
+				}
+			}
+			for _, g := range c.DefaultGroups {
+				if policy.IsReservedGroup(g) {
+					return fmt.Errorf("%w: realm=%s directory_group=%s default_group=%s", ErrAutoIssuePrivileged, e.Realm, e.DirectoryGroup, g)
+				}
+			}
 		}
 	}
 	return nil

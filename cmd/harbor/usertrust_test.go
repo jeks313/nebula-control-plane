@@ -141,6 +141,34 @@ func TestPublishUserTrust(t *testing.T) {
 	}
 }
 
+// TestActiveUserTrustResilientOnDBError is the FIX A acceptance (security-review final
+// hardening): activeUserTrust is the LIVE per-enrollment read on a long-running harbor
+// process, so a transient DB error must NOT exit the process — it must return not-found so
+// SSO fails closed (ErrSSONotConfigured) rather than crashing the control plane. Closing the
+// store's connection pool forces a LatestCommitted DB error; the getter must return nil, not
+// os.Exit. (If it still called fatalf, this test would terminate the test binary.)
+func TestActiveUserTrustResilientOnDBError(t *testing.T) {
+	s := utTestStore(t)
+	// Force a transient DB error on the next read by closing the connection pool.
+	if err := s.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	if _, ok := activeUserTrust(context.Background(), s); ok {
+		t.Fatal("activeUserTrust should report not-found on a DB error (fail closed), not ok")
+	}
+
+	// The live getter built on top of it must also degrade to nil, not exit.
+	fs := flag.NewFlagSet("core", flag.ContinueOnError)
+	cf := addCoreFlags(fs)
+	if err := fs.Set("usertrust-db", "true"); err != nil {
+		t.Fatal(err)
+	}
+	if got := cf.userTrustActive(s)(); got != nil {
+		t.Fatalf("getter should return nil on a DB error (fail closed), got %+v", got)
+	}
+}
+
 // TestUserTrustActiveDisabledWithoutFlag: without -usertrust-db, the getter is nil (SSO
 // disabled at this consumer regardless of what is published) — fail closed.
 func TestUserTrustActiveDisabledWithoutFlag(t *testing.T) {

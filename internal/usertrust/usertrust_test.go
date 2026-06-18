@@ -5,6 +5,8 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+
+	"github.com/jeks313/nebula-control-plane/internal/policy"
 )
 
 func TestParseValid(t *testing.T) {
@@ -101,6 +103,47 @@ func TestValidate(t *testing.T) {
 	withDefault := Config{DefaultGroups: []string{"fleet"}, IDPEntries: []IDPEntry{{Realm: "corp", DirectoryGroup: "eng"}}}
 	if err := Validate(withDefault); err != nil {
 		t.Fatalf("default_groups should satisfy grants-something, got %v", err)
+	}
+}
+
+// TestValidateRejectsAutoIssuePrivileged is the FIX B / S8 acceptance: an auto_issue
+// entry that would grant a reserved/privileged group (control-plane / lighthouse, sourced
+// from internal/policy) is rejected, whether the group rides in via the entry's mesh_groups
+// or the fleet-wide default_groups; the SAME grant with auto_issue=false is allowed (an
+// admin approves it manually); and a normal auto_issue entry is unaffected.
+func TestValidateRejectsAutoIssuePrivileged(t *testing.T) {
+	// (1) auto_issue + a reserved group in mesh_groups -> rejected.
+	viaMesh := Config{IDPEntries: []IDPEntry{
+		{Realm: "corp", DirectoryGroup: "admins", MeshGroups: []string{"ops", policy.GroupControlPlane}, AutoIssue: true},
+	}}
+	if err := Validate(viaMesh); !errors.Is(err, ErrAutoIssuePrivileged) {
+		t.Fatalf("auto_issue + reserved mesh group: want ErrAutoIssuePrivileged, got %v", err)
+	}
+
+	// (1b) auto_issue + a reserved group merged in via default_groups -> rejected too
+	// (the granted set is mesh_groups ∪ default_groups).
+	viaDefault := Config{
+		DefaultGroups: []string{policy.GroupLighthouse},
+		IDPEntries:    []IDPEntry{{Realm: "corp", DirectoryGroup: "engineers", MeshGroups: []string{"eng"}, AutoIssue: true}},
+	}
+	if err := Validate(viaDefault); !errors.Is(err, ErrAutoIssuePrivileged) {
+		t.Fatalf("auto_issue + reserved default group: want ErrAutoIssuePrivileged, got %v", err)
+	}
+
+	// (2) the SAME grant with auto_issue=false -> allowed (privileged via manual approval).
+	manual := Config{IDPEntries: []IDPEntry{
+		{Realm: "corp", DirectoryGroup: "admins", MeshGroups: []string{"ops", policy.GroupControlPlane}, AutoIssue: false},
+	}}
+	if err := Validate(manual); err != nil {
+		t.Fatalf("auto_issue=false granting a reserved group should be allowed (manual approval), got %v", err)
+	}
+
+	// (3) a normal entry with auto_issue=true (no reserved group) -> allowed.
+	normal := Config{IDPEntries: []IDPEntry{
+		{Realm: "corp", DirectoryGroup: "engineers", MeshGroups: []string{"eng"}, AutoIssue: true},
+	}}
+	if err := Validate(normal); err != nil {
+		t.Fatalf("normal auto_issue entry should be allowed, got %v", err)
 	}
 }
 
