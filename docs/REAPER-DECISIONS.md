@@ -53,10 +53,15 @@ conservative. R# = the default taken; flagged here for review.
   `policy.GrantsReservedGroup` over the JSON-decoded `enrollments.groups` (a malformed groups JSON
   decodes to nil → not excluded on the group basis, which is safe; control-plane groups are written
   by Harbor itself). Central-netblock exclusion parses `overlay_ip` and tests
-  `centralPrefix.Contains(ip)`, where the `central` CIDR is resolved ONCE at wiring via
-  `netblock.Resolve(ctx, "central")` (an unresolved central → the guard is OFF, logged at startup,
-  rather than failing the reaper). Both run after the SQL pre-filter so they cannot be defeated by
-  an odd row.
+  `centralPrefix.Contains(ip)`. Both run after the SQL pre-filter so they cannot be defeated by an
+  odd row.
+  **(AMENDED — see R20.)** The central CIDR is no longer resolved from the registry at wiring (a
+  lookup that could be ABSENT during a boot-seed gap or a wiped netblocks table, which silently
+  turned the central guard OFF). It is now computed DETERMINISTICALLY from the configured `-pool` —
+  the pool's first `/27` via `genesis.CentralBlock`, exactly the CIDR genesis/`SeedNetblocks` seed —
+  so the guard is ALWAYS ON regardless of registry/boot-seed state. If the pool is somehow zero,
+  core-api FAILS CLOSED (refuses to start the reaper, logged) rather than running with the guard
+  off.
 - **R11 — Soft-mark = `devices.reaped_at` (unix ns) + `reap_reason`.** Migration `000026` adds both
   to `devices` (BIGINT/INTEGER `reaped_at NOT NULL DEFAULT 0`, `reap_reason TEXT NOT NULL DEFAULT
   ''`). `reaped_at != 0` is BOTH the history stamp and the idempotency guard; the stamp UPDATE is
@@ -109,5 +114,48 @@ conservative. R# = the default taken; flagged here for review.
   `reaper-reap` entry for an ephemeral CI host (`ci-runner-03`, overlay 100.64.64.31, `cert-expired`,
   `ip_reclaimed:true`, `revoked:false`). It is audit-only (no heartbeat row for that host — exactly
   the real reaper outcome, and why the reap surfaces via the audit log rather than the fleet list).
+
+## Safety review fixes (adversarial review of `feat/reaper`)
+
+The adversarial safety review empirically reproduced three confirmed bugs where the reaper would
+auto-revoke + reclaim the WRONG host. R18–R20 are the fixes, each with a fail-before/pass-after
+regression test in `internal/reaper/reaper_test.go`.
+
+- **R18 — Candidate join binds to the AUTHORITATIVE latest-issued enrollment per overlay_ip
+  (CRITICAL + the related HIGH).** `overlay_ip` is NOT unique among `status='issued'` enrollments
+  (re-enroll churn; `idx_enrollments_overlay_status` is non-unique;
+  `adminapi/device_provenance.go` documents "multiple rows per overlay_ip"), so the old candidate
+  join `enrollments e ON e.overlay_ip=h.overlay_ip AND e.status='issued'` was NOT 1:1 — a STALE
+  issued row (different/empty groups, a dead fingerprint) leaked in. Consequence: the never-reap
+  group guard ran against the WRONG row (a control-plane host whose stale row had empty/non-reserved
+  groups got reaped), and under the silent trigger the host was acted on TWICE and BOTH fingerprints
+  (including the stale, non-live one) were blocklisted. Fix: `loadCandidates` now pins `e` to the
+  LATEST issued enrollment per overlay_ip via a correlated subquery
+  `e.id = (SELECT MAX(id) FROM enrollments WHERE overlay_ip = h.overlay_ip AND status='issued')` —
+  matching the latest-issued convention every other consumer uses (`coreapi.device()`,
+  `deviceProvenance`, `Order("id DESC")`). `reason()`/`excluded()`/`reapOne` now only ever see the
+  host's CURRENT identity (correct groups, live fingerprint, ephemeral flag). Regression test:
+  `TestStaleIssuedRowDoesNotDefeatGroupGuard` (stale `[]` groups + current `["control-plane"]`,
+  long-expired → ZERO reaped) and `TestStaleIssuedRowSilentRevokesOnlyLiveFingerprint` (only the
+  LIVE/latest fingerprint is revoked).
+- **R19 — Per-host dedup in `ReapOnce` (defense-in-depth).** Independently of the query's now-1:1
+  guarantee, `loadCandidates` collapses the candidate set to at most one row per `overlay_ip` (and
+  defensively per `device_name`) via `dedupByHost` before `ReapOnce` acts. `reaped_at` is stamped
+  only inside `reapOne`, so two rows for one host in a single pass would BOTH act today; the dedup
+  guarantees a host is processed at most once per run even if the query ever regresses to returning
+  duplicates. (Shown in the regression: dedup alone stops the double-action, but only R18 ensures
+  the row kept is the LIVE one — both fixes are needed together.)
+- **R20 — Central never-reap guard is always-on, computed deterministically from the pool, fail-
+  closed (HIGH; amends R10).** The old wiring resolved `central` from the registry
+  (`netblock.Resolve(ctx, "central")`) at startup and, if that failed, ran the reaper with the
+  central guard OFF — so a control-plane host with empty/malformed groups (R18 stale-row case) at a
+  central IP bypassed BOTH the group guard and the central guard. Fix: `genesis.centralBlock` was
+  exported as `genesis.CentralBlock` (the single source of truth — the pool's first `/27`, exactly
+  what `SeedNetblocks` seeds), and `cmd/harbor/serve.go` now computes `central` from the configured
+  `-pool` rather than a registry lookup, so the guard is present regardless of registry/boot-seed
+  state. If the pool is somehow zero/invalid, core-api FAILS CLOSED — it refuses to start the reaper
+  (logged) rather than run with the guard off. Regression test:
+  `TestCentralGuardFromPoolProtectsEmptyGroupsHost` (a central-block host with `[]` groups + expired
+  cert, built with `central` derived from the pool and NO registry netblock seeded → never reaped).
 
 <!-- appended as the build lands: R# — <title>. <what + why> -->

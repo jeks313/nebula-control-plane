@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jeks313/nebula-control-plane/internal/genesis"
 	"github.com/jeks313/nebula-control-plane/internal/revocation"
 	"github.com/jeks313/nebula-control-plane/internal/store"
 	"github.com/jeks313/nebula-control-plane/internal/store/migrate"
@@ -449,5 +450,134 @@ func TestNoEnrollmentRowNotCandidate(t *testing.T) {
 	rep, _ := rp.ReapOnce(context.Background())
 	if rep.Candidates != 0 || rep.Reaped != 0 {
 		t.Fatalf("candidates=%d reaped=%d, want 0/0 (no enrollment join)", rep.Candidates, rep.Reaped)
+	}
+}
+
+// --- safety regression: multiple issued enrollments per overlay_ip (the adversarial review) -----
+
+// addIssued inserts an ADDITIONAL issued enrollment row for the same overlay_ip (re-enroll churn).
+// Insertion order determines the auto-increment id, so the LAST addIssued for an overlay_ip has the
+// highest id and is therefore the host's CURRENT/authoritative identity (latest issued). enrollID
+// must be unique (the enrollment_id column).
+func addIssued(t *testing.T, db *gorm.DB, enrollID, deviceName, groups, ip, fingerprint string, ephemeral bool) {
+	t.Helper()
+	if groups == "" {
+		groups = "[]"
+	}
+	eph := 0
+	if ephemeral {
+		eph = 1
+	}
+	if err := db.Exec(
+		`INSERT INTO enrollments (enrollment_id, device_name, pubkey_hash, pubkey, method, status, groups, overlay_ip, fingerprint, ephemeral, created_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+		enrollID, deviceName, "ph", []byte("k"), "token", "issued", groups, ip, fingerprint, eph, 1,
+	).Error; err != nil {
+		t.Fatalf("addIssued %s: %v", enrollID, err)
+	}
+}
+
+// TestStaleIssuedRowDoesNotDefeatGroupGuard (FIX 1, CRITICAL+HIGH): a single overlay_ip has TWO
+// issued enrollments — a STALE one with empty groups (lower id) and the host's CURRENT identity
+// carrying control-plane (higher id), with a long-expired heartbeat. The reaper must bind to the
+// LATEST issued row, so the control-plane group guard protects the host and ZERO are reaped. Before
+// the latest-issued join, the stale empty-groups row leaked in and defeated the never-reap guard.
+func TestStaleIssuedRowDoesNotDefeatGroupGuard(t *testing.T) {
+	s := newDB(t)
+	cfg := Config{PersistentGrace: time.Hour, EphemeralGrace: time.Hour}
+	const ip = "100.64.0.100"
+	// STALE issued row first (lower id): empty groups — would NOT be excluded on the group basis.
+	addIssued(t, s.DB, "e-stale", "cp-host", `[]`, ip, "stalefp", false)
+	// CURRENT issued row (higher id): control-plane — the authoritative never-reap identity.
+	addIssued(t, s.DB, "e-current", "cp-host", `["control-plane"]`, ip, "livefp", false)
+	// Heartbeat + devices row; cert long expired so it sails past every grace.
+	if err := s.DB.Exec(`INSERT INTO heartbeats (overlay_ip, device_name, cert_not_after, last_seen) VALUES (?,?,?,?)`,
+		ip, "cp-host", ago(30*24*time.Hour).UnixNano(), ago(30*24*time.Hour).UnixNano()).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB.Exec(`INSERT INTO devices (name, created_at, reaped_at) VALUES (?,?,?)`, "cp-host", 1, 0).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	al, rev := &fakeAlloc{}, &fakeRevoke{}
+	rp := build(s.DB, cfg, al, rev, (&auditRec{}).fn())
+	rp.notAlloc = nil
+	rep, err := rp.ReapOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Candidates != 0 || rep.Reaped != 0 || len(al.released) != 0 || len(rev.added) != 0 {
+		t.Fatalf("candidates=%d reaped=%d released=%v revoked=%v, want ALL ZERO (latest control-plane identity protects the host)",
+			rep.Candidates, rep.Reaped, al.released, rev.added)
+	}
+}
+
+// TestStaleIssuedRowSilentRevokesOnlyLiveFingerprint (FIX 1, HIGH + FIX 2): under the silent
+// trigger, one overlay_ip has two issued enrollments — a STALE fingerprint (lower id) and the LIVE
+// fingerprint (higher id) — with a still-valid cert gone silent past SilentAfter. The reaper must
+// act EXACTLY ONCE and revoke ONLY the LIVE (latest) fingerprint, never the stale, non-live one.
+func TestStaleIssuedRowSilentRevokesOnlyLiveFingerprint(t *testing.T) {
+	s := newDB(t)
+	cfg := Config{PersistentGrace: 7 * 24 * time.Hour, EphemeralGrace: time.Hour, SilentAfter: 2 * 24 * time.Hour}
+	const ip = "100.64.0.101"
+	// STALE fingerprint (lower id), then the LIVE fingerprint (higher id = current identity).
+	addIssued(t, s.DB, "e-stale", "quiet-host", `[]`, ip, "STALEFP", false)
+	addIssued(t, s.DB, "e-live", "quiet-host", `[]`, ip, "LIVEFP", false)
+	// Cert still VALID (expires 10d out) but last seen 3d ago > 2d SilentAfter.
+	if err := s.DB.Exec(`INSERT INTO heartbeats (overlay_ip, device_name, cert_not_after, last_seen) VALUES (?,?,?,?)`,
+		ip, "quiet-host", ahead(10*24*time.Hour).UnixNano(), ago(3*24*time.Hour).UnixNano()).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB.Exec(`INSERT INTO devices (name, created_at, reaped_at) VALUES (?,?,?)`, "quiet-host", 1, 0).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	al, rev := &fakeAlloc{}, &fakeRevoke{}
+	rp := build(s.DB, cfg, al, rev, (&auditRec{}).fn())
+	rp.notAlloc = nil
+	rep, err := rp.ReapOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Reaped != 1 || rep.ByReason[ReasonSilent] != 1 {
+		t.Fatalf("reaped=%d byReason=%v, want exactly 1 silent (host acted on once, not twice)", rep.Reaped, rep.ByReason)
+	}
+	if len(rev.added) != 1 || rev.added[0] != "LIVEFP" {
+		t.Fatalf("revoked=%v, want exactly [LIVEFP] (only the LIVE/latest fingerprint, never the stale one)", rev.added)
+	}
+}
+
+// TestCentralGuardFromPoolProtectsEmptyGroupsHost (FIX 3, HIGH): a host at a central-block IP (the
+// first /27 of the pool, derived via genesis.CentralBlock — the same math serve.go uses) with empty
+// groups and an expired cert is NEVER reaped, even though its empty groups would NOT trip the group
+// guard. The central guard, computed deterministically from the pool, protects it regardless of
+// whether a registry 'central' would be present.
+func TestCentralGuardFromPoolProtectsEmptyGroupsHost(t *testing.T) {
+	s := newDB(t)
+	cfg := Config{PersistentGrace: time.Hour, EphemeralGrace: time.Hour}
+
+	// Derive central the SAME way serve.go does: the pool's first /27.
+	pool := netip.MustParsePrefix("100.64.0.0/10")
+	central := genesis.CentralBlock(pool)
+	centralIP := central.Addr().String() // first address of the central /27 — inside the guard.
+
+	// A control-plane host whose CURRENT enrollment has EMPTY groups (so the group guard is no help)
+	// at a central IP, plus an ordinary host outside central that SHOULD be reaped (proves precision).
+	seed(t, s.DB, host{name: "cp-emptygroups", ip: centralIP, groups: `[]`,
+		certNotAfter: ago(30 * 24 * time.Hour), lastSeen: ago(30 * 24 * time.Hour)})
+	seed(t, s.DB, host{name: "ordinary", ip: "100.64.128.5", groups: `[]`,
+		certNotAfter: ago(30 * 24 * time.Hour), lastSeen: ago(30 * 24 * time.Hour)})
+
+	al := &fakeAlloc{}
+	// Build the reaper with central computed from the pool (NOT a registry lookup — which here is
+	// absent entirely, no netblocks seeded), exactly the always-on R10 wiring.
+	rp := New(s.DB, al, &fakeRevoke{}, (&auditRec{}).fn(), cfg, central, nil).WithClock(clk())
+	rep, err := rp.ReapOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Reaped != 1 || len(al.released) != 1 || al.released[0] != "100.64.128.5" {
+		t.Fatalf("reaped=%d released=%v, want only the ordinary host (central host protected by the pool-derived guard)",
+			rep.Reaped, al.released)
 	}
 }

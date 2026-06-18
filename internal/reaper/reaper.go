@@ -368,7 +368,8 @@ func (r *Reaper) reapOne(ctx context.Context, c candidate, reason string, now ti
 }
 
 // loadCandidates runs the candidate join (R1/R4 SQL pre-filter): heartbeats ⋈ enrollments by
-// overlay_ip (the issued enrollment) LEFT JOIN devices to drop already-reaped hosts. The WHERE is
+// overlay_ip (the LATEST issued enrollment — R18) LEFT JOIN devices to drop already-reaped hosts.
+// The result is deduped per host (R19). The WHERE is
 // a COARSE over-approximation in nanoseconds — cert-expired-beyond-the-LONGEST-grace OR (silent
 // trigger on) silent-past-the-window — and uses the persistent (longest) grace so an ephemeral
 // host expired past its SHORT grace is still surfaced; ReapOnce then applies the authoritative,
@@ -395,8 +396,16 @@ func (r *Reaper) loadCandidates(ctx context.Context) ([]candidate, error) {
 
 	// LEFT JOIN devices (by name = device_name) so a reaped device (reaped_at != 0) is excluded
 	// here in SQL — the idempotency guard (R4). A device with no row yet (d.name NULL) is NOT
-	// excluded (its reaped_at is treated as 0). Join enrollments on the ISSUED row carrying the
-	// live fingerprint/ephemeral/groups; overlay_ip is unique per issued host so this is 1:1.
+	// excluded (its reaped_at is treated as 0).
+	//
+	// AUTHORITATIVE LATEST-ISSUED JOIN (R18): overlay_ip is NOT unique among issued enrollments
+	// (re-enroll churn; idx_enrollments_overlay_status is non-unique — see
+	// adminapi/device_provenance.go), so (e.overlay_ip = h.overlay_ip AND status='issued') can match
+	// MULTIPLE rows and is NOT 1:1. We must bind e to the host's CURRENT identity — the LATEST issued
+	// enrollment per overlay_ip (highest id), exactly the convention coreapi.device() and
+	// deviceProvenance use (Order id DESC). The correlated subquery pins e to that single row, so a
+	// stale issued row (different/empty groups, a dead fingerprint) can never leak in to defeat the
+	// group/central guards or get its non-live fingerprint blocklisted.
 	q := `
 		SELECT h.overlay_ip      AS overlay_ip,
 		       h.device_name     AS device_name,
@@ -409,6 +418,8 @@ func (r *Reaper) loadCandidates(ctx context.Context) ([]candidate, error) {
 		JOIN enrollments e
 		  ON e.overlay_ip = h.overlay_ip
 		 AND e.status = 'issued'
+		 AND e.id = (SELECT MAX(e2.id) FROM enrollments e2
+		              WHERE e2.overlay_ip = h.overlay_ip AND e2.status = 'issued')
 		LEFT JOIN devices d
 		  ON d.name = h.device_name
 		WHERE (` + where + `)
@@ -418,7 +429,37 @@ func (r *Reaper) loadCandidates(ctx context.Context) ([]candidate, error) {
 	if err := r.db.WithContext(ctx).Raw(q, args...).Scan(&cands).Error; err != nil {
 		return nil, err
 	}
-	return cands, nil
+	// Defense-in-depth dedup (R19): independently of the query's 1:1 guarantee, collapse the
+	// candidate set to AT MOST ONE row per host before ReapOnce acts. reaped_at is only stamped
+	// inside reapOne, so two rows for one host in a single pass would BOTH act today; deduping here
+	// means a host is processed at most once per run even if the query ever returns duplicates.
+	return dedupByHost(cands), nil
+}
+
+// dedupByHost collapses candidates to at most one per overlay_ip (and, defensively, per
+// device_name), preserving order. The latest-issued subquery in loadCandidates already makes the
+// query 1:1 per overlay_ip, so this is belt-and-suspenders (R19): even a future query regression or
+// a duplicate heartbeat row can never cause one host to be reaped twice in a single pass.
+func dedupByHost(cands []candidate) []candidate {
+	seenIP := make(map[string]bool, len(cands))
+	seenName := make(map[string]bool, len(cands))
+	out := cands[:0:0]
+	for _, c := range cands {
+		if c.OverlayIP != "" && seenIP[c.OverlayIP] {
+			continue
+		}
+		if c.DeviceName != "" && seenName[c.DeviceName] {
+			continue
+		}
+		if c.OverlayIP != "" {
+			seenIP[c.OverlayIP] = true
+		}
+		if c.DeviceName != "" {
+			seenName[c.DeviceName] = true
+		}
+		out = append(out, c)
+	}
+	return out
 }
 
 // Run reaps once immediately, then every interval, until ctx is cancelled (mirrors auditverify).
