@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/jeks313/nebula-control-plane/internal/hostkey"
+	"github.com/jeks313/nebula-control-plane/internal/ipam"
+	"github.com/jeks313/nebula-control-plane/internal/netblock"
 	"github.com/jeks313/nebula-control-plane/internal/signer"
 	"github.com/jeks313/nebula-control-plane/internal/store"
 	"github.com/jeks313/nebula-control-plane/internal/store/migrate"
@@ -149,5 +151,61 @@ func TestVerifyControlPlaneCertRejectsGarbage(t *testing.T) {
 	}
 	if _, err := VerifyControlPlaneCert(nil); err == nil {
 		t.Error("nil must not verify")
+	}
+}
+
+// TestGenesisSeedsNetblocks verifies ADR-0010 genesis: the protected central +
+// default netblocks are seeded, the lighthouse/core land under central with
+// method="genesis" provenance, and the default block is placed clear of central.
+func TestGenesisSeedsNetblocks(t *testing.T) {
+	caB, _ := signer.NewSoftwareBackend()
+	cfgB, _ := signer.NewSoftwareBackend()
+	s := newStore(t)
+	pool := netip.MustParsePrefix("10.44.0.0/16")
+	_, err := Run(context.Background(), s, caB, cfgB, Params{
+		OperatorA: "alice", OperatorB: "bob", CAName: "ca", Pool: pool,
+		LighthouseName: "lh1", LighthouseIP: netip.MustParseAddr("10.44.0.1"), LighthousePub: hostPub(t),
+		CoreName: "core1", CoreIP: netip.MustParseAddr("10.44.0.2"), CorePub: hostPub(t),
+		CALifetime: 24 * time.Hour, CertLifetime: 12 * time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("genesis: %v", err)
+	}
+
+	var blocks []netblock.Netblock
+	if err := s.DB.Find(&blocks).Error; err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]netblock.Netblock{}
+	for _, b := range blocks {
+		got[b.Name] = b
+	}
+	central, ok := got["central"]
+	if !ok || central.CIDR != "10.44.0.0/27" || central.Kind != "reserved" || !central.Protected {
+		t.Fatalf("central netblock = %+v, want 10.44.0.0/27 reserved protected", central)
+	}
+	def, ok := got["default"]
+	if !ok || def.Kind != "default" || !def.Protected {
+		t.Fatalf("default netblock = %+v, want kind default protected", def)
+	}
+	if def.CIDR == "10.44.0.0/18" {
+		t.Fatalf("default %s overlaps central — should be placed clear of it", def.CIDR)
+	}
+
+	// Lighthouse + core allocations carry method=genesis and central's netblock_id.
+	var allocs []ipam.Allocation
+	if err := s.DB.Find(&allocs).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(allocs) != 2 {
+		t.Fatalf("ip_allocations = %d, want 2 (lighthouse + core)", len(allocs))
+	}
+	for _, a := range allocs {
+		if a.Method != "genesis" {
+			t.Errorf("alloc %s method = %q, want genesis", a.IP, a.Method)
+		}
+		if a.NetblockID != central.ID {
+			t.Errorf("alloc %s netblock_id = %d, want central's id %d", a.IP, a.NetblockID, central.ID)
+		}
 	}
 }

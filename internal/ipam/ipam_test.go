@@ -42,7 +42,7 @@ func TestAllocateSequential(t *testing.T) {
 	ctx := context.Background()
 	want := []string{"100.64.0.1", "100.64.0.2", "100.64.0.3"} // .0 (network) skipped
 	for i, w := range want {
-		got, err := a.Allocate(ctx, fmt.Sprintf("dev-%d", i), "")
+		got, err := a.Allocate(ctx, fmt.Sprintf("dev-%d", i), "", "token")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -55,11 +55,11 @@ func TestAllocateSequential(t *testing.T) {
 func TestReleaseNoQuarantineReuses(t *testing.T) {
 	a := newAllocator(t, Pool{Prefix: netip.MustParsePrefix("100.64.0.0/24")})
 	ctx := context.Background()
-	ip, _ := a.Allocate(ctx, "dev-a", "")
+	ip, _ := a.Allocate(ctx, "dev-a", "", "token")
 	if err := a.Release(ctx, ip); err != nil {
 		t.Fatal(err)
 	}
-	reused, _ := a.Allocate(ctx, "dev-b", "")
+	reused, _ := a.Allocate(ctx, "dev-b", "", "token")
 	if reused != ip {
 		t.Fatalf("expected immediate reuse of %s, got %s", ip, reused)
 	}
@@ -77,12 +77,12 @@ func TestReleaseQuarantineHonored(t *testing.T) {
 	a.now = func() time.Time { return now }
 	ctx := context.Background()
 
-	ip1, _ := a.Allocate(ctx, "dev-a", "") // 100.64.0.1
+	ip1, _ := a.Allocate(ctx, "dev-a", "", "token") // 100.64.0.1
 	if err := a.Release(ctx, ip1); err != nil {
 		t.Fatal(err)
 	}
 	// While quarantined, the same IP must NOT be handed out again.
-	ip2, _ := a.Allocate(ctx, "dev-b", "")
+	ip2, _ := a.Allocate(ctx, "dev-b", "", "token")
 	if ip2 == ip1 {
 		t.Fatalf("quarantined IP %s was reused immediately", ip1)
 	}
@@ -92,7 +92,7 @@ func TestReleaseQuarantineHonored(t *testing.T) {
 	if err := a.Release(ctx, ip2); err != nil {
 		t.Fatal(err)
 	}
-	ip3, _ := a.Allocate(ctx, "dev-c", "")
+	ip3, _ := a.Allocate(ctx, "dev-c", "", "token")
 	if ip3 != ip1 {
 		t.Fatalf("after quarantine expiry expected reuse of %s, got %s", ip1, ip3)
 	}
@@ -107,21 +107,21 @@ func TestSubRanges(t *testing.T) {
 		},
 	})
 	ctx := context.Background()
-	aws, err := a.Allocate(ctx, "aws-1", "aws")
+	aws, err := a.Allocate(ctx, "aws-1", "aws", "token")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !netip.MustParsePrefix("100.64.0.0/24").Contains(aws) {
 		t.Fatalf("aws alloc %s not in aws sub-range", aws)
 	}
-	az, err := a.Allocate(ctx, "az-1", "azure")
+	az, err := a.Allocate(ctx, "az-1", "azure", "token")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !netip.MustParsePrefix("100.64.1.0/24").Contains(az) {
 		t.Fatalf("azure alloc %s not in azure sub-range", az)
 	}
-	if _, err := a.Allocate(ctx, "x", "gcp"); !errors.Is(err, ErrUnknownSubRange) {
+	if _, err := a.Allocate(ctx, "x", "gcp", "token"); !errors.Is(err, ErrUnknownSubRange) {
 		t.Fatalf("unknown sub-range err = %v", err)
 	}
 }
@@ -130,11 +130,11 @@ func TestPoolExhausted(t *testing.T) {
 	a := newAllocator(t, Pool{Prefix: netip.MustParsePrefix("100.64.0.0/30")}) // .1,.2,.3 usable
 	ctx := context.Background()
 	for i := 0; i < 3; i++ {
-		if _, err := a.Allocate(ctx, fmt.Sprintf("d%d", i), ""); err != nil {
+		if _, err := a.Allocate(ctx, fmt.Sprintf("d%d", i), "", "token"); err != nil {
 			t.Fatalf("alloc %d: %v", i, err)
 		}
 	}
-	if _, err := a.Allocate(ctx, "overflow", ""); !errors.Is(err, ErrPoolExhausted) {
+	if _, err := a.Allocate(ctx, "overflow", "", "token"); !errors.Is(err, ErrPoolExhausted) {
 		t.Fatalf("err = %v, want ErrPoolExhausted", err)
 	}
 }
@@ -154,7 +154,7 @@ func TestConcurrentAllocationsNoCollision(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			ip, err := a.Allocate(ctx, fmt.Sprintf("dev-%d", i), "")
+			ip, err := a.Allocate(ctx, fmt.Sprintf("dev-%d", i), "", "token")
 			if err != nil {
 				errs <- err
 				return

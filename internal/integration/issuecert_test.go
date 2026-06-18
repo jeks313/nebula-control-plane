@@ -64,7 +64,7 @@ func TestIssueCertEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	ip, err := alloc.Allocate(ctx, "web-1", "")
+	ip, err := alloc.Allocate(ctx, "web-1", "", "token")
 	if err != nil {
 		t.Fatal(err)
 	}

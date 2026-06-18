@@ -305,7 +305,7 @@ func cmdIPAM(args []string) {
 		if *device == "" {
 			fatalf("ipam allocate: -device is required")
 		}
-		ip, err := alloc.Allocate(context.Background(), *device, *subRange)
+		ip, err := alloc.Allocate(context.Background(), *device, *subRange, "")
 		if err != nil {
 			fatalf("%v", err)
 		}

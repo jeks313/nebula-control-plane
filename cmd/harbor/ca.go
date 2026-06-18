@@ -11,6 +11,7 @@ import (
 
 	"github.com/jeks313/nebula-control-plane/internal/genesis"
 	"github.com/jeks313/nebula-control-plane/internal/ipam"
+	"github.com/jeks313/nebula-control-plane/internal/netblock"
 	"github.com/jeks313/nebula-control-plane/internal/signer"
 	"github.com/jeks313/nebula-control-plane/internal/store"
 	"github.com/jeks313/nebula-control-plane/internal/store/migrate"
@@ -28,6 +29,8 @@ func cmdGenesis(args []string) {
 	opB := fs.String("operator-b", "", "second ceremony operator (required, must differ)")
 	caName := fs.String("ca-name", "harbor-ca", "CA name")
 	poolStr := fs.String("pool", "100.64.0.0/16", "overlay pool CIDR")
+	centralCIDRStr := fs.String("central-cidr", "", "control-plane reserved netblock CIDR (ADR 0010; default: pool's first /27)")
+	defaultCIDRStr := fs.String("default-cidr", "", "bounded fallback netblock CIDR (ADR 0010; default: a /18 clear of central)")
 	lhName := fs.String("lighthouse-name", "lighthouse-1", "first lighthouse name")
 	lhIPStr := fs.String("lighthouse-ip", "100.64.0.1", "lighthouse overlay IP")
 	lhAddr := fs.String("lighthouse-addr", "", "lighthouse public underlay addr (host:port)")
@@ -59,6 +62,17 @@ func cmdGenesis(args []string) {
 	pool, err := netip.ParsePrefix(*poolStr)
 	if err != nil {
 		fatalf("genesis: bad -pool: %v", err)
+	}
+	var centralCIDR, defaultCIDR netip.Prefix
+	if *centralCIDRStr != "" {
+		if centralCIDR, err = netip.ParsePrefix(*centralCIDRStr); err != nil {
+			fatalf("genesis: bad -central-cidr: %v", err)
+		}
+	}
+	if *defaultCIDRStr != "" {
+		if defaultCIDR, err = netip.ParsePrefix(*defaultCIDRStr); err != nil {
+			fatalf("genesis: bad -default-cidr: %v", err)
+		}
 	}
 	lhIP, err := netip.ParseAddr(*lhIPStr)
 	if err != nil {
@@ -132,6 +146,7 @@ func cmdGenesis(args []string) {
 
 	res, err := genesis.Run(context.Background(), s, caB, cfgB, genesis.Params{
 		OperatorA: *opA, OperatorB: *opB, CAName: *caName, Pool: pool,
+		CentralCIDR: centralCIDR, DefaultCIDR: defaultCIDR,
 		LighthouseName: *lhName, LighthouseIP: lhIP, LighthouseAddr: *lhAddr,
 		LighthousePub: lhPubPEM,
 		CoreName:      *coreName, CoreIP: coreIP, CorePub: corePubPEM,
@@ -285,7 +300,7 @@ func cmdIssueCert(args []string) {
 	inPub := fs.String("in-pub", "", "host public key PEM path (required)")
 	groupsStr := fs.String("groups", "", "comma-separated groups")
 	poolStr := fs.String("pool", "100.64.0.0/16", "overlay pool CIDR")
-	subRange := fs.String("range", "", "pool sub-range name")
+	subRange := fs.String("range", "", "netblock name to allocate from (ADR 0010; empty -> the default block)")
 	lifetime := fs.Duration("lifetime", 30*24*time.Hour, "certificate validity")
 	maxPerHour := fs.Int("max-per-hour", 0, "signing circuit-breaker ceiling (0=unlimited)")
 	out := fs.String("out", "", "output path for the issued cert (default: stdout)")
@@ -339,9 +354,12 @@ func cmdIssueCert(args []string) {
 	if err != nil {
 		fatalf("issue-cert: %v", err)
 	}
+	// Resolve -range as a netblock NAME via the DB-backed registry (ADR 0010); empty
+	// -> the default block. A manual issue-cert is recorded with method "genesis".
+	alloc = alloc.WithResolver(netblock.New(s.DB, pool, nil, alloc, audit))
 
 	ctx := context.Background()
-	ip, err := alloc.Allocate(ctx, *name, *subRange)
+	ip, err := alloc.Allocate(ctx, *name, *subRange, "genesis")
 	if err != nil {
 		fatalf("issue-cert: allocate IP: %v", err)
 	}
