@@ -33,6 +33,8 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/obs"
 	"github.com/jeks313/nebula-control-plane/internal/pilotrelease"
 	"github.com/jeks313/nebula-control-plane/internal/queue"
+	"github.com/jeks313/nebula-control-plane/internal/reaper"
+	"github.com/jeks313/nebula-control-plane/internal/revocation"
 	"github.com/jeks313/nebula-control-plane/internal/rollout"
 	"github.com/jeks313/nebula-control-plane/internal/signer"
 	"github.com/jeks313/nebula-control-plane/internal/store"
@@ -97,6 +99,15 @@ func cmdCoreAPI(args []string) {
 	hostCert := fs.String("host-cert", "", "Core's own Nebula host cert PEM; verified at boot to carry group:control-plane (recommended)")
 	staleAfter := fs.Duration("stale-after", 5*time.Minute, "fleet stale window: an allocation counts as 'used' (ncp_ipam_netblock_used) only while its host heartbeats within this window — keep aligned with admin-api's -stale-after")
 	auditInterval := fs.Duration("audit-verify-interval", time.Hour, "how often to re-verify the audit chain into metrics (0 disables); a tamper raises ncp_audit_verify_tampered_total")
+	// Device reaper (impl 2.12 — destructive, automated reclamation; see docs/REAPER-DECISIONS.md).
+	// Enabled by default but CONSERVATIVE: it only reaps hosts whose cert has lapsed beyond a grace
+	// window (already off the mesh). -reap-dry-run previews without acting; -reap-disable turns it off.
+	reapDisable := fs.Bool("reap-disable", false, "disable the device reaper entirely (default: enabled, conservative)")
+	reapDryRun := fs.Bool("reap-dry-run", false, "device reaper PREVIEW: log/audit what WOULD be reaped without acting (mutate nothing)")
+	reapInterval := fs.Duration("reap-interval", time.Hour, "how often the device reaper runs")
+	reapGrace := fs.Duration("reap-grace", 168*time.Hour, "persistent-host reap grace: reap only after a cert has been EXPIRED this long (default 7d — very conservative)")
+	reapEphemeralGrace := fs.Duration("reap-ephemeral-grace", time.Hour, "ephemeral-host reap grace: shorter expiry-grace for hosts that joined via an ephemeral join key (default 1h)")
+	reapSilentAfter := fs.Duration("reap-silent-after", 0, "AGGRESSIVE (default 0=OFF): also reap a host silent longer than this even with a still-valid cert (then the reap REVOKES it)")
 	lf := addLogFlags(fs)
 	_ = fs.Parse(args)
 	log := lf.setup()
@@ -215,6 +226,44 @@ func cmdCoreAPI(args []string) {
 	}
 	wg.Add(1)
 	go func() { defer wg.Done(); sg.RunBreakerMetric(ctx, 15*time.Second) }()
+	// Device reaper (impl 2.12): reclaim leaked overlay IPs, prune stale heartbeats, and revoke
+	// (where still-live) hosts whose cert has lapsed beyond grace. core-api holds the allocator +
+	// revocation registry + audit, so it owns the reaper (admin-api/collect don't run it).
+	if !*reapDisable {
+		// Allocator + revocation registry the reaper mutates, built like the boot-seed/admin path:
+		// the resolver-backed allocator releases an IP cleanly; the registry blocklists a still-live
+		// cert under the silent trigger. central is resolved once for the never-reap netblock guard.
+		ralloc, rerr := ipam.NewAllocator(s, ipam.Pool{Prefix: pool})
+		if rerr != nil {
+			fatalf("core-api: reaper allocator: %v", rerr)
+		}
+		rreg := netblock.New(s.DB, pool, nil, ralloc, audit)
+		ralloc = ralloc.WithResolver(rreg)
+		var central netip.Prefix
+		if cidr, cerr := rreg.Resolve(context.Background(), netblock.NameCentral); cerr == nil {
+			central = cidr
+		} else {
+			log.Warn("core-api: reaper could not resolve the 'central' reserved netblock; the central never-reap guard is OFF until it exists", "err", cerr)
+		}
+		rcfg := reaper.Config{
+			PersistentGrace: *reapGrace,
+			EphemeralGrace:  *reapEphemeralGrace,
+			SilentAfter:     *reapSilentAfter,
+			DryRun:          *reapDryRun,
+		}
+		rp := reaper.New(s.DB, ralloc, revocation.New(s.DB, audit), audit, rcfg, central, ipam.ErrNotAllocated).WithLogger(log)
+		mode := "ENABLED"
+		if *reapDryRun {
+			mode = "DRY-RUN (previewing only — mutates nothing)"
+		}
+		log.Info("core-api device reaper "+mode,
+			"interval", *reapInterval, "grace", *reapGrace, "ephemeral_grace", *reapEphemeralGrace,
+			"silent_after", *reapSilentAfter, "central_guard", central.IsValid())
+		wg.Add(1)
+		go func() { defer wg.Done(); rp.Run(ctx, *reapInterval) }()
+	} else {
+		log.Info("core-api device reaper DISABLED (-reap-disable)")
+	}
 	if err := acme.Apply(ctx, srv); err != nil {
 		fatalf("core-api: auto-TLS: %v", err)
 	}
