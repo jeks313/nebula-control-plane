@@ -113,6 +113,58 @@ func TestDeviceProvenance(t *testing.T) {
 	}
 }
 
+// TestDeviceEphemeralSurfaced: a host whose authoritative enrollment is ephemeral
+// surfaces ephemeral=true on /devices; a non-ephemeral host omits it (omitempty).
+func TestDeviceEphemeralSurfaced(t *testing.T) {
+	s, h := newServer(t)
+	_, jk, _ := joinkey.Create(context.Background(), s, joinkey.Params{Name: "ci-runners", Groups: []string{"ci"}, Ephemeral: true}, provNow)
+	good := provNow.Add(30 * 24 * time.Hour)
+	hbFull(t, s.DB, "100.64.0.1", "ci-runner", good, provNow, 0, "ok")
+	hbFull(t, s.DB, "100.64.0.2", "laptop", good, provNow, 0, "ok")
+	// Ephemeral token host.
+	g, _ := json.Marshal([]string{"ci"})
+	if err := s.DB.Create(&enrollment.Enrollment{
+		EnrollmentID: "e-eph", DeviceName: "ci-runner", PubkeyHash: "h-eph", Method: "token",
+		JoinKeyID: jk.ID, Groups: string(g), Status: enrollment.StatusIssued, OverlayIP: "100.64.0.1",
+		Ephemeral: true, CreatedAt: provNow.UnixNano(), DecidedAt: provNow.UnixNano(), Approver: "ops",
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	// Non-ephemeral token host.
+	issued(t, s, "e-std", "100.64.0.2", jk.ID, "", "", "", "", []string{"laptops"})
+
+	_, body := do(t, h, "GET", "/admin/v1/devices", "alice")
+	devs := devicesBy(t, body)
+	if devs["100.64.0.1"]["ephemeral"] != true {
+		t.Errorf("ephemeral host ephemeral = %v, want true", devs["100.64.0.1"]["ephemeral"])
+	}
+	if devs["100.64.0.2"]["ephemeral"] != nil {
+		t.Errorf("non-ephemeral host should omit ephemeral, got %v", devs["100.64.0.2"]["ephemeral"])
+	}
+}
+
+// TestEnrollmentEphemeralSurfaced: the enrollments queue surfaces ephemeral on a row
+// that joined via an ephemeral key.
+func TestEnrollmentEphemeralSurfaced(t *testing.T) {
+	s, h := newServer(t)
+	_, jk, _ := joinkey.Create(context.Background(), s, joinkey.Params{Name: "ci-runners", Groups: []string{"ci"}, Ephemeral: true}, provNow)
+	g, _ := json.Marshal([]string{"ci"})
+	if err := s.DB.Create(&enrollment.Enrollment{
+		EnrollmentID: "p-eph", DeviceName: "runner-1", PubkeyHash: "h1", Method: "token",
+		JoinKeyID: jk.ID, Groups: string(g), Status: enrollment.StatusPending, Ephemeral: true, CreatedAt: provNow.UnixNano(),
+	}).Error; err != nil {
+		t.Fatal(err)
+	}
+	_, body := do(t, h, "GET", "/admin/v1/enrollments?status=pending", "alice")
+	es := body["enrollments"].([]any)
+	if len(es) != 1 {
+		t.Fatalf("enrollments = %d, want 1", len(es))
+	}
+	if eph := es[0].(map[string]any)["ephemeral"]; eph != true {
+		t.Errorf("ephemeral = %v, want true", eph)
+	}
+}
+
 // TestDeviceScopeFilters: scope filters narrow to the matching authoritative
 // enrollment; combined filters intersect; a non-matching scope returns empty.
 func TestDeviceScopeFilters(t *testing.T) {

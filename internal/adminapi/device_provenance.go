@@ -24,6 +24,7 @@ type provRow struct {
 	AttestRegion    string
 	JoinKeyID       int64 // 0 for cloud-attested hosts
 	Groups          []string
+	Ephemeral       bool // joined via an ephemeral join key (shorter cert TTL; impl 2.12 foundation)
 }
 
 // enrollProv is a narrow read view of the enrollment columns provenance needs (no
@@ -36,11 +37,12 @@ type enrollProv struct {
 	AttestAccount   string `gorm:"column:attest_account"`
 	AttestPrincipal string `gorm:"column:attest_principal"`
 	AttestRegion    string `gorm:"column:attest_region"`
+	Ephemeral       bool   `gorm:"column:ephemeral"`
 }
 
 func (enrollProv) TableName() string { return "enrollments" }
 
-const provSelect = "overlay_ip, join_key_id, groups, attest_provider, attest_account, attest_principal, attest_region"
+const provSelect = "overlay_ip, join_key_id, groups, attest_provider, attest_account, attest_principal, attest_region, ephemeral"
 
 // deviceProvenance resolves the authoritative enrollment for each overlay IP and
 // returns it keyed by overlay_ip. A device with no issued enrollment (e.g. a legacy
@@ -69,7 +71,7 @@ func (s *Server) deviceProvenance(ctx context.Context, ips []string) (map[string
 		out[r.OverlayIP] = provRow{
 			AttestProvider: r.AttestProvider, AttestAccount: r.AttestAccount,
 			AttestPrincipal: r.AttestPrincipal, AttestRegion: r.AttestRegion,
-			JoinKeyID: r.JoinKeyID, Groups: groups,
+			JoinKeyID: r.JoinKeyID, Groups: groups, Ephemeral: r.Ephemeral,
 		}
 	}
 	return out, nil

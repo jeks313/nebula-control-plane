@@ -100,7 +100,10 @@ func setupEnroll(t *testing.T) enrollEnv {
 	cons := enrollment.New(enrollment.Config{
 		Store: s, Nonces: ring, Replay: replay.New(2 * time.Minute),
 		Signer: sg, Allocator: alloc, Pool: pool, CertLifetime: 24 * time.Hour,
-		ConfigBackend: cfgB, ConfigKeyID: configKeyID, CABundlePEM: caPEM,
+		// Ephemeral hosts get a meaningfully shorter cert (2h vs the 24h standard) so the
+		// ephemeral tests can assert the validity window differs.
+		EphemeralCertTTL: 2 * time.Hour,
+		ConfigBackend:    cfgB, ConfigKeyID: configKeyID, CABundlePEM: caPEM,
 		Lighthouses:     []bundle.Lighthouse{{OverlayIP: "100.64.0.1", PublicAddrs: []string{"198.51.100.1:4242"}}},
 		Policy:          &pol,
 		BlocklistSource: rev.ActiveFingerprints,
@@ -347,6 +350,113 @@ func TestEnrollApproveDenyRace(t *testing.T) {
 				t.Fatalf("iter %d: approve won but row status=%s cert=%dB", i, row.Status, len(row.CertPEM))
 			}
 		}
+	}
+}
+
+// certValidity returns a leaf cert's validity window (NotAfter - NotBefore) — which the
+// issue path sets to the cert TTL (NotBefore = now-5m, NotAfter = NotBefore + TTL).
+func certValidity(t *testing.T, certPEM []byte) time.Duration {
+	t.Helper()
+	c, _, err := cert.UnmarshalCertificateFromPEM(certPEM)
+	if err != nil {
+		t.Fatalf("parse cert: %v", err)
+	}
+	return c.NotAfter().Sub(c.NotBefore())
+}
+
+// enrollmentRow reads the persisted enrollment row by id.
+func (e enrollEnv) enrollmentRow(t *testing.T, enrollmentID string) enrollment.Enrollment {
+	t.Helper()
+	var row enrollment.Enrollment
+	if err := e.store.DB.Where("enrollment_id = ?", enrollmentID).First(&row).Error; err != nil {
+		t.Fatalf("reload enrollment %s: %v", enrollmentID, err)
+	}
+	return row
+}
+
+// TestEnrollEphemeralAutoIssue: an auto-issue join via an EPHEMERAL key records
+// ephemeral=true on the row and mints a cert whose validity == EphemeralCertTTL (2h),
+// strictly shorter than the standard CertLifetime (24h).
+func TestEnrollEphemeralAutoIssue(t *testing.T) {
+	e := setupEnroll(t)
+	ctx := context.Background()
+	secret, _, _ := joinkey.Create(ctx, e.store,
+		joinkey.Params{Name: "eph", Groups: []string{"ci"}, MaxUses: 0, AutoIssue: true, Ephemeral: true}, time.Now())
+
+	res, err := e.cons.Process(ctx, e.candidate(t, secret, "host-eph"))
+	if err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if res.Status != enrollment.StatusIssued || res.CertPEM == nil {
+		t.Fatalf("ephemeral auto_issue should issue, got %+v", res)
+	}
+	e.verifyCert(t, res.CertPEM)
+	if v := certValidity(t, res.CertPEM); v != 2*time.Hour {
+		t.Fatalf("ephemeral cert validity = %s, want 2h (EphemeralCertTTL)", v)
+	}
+	if row := e.enrollmentRow(t, "eid-host-eph"); !row.Ephemeral {
+		t.Fatalf("ephemeral=%v on the row, want true", row.Ephemeral)
+	}
+}
+
+// TestEnrollNonEphemeralStandardTTL: a non-ephemeral key records ephemeral=false and
+// mints a cert with the standard CertLifetime (24h), so the shortening is opt-in.
+func TestEnrollNonEphemeralStandardTTL(t *testing.T) {
+	e := setupEnroll(t)
+	ctx := context.Background()
+	secret, _, _ := joinkey.Create(ctx, e.store,
+		joinkey.Params{Name: "std", Groups: []string{"db"}, MaxUses: 0, AutoIssue: true}, time.Now())
+
+	res, err := e.cons.Process(ctx, e.candidate(t, secret, "host-std"))
+	if err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if res.Status != enrollment.StatusIssued || res.CertPEM == nil {
+		t.Fatalf("auto_issue should issue, got %+v", res)
+	}
+	if v := certValidity(t, res.CertPEM); v != 24*time.Hour {
+		t.Fatalf("standard cert validity = %s, want 24h (CertLifetime)", v)
+	}
+	if row := e.enrollmentRow(t, "eid-host-std"); row.Ephemeral {
+		t.Fatalf("ephemeral=%v on a non-ephemeral key, want false", row.Ephemeral)
+	}
+}
+
+// TestEnrollEphemeralApproveRederives: a PENDING enrollment via an ephemeral key, on
+// Approve, re-derives ephemeral from the join key — the issued cert gets the shorter
+// EphemeralCertTTL and the row stays ephemeral=true (mirrors the netblock re-derivation).
+func TestEnrollEphemeralApproveRederives(t *testing.T) {
+	e := setupEnroll(t)
+	ctx := context.Background()
+	// auto_issue=false (default) => lands PENDING; Ephemeral=true on the key.
+	secret, _, _ := joinkey.Create(ctx, e.store,
+		joinkey.Params{Name: "eph-pending", Groups: []string{"ci"}, MaxUses: 1, Ephemeral: true}, time.Now())
+
+	res, err := e.cons.Process(ctx, e.candidate(t, secret, "host-ephp"))
+	if err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if res.Status != enrollment.StatusPending {
+		t.Fatalf("ephemeral non-auto key should land PENDING, got %+v", res)
+	}
+	// The pending row already carries the flag (recorded at processToken time).
+	if row := e.enrollmentRow(t, "eid-host-ephp"); !row.Ephemeral {
+		t.Fatalf("pending row ephemeral=%v, want true", row.Ephemeral)
+	}
+
+	app, err := e.cons.Approve(ctx, "eid-host-ephp", "admin")
+	if err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	if app.Status != enrollment.StatusIssued {
+		t.Fatalf("approve status = %s", app.Status)
+	}
+	e.verifyCert(t, app.CertPEM)
+	if v := certValidity(t, app.CertPEM); v != 2*time.Hour {
+		t.Fatalf("approved ephemeral cert validity = %s, want 2h (re-derived EphemeralCertTTL)", v)
+	}
+	if row := e.enrollmentRow(t, "eid-host-ephp"); !row.Ephemeral || row.Status != enrollment.StatusIssued {
+		t.Fatalf("post-approve row ephemeral=%v status=%s, want true/issued", row.Ephemeral, row.Status)
 	}
 }
 
