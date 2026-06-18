@@ -49,6 +49,7 @@ var migrations = []*gormigrate.Migration{
 	sqlMigration("000021_host_arch"),
 	sqlMigration("000022_ipam_netblocks"),
 	sqlMigration("000023_ip_allocation_provenance"),
+	sqlMigration("000024_heartbeats_lastseen_index"),
 }
 
 // Up applies all pending migrations.

@@ -25,7 +25,7 @@ var (
 	)
 	descNetblockAllocated = prometheus.NewDesc(
 		"ncp_ipam_netblock_allocated",
-		"Currently allocated (or quarantined) addresses in a netblock, by netblock.",
+		"Live (allocated or unexpired-quarantine; excludes expired-but-unpurged quarantine) addresses in a netblock, by netblock.",
 		[]string{"netblock"}, nil,
 	)
 	descNetblockUsed = prometheus.NewDesc(
@@ -130,10 +130,15 @@ func (c *NetblockCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 }
 
-// allocationAddrs plucks every allocation IP (live or quarantined) as parsed addrs.
+// allocationAddrs plucks every LIVE allocation IP — allocated, OR quarantined with an
+// unexpired window — as parsed addrs. This matches ipam.LiveAddrs' predicate, so an
+// expired-but-unpurged quarantine row (its IP is reusable, purged lazily on the next
+// allocation) is excluded and not briefly counted as allocated.
 func (c *NetblockCollector) allocationAddrs(ctx context.Context) ([]netip.Addr, error) {
 	var ips []string
-	if err := c.db.WithContext(ctx).Model(&Allocation{}).Pluck("ip", &ips).Error; err != nil {
+	if err := c.db.WithContext(ctx).Model(&Allocation{}).
+		Where("state = ? OR quarantine_until > ?", stateAllocated, c.now().UnixNano()).
+		Pluck("ip", &ips).Error; err != nil {
 		return nil, err
 	}
 	out := make([]netip.Addr, 0, len(ips))
