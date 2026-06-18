@@ -60,6 +60,11 @@ output "gateway_collect_addr" {
   value       = var.gateway_runtime == "fargate" ? "https://${one(aws_lb.gateway_internal[*].dns_name)}:${var.collect_port}" : "https://${try(aws_instance.node["gateway"].private_ip, "")}:${var.collect_port}"
 }
 
+output "gateway_obs_addr" {
+  description = "Prometheus scrape target (host:port, no scheme) for the Fargate gateway's /metrics — the INTERNAL NLB on the obs port. EC2 fallback: the node's private IP. The monitoring deploy renders a scrape job from this."
+  value       = var.gateway_runtime == "fargate" ? "${one(aws_lb.gateway_internal[*].dns_name)}:${var.gateway_obs_port}" : "${try(aws_instance.node["gateway"].private_ip, "")}:${var.gateway_obs_port}"
+}
+
 output "gateway_runtime" {
   description = "Which gateway runtime is active (ec2 | fargate)."
   value       = var.gateway_runtime

@@ -287,6 +287,13 @@ resource "aws_security_group" "monitoring" {
     cidr_blocks = [local.tier_cidr["edge"]]
   }
   egress {
+    description = "Scrape the Fargate gateway /metrics via the internal NLB (edge subnet)"
+    from_port   = var.gateway_obs_port
+    to_port     = var.gateway_obs_port
+    protocol    = "tcp"
+    cidr_blocks = [local.tier_cidr["edge"]]
+  }
+  egress {
     description = "Bootstrap + container image fetch (https/http)"
     from_port   = 443
     to_port     = 443

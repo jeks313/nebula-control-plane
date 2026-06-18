@@ -55,6 +55,7 @@ HARBOR_OVERLAY="${HARBOR_OVERLAY:-10.44.0.2}"   # Harbor's own mesh address (con
 CORE_PORT="${CORE_PORT:-8444}"                   # core-api (renew/heartbeat), mesh-only (machine-facing; stays off 443)
 ADMIN_PORT="${ADMIN_PORT:-443}"                  # admin console, mesh-only (default 443 => clean https URLs over the overlay; still NOT public)
 MOCK_IDP_PORT="${MOCK_IDP_PORT:-8446}"           # dev mock-IdP for the console login
+COLLECT_OBS_PORT="${COLLECT_OBS_PORT:-9445}"     # harbor collect /metrics + /healthz (Phase 7b), mesh-only on the overlay
 DB_BACKEND="${DB_BACKEND:-sqlite}"               # sqlite (local file on harbor) | aurora (managed Postgres; rotating creds via Secrets Manager, no static password)
 
 for t in terraform jq go ssh scp openssl aws session-manager-plugin; do command -v "$t" >/dev/null || { echo "missing tool: $t" >&2; exit 1; }; done
@@ -288,8 +289,8 @@ echo "    got harbor host pubkey"
 # allowed to reach those TCP ports inbound (otherwise heartbeat/renew + the console time out:
 # ping works, the HTTP call is dropped). Patch the firewall BEFORE nebula starts. The ports
 # follow CORE_PORT/ADMIN_PORT (passed as argv), so moving the console to 443 stays consistent.
-echo "==> [harbor] open nebula firewall for control-plane ports (core-api $CORE_PORT + console $ADMIN_PORT)"
-rsh "$HB_ID" 'sudo python3 - /etc/nebula/config.yml '"$CORE_PORT $ADMIN_PORT"' <<PY
+echo "==> [harbor] open nebula firewall for control-plane ports (core-api $CORE_PORT + console $ADMIN_PORT + collect-metrics $COLLECT_OBS_PORT)"
+rsh "$HB_ID" 'sudo python3 - /etc/nebula/config.yml '"$CORE_PORT $ADMIN_PORT $COLLECT_OBS_PORT"' <<PY
 import sys
 p = sys.argv[1]
 ports = [int(a) for a in sys.argv[2:]]
@@ -494,7 +495,7 @@ rsh "$HB_ID" "set -e
   # Run AS ec2-user (owns ~/ncp; on the SQLite backend this keeps harbor.db writable by the CLI/console).
   sudo systemd-run --uid=$SSH_USER --gid=$SSH_USER --unit ncp-collect --collect /usr/local/bin/harbor collect -pool '$POOL' \
     $HARBOR_DB_FLAGS -ca-cert \$G/ca.crt $SIGN_BACKEND \
-    -hmac-key ~/ncp/hmac.b64 -lighthouse '$LH' -cloudtrust-db \
+    -hmac-key ~/ncp/hmac.b64 -lighthouse '$LH' -cloudtrust-db -obs-addr $HARBOR_OVERLAY:$COLLECT_OBS_PORT \
     -client-cert ~/ncp/harbor-collect.crt -client-key ~/ncp/harbor-collect.key >/dev/null
   echo registered"
 echo "    gateway registered + collector pulling (attestation enabled)"
