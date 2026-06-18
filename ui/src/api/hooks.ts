@@ -345,3 +345,80 @@ export function useUpdateJoinKey() {
     onSettled: () => qc.invalidateQueries({ queryKey: ['joinkeys'] }),
   })
 }
+
+// --- ADR 0010 IPAM (netblocks, allocations, growth-aware placement) ---
+
+export type Netblock = components['schemas']['Netblock']
+export type NetblockCreate = components['schemas']['NetblockCreateRequest']
+export type NetblockUpdate = components['schemas']['NetblockUpdateRequest']
+export type Allocation = components['schemas']['Allocation']
+
+// The netblock set is tiny (central/default + a handful of carves), so it's a plain
+// list like joinkeys/lighthouses — no paging. The create-overlay derives the pool
+// extent + carves from this same list, so keep it the single source of truth.
+export function useNetblocks() {
+  return useQuery({
+    queryKey: ['netblocks'],
+    queryFn: () => unwrap(api.GET('/admin/v1/ipam/netblocks')),
+  })
+}
+
+// Growth-aware placement suggestion for a /prefix carve. The same Go function is the
+// authoritative submit-time default; this just pre-fills + drives the overlay. Disabled
+// for an out-of-range prefix; a 409 "pool full" surfaces via the query error.
+export function useNetblockSuggest(prefix: number) {
+  return useQuery({
+    queryKey: ['netblock-suggest', prefix],
+    queryFn: () => unwrap(api.GET('/admin/v1/ipam/netblocks/suggest', { params: { query: { prefix } } })),
+    enabled: prefix >= 1 && prefix <= 32,
+    retry: false, // a 409 (no slot of this size) is a real answer, not a transient failure
+  })
+}
+
+// Per-block allocations (overlay/heat data). Enabled only when a block name is given.
+export function useNetblockAllocations(name: string | undefined) {
+  return useQuery({
+    queryKey: ['netblock-allocations', name],
+    queryFn: () => unwrap(api.GET('/admin/v1/ipam/allocations', { params: { query: { netblock: name as string } } })),
+    enabled: !!name,
+  })
+}
+
+// Mutations invalidate the netblock list (and the suggestion, since a carve shifts where
+// the next block lands). onSettled, not onSuccess: a 409/422 still means the world moved.
+// Auth/step-up errors are handled centrally by the MutationCache (main.tsx).
+
+export function useCreateNetblock() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: NetblockCreate) => unwrap(api.POST('/admin/v1/ipam/netblocks', { body })),
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: ['netblocks'] })
+      void qc.invalidateQueries({ queryKey: ['netblock-suggest'] })
+    },
+  })
+}
+
+export function useUpdateNetblock() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ name, body }: { name: string; body: NetblockUpdate }) =>
+      unwrap(api.PATCH('/admin/v1/ipam/netblocks/{name}', { params: { path: { name } }, body })),
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: ['netblocks'] })
+      void qc.invalidateQueries({ queryKey: ['netblock-suggest'] })
+    },
+  })
+}
+
+export function useDeleteNetblock() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (name: string) =>
+      unwrap(api.DELETE('/admin/v1/ipam/netblocks/{name}', { params: { path: { name } } })),
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: ['netblocks'] })
+      void qc.invalidateQueries({ queryKey: ['netblock-suggest'] })
+    },
+  })
+}

@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react'
-import { useCloudTrust, useProposeCloudTrust, type CloudTrust as CloudTrustConfig } from '../api/hooks'
+import { useCloudTrust, useProposeCloudTrust, useNetblocks, type CloudTrust as CloudTrustConfig, type Netblock } from '../api/hooks'
 import { usePermissions } from '../api/perms'
 import { isApiError, isCentrallyHandled } from '../api/errors'
 import { useToast } from '../components/Toast'
@@ -66,7 +66,7 @@ export function CloudTrust() {
               <table className="w-full text-left">
                 <thead className="border-b border-edge text-[11px] uppercase tracking-wide text-ink-faint">
                   <tr>
-                    {['Account', 'Allowed roles (ARN)', 'Groups', 'Admission'].map((h) => (
+                    {['Account', 'Allowed roles (ARN)', 'Groups', 'Netblock', 'Admission'].map((h) => (
                       <th key={h} className="px-4 py-2 font-medium">{h}</th>
                     ))}
                   </tr>
@@ -89,6 +89,9 @@ export function CloudTrust() {
                           {(a.groups ?? []).length === 0 ? <span className="text-ink-faint">—</span> : (a.groups ?? []).map((g) => <Chip key={g}>{g}</Chip>)}
                         </span>
                       </td>
+                      <td className="px-4 py-2 font-mono text-[12px]">
+                        {a.netblock ? <span className="text-ink-dim">{a.netblock}</span> : <span className="text-ink-faint">default</span>}
+                      </td>
                       <td className="px-4 py-2">
                         {a.auto_issue ? <Chip tone="warn">auto-issue</Chip> : <span className="text-ink-dim">manual approval</span>}
                       </td>
@@ -105,7 +108,7 @@ export function CloudTrust() {
 
 const FIELD = 'w-full rounded-[6px] border border-edge bg-mesh-2 px-2 py-1.5 text-[13px] text-ink placeholder:text-ink-faint'
 
-type Row = { account: string; arnPatterns: string; groups: string; autoIssue: boolean }
+type Row = { account: string; arnPatterns: string; groups: string; netblock: string; autoIssue: boolean }
 
 function CloudTrustEditor({ cfg, onClose }: { cfg: CloudTrustConfig; onClose: () => void }) {
   const toast = useToast()
@@ -119,14 +122,15 @@ function CloudTrustEditor({ cfg, onClose }: { cfg: CloudTrustConfig; onClose: ()
           account: a.account,
           arnPatterns: (a.arn_patterns ?? []).join(', '),
           groups: (a.groups ?? []).join(', '),
+          netblock: a.netblock ?? '',
           autoIssue: !!a.auto_issue,
         }))
-      : [{ account: '', arnPatterns: '', groups: '', autoIssue: false }],
+      : [{ account: '', arnPatterns: '', groups: '', netblock: '', autoIssue: false }],
   )
   const [description, setDescription] = useState('')
 
   const setRow = (i: number, patch: Partial<Row>) => setRows(rows.map((r, j) => (j === i ? { ...r, ...patch } : r)))
-  const addRow = () => setRows([...rows, { account: '', arnPatterns: '', groups: '', autoIssue: false }])
+  const addRow = () => setRows([...rows, { account: '', arnPatterns: '', groups: '', netblock: '', autoIssue: false }])
   const removeRow = (i: number) => setRows(rows.filter((_, j) => j !== i))
 
   function submit() {
@@ -136,6 +140,7 @@ function CloudTrustEditor({ cfg, onClose }: { cfg: CloudTrustConfig; onClose: ()
         account: r.account.trim(),
         arn_patterns: splitList(r.arnPatterns),
         groups: splitList(r.groups),
+        netblock: r.netblock,
         auto_issue: r.autoIssue,
       }))
     if (aws.length === 0) {
@@ -229,6 +234,9 @@ function AccountRow({ r, onChange, onRemove }: { r: Row; onChange: (p: Partial<R
         <Labeled label="Groups granted">
           <input value={r.groups} onChange={(e) => onChange({ groups: e.target.value })} placeholder="web, servers" className={FIELD} />
         </Labeled>
+        <Labeled label="Netblock (overlay IP source — ADR 0010)">
+          <NetblockSelect value={r.netblock} onChange={(v) => onChange({ netblock: v })} />
+        </Labeled>
       </div>
       <label className="flex items-center gap-2 text-[13px] text-ink">
         <input type="checkbox" checked={r.autoIssue} onChange={(e) => onChange({ autoIssue: e.target.checked })} /> Auto-issue (skip per-device approval)
@@ -248,6 +256,25 @@ function Labeled({ label, children }: { label: string; children: ReactNode }) {
       <span className="mb-1 block text-[11px] uppercase tracking-wide text-ink-faint">{label}</span>
       {children}
     </label>
+  )
+}
+
+// NetblockSelect — per-scope IPAM binding (ADR 0010). Empty = the default block. A stale
+// binding (a since-removed named block) stays selectable so it's visible, not silently lost.
+function NetblockSelect({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const q = useNetblocks()
+  const named = (q.data?.netblocks ?? []).filter((b: Netblock) => b.kind === 'named')
+  const stale = value && !named.some((b) => b.name === value)
+  return (
+    <select value={value} onChange={(e) => onChange(e.target.value)} className={cx(FIELD, 'font-mono')}>
+      <option value="">Default (the bounded fallback block)</option>
+      {named.map((b) => (
+        <option key={b.name} value={b.name}>
+          {b.name} — {b.cidr}
+        </option>
+      ))}
+      {stale && <option value={value}>{value} (no longer a netblock)</option>}
+    </select>
   )
 }
 

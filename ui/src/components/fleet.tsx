@@ -8,9 +8,12 @@ import {
   useCurrentRollout,
   useApprovals,
   useActivePolicy,
+  useNetblocks,
+  type Netblock,
 } from '../api/hooks'
-import { Card, StateBlock, ErrorState, cx } from './ui'
+import { Card, StateBlock, ErrorState, Chip, cx } from './ui'
 import { fmtDateTime } from '../lib/format'
+import { utilizationTone } from '../lib/ipam'
 import {
   versionCounts,
   expiryBuckets,
@@ -299,6 +302,87 @@ export function RecentActivityCard() {
           </ul>
         ))}
     </Tile>
+  )
+}
+
+// IPAM health (ADR 0010) — per-netblock utilization on the UTILIZATION axis (distinct
+// from the create-overlay's growth-headroom colors): red > 90%, yellow > 75% on the
+// allocated %, with the live used % shown alongside so high-allocated-low-used reads as
+// "reclaim" and high-both as "grow". Over-threshold blocks are listed; healthy ones are
+// summarized. Recent auto-grows / exhaustions are pulled from the audit log (the API has
+// no dedicated grows/exhaustion endpoint — those are audit + Prometheus per the ADR, so
+// we surface the audit side here and note the gap).
+export function IPAMHealthCard() {
+  const q = useNetblocks()
+  const audit = useAudit()
+  const blocks = q.data?.netblocks ?? []
+  // Hot = over the yellow threshold (allocated > 75%), worst first.
+  const hot = [...blocks].filter((b) => b.pct > 75).sort((a, b) => b.pct - a.pct)
+  const events = (audit.data?.entries ?? [])
+    .filter((e) => e.action === 'netblock-autogrow' || e.action === 'netblock-exhausted')
+    .slice(0, 4)
+
+  return (
+    <Tile title="IPAM health" hint="utilization · grows/exhaustion from audit">
+      {q.isPending && <StateBlock kind="loading" message="…" />}
+      {q.isError && <ErrorState error={q.error} fallback="Couldn't load netblocks." />}
+      {q.data &&
+        (blocks.length === 0 ? (
+          <StateBlock kind="empty" message="No netblocks carved yet." />
+        ) : (
+          <div className="flex flex-col gap-3">
+            {hot.length === 0 ? (
+              <div className="flex items-center gap-2 text-[13px] text-permit">
+                <span className="inline-block h-2 w-2 rounded-full bg-permit" aria-hidden />
+                All {blocks.length} netblock{blocks.length === 1 ? '' : 's'} under 75% allocated.
+              </div>
+            ) : (
+              <ul className="flex flex-col gap-2">
+                {hot.map((b) => (
+                  <NetblockHealthRow key={b.name} b={b} />
+                ))}
+              </ul>
+            )}
+            {events.length > 0 && (
+              <div className="border-t border-edge pt-2">
+                <div className="mb-1.5 text-[11px] uppercase tracking-wide text-ink-faint">Recent grows / exhaustion</div>
+                <ul className="flex flex-col gap-1 text-[12px]">
+                  {events.map((e) => (
+                    <li key={e.seq} className="flex items-center gap-2">
+                      {e.action === 'netblock-exhausted' ? (
+                        <Chip tone="danger">exhausted</Chip>
+                      ) : (
+                        <Chip tone="warn">auto-grow</Chip>
+                      )}
+                      <span className="truncate font-mono text-ink-dim">{e.target ?? ''}</span>
+                      <span className="ml-auto shrink-0 text-ink-faint">{fmtDateTime(e.ts)}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        ))}
+    </Tile>
+  )
+}
+
+function NetblockHealthRow({ b }: { b: Netblock }) {
+  const tone = utilizationTone(b.pct)
+  // used % keys off the live (heartbeat-confirmed) count vs capacity; 0 until fleet wiring
+  // (Phase 4 backend) lands, so show it honestly rather than implying a reading we lack.
+  const usedPct = b.capacity > 0 ? (b.used / b.capacity) * 100 : 0
+  return (
+    <li className="flex flex-col gap-1">
+      <div className="flex items-baseline justify-between text-[12px]">
+        <span className="font-mono text-ink">{b.name}</span>
+        <span className="text-ink-faint">
+          <span className={cx('nums', tone === 'danger' ? 'text-danger' : 'text-warn')}>{b.pct.toFixed(1)}%</span> alloc ·{' '}
+          <span className="nums">{usedPct.toFixed(1)}%</span> used
+        </span>
+      </div>
+      <Bar pct={b.pct} tone={tone} />
+    </li>
   )
 }
 

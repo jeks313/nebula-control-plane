@@ -127,3 +127,59 @@ build could proceed; flagged here for review. **D#** = decided-by-default during
     from the store + `-pool` so the live server always has them.
   - **Join-key `sub_range`:** already fully exposed (view + create + update handlers and the
     `JoinKey`/`JoinKeyCreate`/`JoinKeyUpdate` openapi schemas). Confirmed; no change needed (D6).
+- **D19 — Phase-4 admin console UI (IPAM page, live selector, binding selectors, dashboard).**
+  Built against the regenerated `ui/src/api/schema.d.ts` (re-ran `npm --prefix ui run gen:api`),
+  matching the existing console idioms (react-query hooks, `Dialog`/`Card`/`Button`/`Chip`,
+  per-call `onError` + central `MutationCache`, perm-gated controls). Decisions:
+  - **Page + nav + route:** `ui/src/pages/IPAM.tsx`, route `/ipam` in `app.tsx`, nav entry "IPAM"
+    in `Shell.tsx` (placed between Cloud Trust and Policy). Create/edit/delete are gated on
+    `ipam:manage`; the client perms mirror (`ui/src/api/perms.ts`) gains `ipam:manage` for
+    admin (superuser) + operator, matching `rbac.go`. The server still enforces perm + step-up,
+    so a stale mirror can only hide controls, never grant authority.
+  - **Hooks (`ui/src/api/hooks.ts`):** `useNetblocks` (plain list, like joinkeys/lighthouses — the
+    netblock set is tiny), `useNetblockSuggest(prefix)` (enabled only for prefix 1–32; `retry:false`
+    so a 409 "pool full" is treated as a real answer, not a transient failure),
+    `useNetblockAllocations(name)` (enabled only when a name is given), and create/update/delete
+    mutations that `onSettled`-invalidate both `['netblocks']` and `['netblock-suggest']` (a carve
+    shifts where the next block would land).
+  - **"Bound sources" derived client-side (no new API).** The netblock row's bound sources are
+    joined in the browser from the existing join-key list (`sub_range`) and active cloud-trust
+    config (`aws[].netblock`) — the netblock API surfaces no back-references. Shown as chips
+    `key:NAME` / `aws:ACCOUNT`; revoked join-keys are excluded; `default` shows "unbound fallback".
+  - **Live visual selector = a horizontal proportional address-bar (not a 2-D grid).** A pure,
+    unit-tested address-math module (`ui/src/lib/ipam.ts`, with `ipam.test.ts`) computes the
+    overlay segments; `IPAM.tsx` is a thin render. The bar tiles the whole pool by address count;
+    segments are coalesced colored runs. Picking the prefix-size slider re-pulls the `suggest`
+    endpoint and pre-fills the CIDR field (operator can override — `overridden` pins their value,
+    with a "↺ use suggested" reset); the pending carve is overlaid live as purple with its own
+    red/yellow envelope. Guide only — the create call re-validates server-side.
+  - **Pool extent derived from the netblock list** (the API returns no bare pool prefix): the
+    smallest aligned power-of-two CIDR enclosing all blocks. Caveat: free space *above* the highest
+    block is invisible until a block reaches that far — acceptable for a guide, and the server is
+    authoritative on bounds anyway. If a bare-pool field is later added to the API, swap it in.
+  - **The four overlay colors** are explicit `@theme` tokens in `index.css`, deliberately distinct
+    from the status hues (permit/warn/danger) so the *growth-headroom* overlay never reads as a
+    *health* signal: `--color-ipam-green #3fb950` (free+clear, the suggester's target),
+    `--color-ipam-purple #a371f7` (carved /P), `--color-ipam-red #f85149` (immediate doubling buddy
+    — caps the block), `--color-ipam-yellow #d29922` (rest of the growth envelope). Semantics are
+    faithful to the ADR: `MARGIN_BITS=3`, `ENVELOPE_FLOOR=/24`, start-of-envelope placement, so a
+    /27 soft-claims a /24 (red = the next /27, yellow = the remaining six /27s). Yellow is stored
+    as an explicit half-open range, NOT a Cidr — the envelope remainder (e.g. 192 of 256 addresses)
+    isn't a single power-of-two block.
+  - **Binding selectors:** `JoinKeys.tsx` gains a netblock `<select>` bound to `sub_range` (shared
+    create/edit form, plus a read-only "Netblock" table column); `CloudTrust.tsx` gains a per-account
+    netblock `<select>` bound to the new `netblock` field (editor row + table column). Both selects
+    list named netblocks + a "Default (the bounded fallback block)" option (value `''`), and keep a
+    stale binding (a since-removed named block) selectable + labeled rather than silently dropping it.
+  - **Dashboard IPAM health panel derives from the netblock list (no dedicated endpoint).** The
+    panel (`IPAMHealthCard` in `components/fleet.tsx`, added to the Dashboard grid) lists blocks over
+    the *utilization* threshold (red >90%, yellow >75% on the *allocated* %), showing the live
+    *used* % alongside (currently 0 — the heartbeat/`used` wiring is the Phase-4 backend, surfaced
+    honestly). Recent auto-grows / exhaustions are pulled from the audit log by action name
+    (`netblock-autogrow` / `netblock-exhausted`) — the API exposes no dedicated grows/exhaustion
+    endpoint (those are audit + Prometheus per the ADR), and the card hint notes this. This
+    utilization red/yellow is a DIFFERENT axis from the create-overlay's growth-headroom red/yellow
+    (`utilizationTone()` vs the overlay segments), as the ADR calls out.
+  - **Gates:** `tsc --noEmit` clean; `npm run build` succeeds; full vitest suite green (61 tests,
+    incl. the new 15 `ipam.test.ts` cases). No eslint/biome/prettier is configured in the repo, so
+    `tsc` is the static-check gate.

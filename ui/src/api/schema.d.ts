@@ -577,6 +577,76 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/v1/ipam/netblocks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List netblocks with per-block utilization (ADR 0010 IPAM). */
+        get: operations["listNetblocks"];
+        put?: never;
+        /** Carve a new named netblock. Requires ipam:manage + step-up MFA. */
+        post: operations["createNetblock"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/ipam/netblocks/suggest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Growth-aware placement suggestion for a new /N netblock. */
+        get: operations["suggestNetblock"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/ipam/netblocks/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Remove a netblock (protected or in-use blocks are refused). Requires ipam:manage + step-up MFA. */
+        delete: operations["removeNetblock"];
+        options?: never;
+        head?: never;
+        /** Edit a netblock's CIDR/description. Both optional; protected blocks refused. Requires ipam:manage + step-up MFA. */
+        patch: operations["updateNetblock"];
+        trace?: never;
+    };
+    "/admin/v1/ipam/allocations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Allocations within a netblock (overlay/heat data). */
+        get: operations["listIPAMAllocations"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -748,6 +818,8 @@ export interface components {
             groups?: string[];
             /** @description issue immediately vs queue for manual approval */
             auto_issue?: boolean;
+            /** @description named IPAM netblock hosts from this scope draw their overlay IP from (ADR 0010); empty = the default block */
+            netblock?: string;
         };
         CloudTrustActive: {
             published: boolean;
@@ -1011,6 +1083,62 @@ export interface components {
             /** @description the join-key secret — shown ONCE */
             secret: string;
             joinkey: components["schemas"]["JoinKey"];
+        };
+        Netblock: {
+            name: string;
+            /** @description the netblock's IPv4 CIDR, e.g. 10.44.20.0/24 */
+            cidr: string;
+            /** @enum {string} */
+            kind: "reserved" | "default" | "named";
+            description?: string;
+            /** @description central/default cannot be edited or removed */
+            protected: boolean;
+            /** @description usable host count (CIDR size minus the network address) */
+            capacity: number;
+            /** @description current allocations inside the CIDR */
+            allocated: number;
+            /** @description live (heartbeat-confirmed) addresses; 0 until the fleet wiring lands (Phase 4) */
+            used: number;
+            /** @description allocated / capacity * 100 (one decimal) */
+            pct: number;
+            /** Format: date-time */
+            created_at: string;
+            created_by?: string;
+        };
+        NetblockList: {
+            netblocks: components["schemas"]["Netblock"][];
+            count: number;
+        };
+        NetblockCreateRequest: {
+            name: string;
+            /** @description the IPv4 CIDR to carve, e.g. 10.44.20.0/24 */
+            cidr: string;
+            description?: string;
+        };
+        /** @description Both fields optional; an omitted field is left unchanged. Protected (central/default) blocks are refused. */
+        NetblockUpdateRequest: {
+            cidr?: string;
+            description?: string;
+        };
+        NetblockSuggestion: {
+            /** @description the requested prefix length */
+            prefix: number;
+            /** @description a growth-aware placement CIDR for that size */
+            cidr: string;
+        };
+        Allocation: {
+            ip: string;
+            device?: string;
+            /** @description token | aws-sigv4 | sso | genesis */
+            method?: string;
+            /** Format: date-time */
+            allocated_at?: string;
+        };
+        AllocationList: {
+            netblock: string;
+            cidr: string;
+            allocations: components["schemas"]["Allocation"][];
+            count: number;
         };
         EnrollmentView: {
             enrollment_id: string;
@@ -2013,6 +2141,174 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Problem"];
             409: components["responses"]["Problem"];
+        };
+    };
+    listNetblocks: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description All netblocks (central, default, named carves) + utilization. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NetblockList"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    createNetblock: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NetblockCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description The created netblock. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Netblock"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Problem"];
+            409: components["responses"]["Problem"];
+            503: components["responses"]["Problem"];
+        };
+    };
+    suggestNetblock: {
+        parameters: {
+            query: {
+                /** @description requested prefix length (1-32) */
+                prefix: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A suggested CIDR for the requested size. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NetblockSuggestion"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            401: components["responses"]["Unauthorized"];
+            409: components["responses"]["Problem"];
+            503: components["responses"]["Problem"];
+        };
+    };
+    removeNetblock: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Removed. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        name: string;
+                        removed: boolean;
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Problem"];
+            404: components["responses"]["Problem"];
+            409: components["responses"]["Problem"];
+            422: components["responses"]["Problem"];
+            503: components["responses"]["Problem"];
+        };
+    };
+    updateNetblock: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["NetblockUpdateRequest"];
+            };
+        };
+        responses: {
+            /** @description The updated netblock. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Netblock"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Problem"];
+            404: components["responses"]["Problem"];
+            409: components["responses"]["Problem"];
+            422: components["responses"]["Problem"];
+            503: components["responses"]["Problem"];
+        };
+    };
+    listIPAMAllocations: {
+        parameters: {
+            query: {
+                /** @description the netblock name */
+                netblock: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Allocations inside the netblock's CIDR. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AllocationList"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["Problem"];
+            503: components["responses"]["Problem"];
         };
     };
 }
