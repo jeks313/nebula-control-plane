@@ -20,6 +20,7 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/lighthouse"
 	"github.com/jeks313/nebula-control-plane/internal/nebularelease"
 	"github.com/jeks313/nebula-control-plane/internal/nonce"
+	"github.com/jeks313/nebula-control-plane/internal/obs"
 	"github.com/jeks313/nebula-control-plane/internal/pilotrelease"
 	"github.com/jeks313/nebula-control-plane/internal/policy"
 	"github.com/jeks313/nebula-control-plane/internal/queue"
@@ -353,6 +354,7 @@ func cmdCollect(args []string) {
 	interval := fs.Duration("interval", 5*time.Second, "gateway poll interval")
 	batch := fs.Int("batch", 64, "candidates claimed per poll")
 	once := fs.Bool("once", false, "collect a single batch and exit (cron/test)")
+	obsAddr := fs.String("obs-addr", "", "internal listener for /metrics + /healthz + /readyz (e.g. 10.44.0.2:9445); served plaintext over the overlay, empty disables")
 	lf := addLogFlags(fs)
 	_ = fs.Parse(args)
 	log := lf.setup()
@@ -427,6 +429,9 @@ func cmdCollect(args []string) {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	if *obsAddr != "" {
+		obs.Serve(ctx, *obsAddr, log) // /metrics (Go runtime + process) for the collector (Phase 7b)
+	}
 	log.Info("harbor collect running", "mode", mode, "interval", interval.String())
 	_ = coll.Run(ctx, gateways, *interval)
 	log.Info("harbor collect stopped")

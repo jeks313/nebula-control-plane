@@ -77,6 +77,12 @@ variable "gateway_port" {
   default     = 8443
 }
 
+variable "gateway_obs_port" {
+  description = "Internal TCP port the Fargate gateway serves /metrics + /healthz on (-obs-addr), scraped by Prometheus via the internal NLB. Plaintext, NEVER the public enroll port; kept in the gateway task SG NLB-ingress range (gateway_port..collect_port)."
+  type        = number
+  default     = 9091
+}
+
 variable "collect_port" {
   description = "TCP port for the gateway's Harbor-facing collect API (mTLS). Reachable ONLY from Harbor's security group (ADR 0005 — the protected side pulls)."
   type        = number

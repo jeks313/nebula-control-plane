@@ -37,6 +37,7 @@ LH_OVERLAY="${LH_OVERLAY:-10.44.0.1}"
 CORE_PORT="${CORE_PORT:-8444}"
 ADMIN_PORT="${ADMIN_PORT:-443}" # MUST match bootstrap-genesis.sh's ADMIN_PORT default (the console moved to 443); else the admin-api scrape target is a dead port
 LH_STATS_PORT="${LH_STATS_PORT:-4280}"
+COLLECT_OBS_PORT="${COLLECT_OBS_PORT:-9445}" # harbor collect /metrics over the overlay (matches bootstrap-genesis.sh)
 
 for t in terraform jq go ssh scp aws session-manager-plugin; do command -v "$t" >/dev/null || { echo "missing tool: $t" >&2; exit 1; }; done
 [[ -f "$SSH_KEY" ]] || { echo "ssh key not found: $SSH_KEY (set SSH_KEY=...)" >&2; exit 1; }
@@ -56,6 +57,7 @@ HB_ID="$(val '.instance_ids.value.harbor')"
 LH_ID="$(val '.instance_ids.value.lighthouse')"             # EC2 lighthouse (empty when lighthouse_runtime=fargate)
 LIGHTHOUSE_RUNTIME="$(val '.lighthouse_runtime.value')"; LIGHTHOUSE_RUNTIME="${LIGHTHOUSE_RUNTIME:-ec2}"
 GW_URL_INTERNAL="$(val '.gateway_url_internal.value')"
+GW_OBS_ADDR="$(val '.gateway_obs_addr.value')" # Fargate gateway /metrics scrape target (internal NLB:obs-port)
 TF_REGION="$(val '.region.value')"
 # SSH/scp to the (now private) monitoring + harbor nodes ride SSM Session Manager — append the
 # ProxyCommand now that the region is known; rsh/rcp target INSTANCE IDs (MON_ID/HB_ID).
@@ -107,6 +109,12 @@ rsh "$MON_ID" "set -e
 
 # ── 3. render prometheus.yml for this deploy (overlay-IP targets + SNI when TLS) ─
 echo "==> rendering prometheus.yml"
+# Fargate gateway scrape job — only when the gateway_obs_addr output is set (gateway_runtime=fargate).
+GW_SCRAPE=""
+[[ -n "$GW_OBS_ADDR" ]] && GW_SCRAPE="
+  - job_name: gateway
+    static_configs:
+      - targets: [\"$GW_OBS_ADDR\"]"
 cat > "$WORK/prometheus.yml" <<YAML
 global:
   scrape_interval: 30s
@@ -138,6 +146,9 @@ scrape_configs:
   - job_name: node
     static_configs:
       - targets: ["$MON_PRIV:9100"]
+  - job_name: harbor-collect
+    static_configs:
+      - targets: ["$HARBOR_OVERLAY:$COLLECT_OBS_PORT"]$GW_SCRAPE
 YAML
 
 # ── 4. deploy the stack (docker compose) ────────────────────────────────────

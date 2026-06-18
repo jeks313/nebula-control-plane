@@ -302,6 +302,33 @@ resource "aws_lb_listener" "collect" {
   }
 }
 
+# Gateway observability (/metrics) via the INTERNAL NLB — a stable scrape target for Prometheus,
+# since Fargate task IPs are dynamic. Plaintext HTTP obs port (never the public enroll NLB).
+resource "aws_lb_target_group" "gateway_obs" {
+  count       = local.gw_fargate
+  name_prefix = "ncpob-"
+  port        = var.gateway_obs_port
+  protocol    = "TCP"
+  vpc_id      = aws_vpc.main.id
+  target_type = "ip"
+  health_check {
+    protocol = "HTTP"
+    path     = "/healthz"
+    port     = "traffic-port"
+  }
+}
+
+resource "aws_lb_listener" "gateway_obs" {
+  count             = local.gw_fargate
+  load_balancer_arn = aws_lb.gateway_internal[0].arn
+  port              = var.gateway_obs_port
+  protocol          = "TCP"
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.gateway_obs[0].arn
+  }
+}
+
 # ── ECS Fargate cluster / task / service ────────────────────────────────────────
 resource "aws_ecs_cluster" "gateway" {
   count = local.gw_fargate
@@ -333,6 +360,7 @@ resource "aws_ecs_task_definition" "gateway" {
       [
         "-addr", "0.0.0.0:${var.gateway_port}",
         "-collect-addr", "0.0.0.0:${var.collect_port}",
+        "-obs-addr", "0.0.0.0:${var.gateway_obs_port}", # /metrics + /healthz, scraped via the internal NLB
         "-queue-dsn", "/tmp/queue.db?_pragma=busy_timeout(5000)",
       ],
       local.gateway_acme == 1 ? concat(
@@ -446,11 +474,16 @@ resource "aws_ecs_service" "gateway" {
     container_name   = "gateway"
     container_port   = var.collect_port
   }
+  load_balancer {
+    target_group_arn = aws_lb_target_group.gateway_obs[0].arn # Prometheus /metrics (internal)
+    container_name   = "gateway"
+    container_port   = var.gateway_obs_port
+  }
   # The mount target must be `available` before the service schedules a task, or the first
   # Fargate task fails to mount the cert cache (ECS retries, but it churns the rollout). The
   # counted ref is [] when auto-TLS is off, so this is a no-op then.
   depends_on = [
     aws_lb_listener.enroll, aws_lb_listener.enroll_internal, aws_lb_listener.collect,
-    aws_efs_mount_target.gateway_acme,
+    aws_lb_listener.gateway_obs, aws_efs_mount_target.gateway_acme,
   ]
 }
