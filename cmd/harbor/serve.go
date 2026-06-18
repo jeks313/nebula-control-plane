@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
+	"net"
 	"net/http"
 	"net/netip"
 	"os"
@@ -39,10 +41,56 @@ import (
 
 // Harbor long-running services: the mesh-only core-api + admin console commands (split from main.go).
 
+// checkIssuanceBind enforces the ADR 0009 trust-zone invariant for issuance-mode
+// servers (core-api and admin-api both hold the CA — i.e. started with -ca-cert —
+// and bind the overlay). A process that holds issuance authority must refuse to
+// start on an internet-facing address: an internet-facing surface must hold no
+// issuance authority.
+//
+// It is a pure helper (no I/O, no flag access) so it is exhaustively unit-tested.
+//   - issuanceMode is false (no -ca-cert) OR allowPublic is set -> always allowed.
+//   - Otherwise the host parsed from addr is allowed iff it is loopback
+//     (127.0.0.0/8, ::1) OR lies within pool (the overlay CIDR). The unspecified
+//     address (0.0.0.0 / :: / an empty host = all-interfaces, internet-reachable)
+//     and any other non-loopback, non-overlay address are refused.
+func checkIssuanceBind(addr string, pool netip.Prefix, issuanceMode, allowPublic bool) error {
+	if !issuanceMode || allowPublic {
+		return nil
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		// addr may be a bare host with no port; fall back to treating the whole
+		// string as the host so e.g. "0.0.0.0" alone is still evaluated.
+		host = addr
+	}
+	refuse := func(why string) error {
+		return fmt.Errorf("refusing to bind issuance-mode server to %q: %s — ADR 0009: an internet-facing surface must hold no issuance authority; "+
+			"bind loopback (e.g. 127.0.0.1) or the overlay (within %s), or pass -allow-public-issuance to override", addr, why, pool)
+	}
+	if host == "" {
+		return refuse("empty host binds all interfaces (internet-reachable)")
+	}
+	ip, perr := netip.ParseAddr(host)
+	if perr != nil {
+		return refuse(fmt.Sprintf("host is not a parseable IP address (%v)", perr))
+	}
+	switch {
+	case ip.IsLoopback():
+		return nil
+	case ip.IsUnspecified():
+		return refuse("the unspecified address binds all interfaces (internet-reachable)")
+	case pool.Contains(ip):
+		return nil
+	default:
+		return refuse("address is neither loopback nor within the overlay pool")
+	}
+}
+
 func cmdCoreAPI(args []string) {
 	fs := flag.NewFlagSet("core-api", flag.ExitOnError)
 	cf := addCoreFlags(fs)
 	addr := fs.String("addr", ":8444", "listen address (bind to Core's overlay IP in production)")
+	allowPublic := fs.Bool("allow-public-issuance", false, "ADR 0009 override: allow an issuance-mode (-ca-cert) server to bind a non-loopback/non-overlay (internet-facing) address (default false — refuse)")
 	tlsCert := fs.String("tls-cert", "", "TLS certificate PEM (serve HTTPS; recommended even mesh-only)")
 	tlsKey := fs.String("tls-key", "", "TLS private key PEM (with -tls-cert)")
 	acme := autotls.RegisterFlags(fs, "/var/lib/harbor/acme") // auto-TLS via Let's Encrypt (DNS-01)
@@ -75,6 +123,11 @@ func cmdCoreAPI(args []string) {
 	pool, err := netip.ParsePrefix(*cf.pool)
 	if err != nil {
 		fatalf("core-api: bad -pool: %v", err)
+	}
+	// ADR 0009 (Phase 0): core-api always holds the CA (-ca-cert is required above),
+	// so it must refuse an internet-facing bind unless explicitly overridden.
+	if berr := checkIssuanceBind(*addr, pool, *cf.caCert != "", *allowPublic); berr != nil {
+		fatalf("core-api: %v", berr)
 	}
 	caPEM, err := os.ReadFile(*cf.caCert)
 	if err != nil {
@@ -181,6 +234,7 @@ func cmdAdminAPI(args []string) {
 	fs := flag.NewFlagSet("admin-api", flag.ExitOnError)
 	cf := addCoreFlags(fs) // backend/CA/queue flags — present => issuance mode (enroll approve)
 	addr := fs.String("addr", ":8445", "listen address (bind to Core's overlay IP in production)")
+	allowPublic := fs.Bool("allow-public-issuance", false, "ADR 0009 override: allow an issuance-mode (-ca-cert) server to bind a non-loopback/non-overlay (internet-facing) address (default false — refuse)")
 	devAuth := fs.Bool("dev-auth", false, "DEV ONLY: trust the X-Harbor-Dev-Actor header for identity (never in prod)")
 	devRole := fs.String("dev-role", "admin", "role granted to the dev actor")
 	mfaFreshness := fs.Duration("mfa-freshness", 15*time.Minute, "require MFA within this window for privileged actions (dual-control approve, policy publish); 0 disables step-up")
@@ -272,6 +326,12 @@ func cmdAdminAPI(args []string) {
 	pool, perr := netip.ParsePrefix(*cf.pool)
 	if perr != nil {
 		fatalf("admin-api: bad -pool: %v", perr)
+	}
+	// ADR 0009 (Phase 0): in issuance mode (-ca-cert => canIssue, the enroll-approve
+	// path holds the signer) admin-api must refuse an internet-facing bind unless
+	// explicitly overridden — the same invariant core-api enforces.
+	if berr := checkIssuanceBind(*addr, pool, canIssue, *allowPublic); berr != nil {
+		fatalf("admin-api: %v", berr)
 	}
 	alloc, aerr := ipam.NewAllocator(s, ipam.Pool{Prefix: pool})
 	if aerr != nil {
