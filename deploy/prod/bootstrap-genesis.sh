@@ -598,9 +598,12 @@ else
   echo "==> [gateway/fargate] populate the config secret ${NAME_PREFIX}-gateway-config + force the ECS deploy"
   # SSO (ADR 0004) — when enabled, fold the portal material into the SAME config secret as
   # NCP_GW_SSO_* fields (the terraform task def injects each as an env var; cmd/gateway/sso.go
-  # reads them env-first). When SSO is OFF, GW_SSO_JSON is the empty object {} so the resulting
-  # secret is byte-for-byte the pre-SSO five-field object — no behavior change.
-  GW_SSO_JSON='{}'
+  # reads them env-first). When SSO is OFF, GW_SSO_JSON still carries all eight sso_* keys EMPTY:
+  # the task def references them UNCONDITIONALLY (gateway_fargate.tf `secrets`), so every key must
+  # exist in the secret or ECS can't resolve the valueFrom and the task fails to start (a `{}` here
+  # was the cause of the gateway-config drift). Empty => the gateway stays fail-closed-disabled
+  # (cmd/gateway/sso.go: nil Config.SSO unless sso_acs_url is set), so behavior is unchanged.
+  GW_SSO_JSON='{"sso_acs_url":"","sso_entity_id":"","sso_issuer":"","sso_groups_attr":"","sso_idp_metadata":"","sso_assert_key_pem":"","sso_sp_cert_pem":"","sso_sp_key_pem":""}'
   if [[ "$SSO_ENABLED" -eq 1 ]]; then
     GW_SSO_JSON="$(jq -n \
       --rawfile akey "$WORK/sso-assert.key" \
