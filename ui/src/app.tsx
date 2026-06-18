@@ -6,6 +6,7 @@ import { Enrollments } from './pages/Enrollments'
 import { Devices } from './pages/Devices'
 import { JoinKeys } from './pages/JoinKeys'
 import { CloudTrust } from './pages/CloudTrust'
+import { UserTrust } from './pages/UserTrust'
 import { IPAM } from './pages/IPAM'
 import { Policy } from './pages/Policy'
 import { Releases } from './pages/Releases'
@@ -24,6 +25,7 @@ export function App() {
           <Route path="/devices" element={<Devices />} />
           <Route path="/joinkeys" element={<JoinKeys />} />
           <Route path="/cloudtrust" element={<CloudTrust />} />
+          <Route path="/usertrust" element={<UserTrust />} />
           <Route path="/ipam" element={<IPAM />} />
           <Route path="/policy" element={<Policy />} />
           <Route path="/releases" element={<Releases />} />

@@ -12,6 +12,7 @@ export const PERMISSIONS = [
   'policy:propose',
   'approval:decide',
   'cloudtrust:propose',
+  'usertrust:propose',
   'ipam:manage',
 ] as const
 

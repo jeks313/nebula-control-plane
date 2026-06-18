@@ -403,3 +403,48 @@ build are **B#** (appended as phases land). Review at the end.
   `usertrust.Match` resolves and SSO can reach issuance. The ONE deliberate difference from
   cloud-trust remains the read seam (live getter vs build-time snapshot, B8/B15); the publish
   path itself is a line-for-line mirror.
+
+- **B18 — User-trust admin console + SSO provenance surfacing (SSO Phase 2, frontend).**
+  The console half of B17 — the dual-control UI for the user-trust publish path plus the
+  operator-facing view of who SSO-enrolled a host. Mirrors the cloud-trust UI **exactly**
+  (user-trust is a peer page, not a fork). **New page (`ui/src/pages/UserTrust.tsx`),
+  routed at `/usertrust` (`app.tsx`) with a "User Trust" NAV entry (`Shell.tsx`) right after
+  "Cloud Trust".** It is the full-page dual-control editor cloned from `CloudTrust.tsx`:
+  active config (a "published as change #N" banner with the `default_groups` chips + a table
+  of IdP entries) above a "Propose a change" editor that republishes the WHOLE
+  `{default_groups, idp_entries}` config through dual-control (no per-entry patch; takes
+  effect only on a second admin's approval, reviewed in /approvals). Each entry row edits
+  `realm`, `directory_group`, `mesh_groups` (comma list), `auto_issue` (toggle), and a
+  **`NetblockSelect`** (named blocks + "Default", the same local copy CloudTrust/JoinKeys
+  each keep — the codebase keeps one per page rather than a shared component, so this
+  mirrors that). **S3 AD-group uniqueness — UI as the friendly first line.** The editor
+  computes the `(realm, directory_group)` pairs that collide with an EARLIER row
+  (case-sensitive exact realm, matching the server's B16 exact-realm rule), flags the
+  duplicate (later) row with a red border + an inline error, blocks `submit()` with a toast,
+  AND disables the Propose button while any duplicate exists — the server still re-validates
+  at propose (400) and at commit (the `usertrust.publish` committer re-parses), so the UI is
+  the bypassable-but-helpful first line, never the authority. **S4 first-match ordering —
+  visible + reorderable.** Row order IS priority and is preserved into the proposed
+  `idp_entries` array; each row shows its 1-based index and has ▲/▼ move buttons
+  (disabled at the ends, neighbour-swap), and both the active table and the editor carry the
+  label "entries are evaluated top-to-bottom; the first matching group wins". **Perm-gate:**
+  the propose action is gated on `usertrust:propose` via `usePermissions().can(...)`, mirroring
+  how CloudTrust gates on `cloudtrust:propose`; the new perm was added to the client RBAC
+  mirror `ui/src/api/perms.ts` — listed in `PERMISSIONS`, absent from operator's array,
+  granted only by admin's `'*'` — matching the server (`rbac.go`: `PermUserTrustPropose`,
+  admin-only). Defense-in-depth only (the server 403s regardless). **Hooks
+  (`ui/src/api/hooks.ts`):** `useUserTrustActive()` (query, key `['usertrust']`) +
+  `useProposeUserTrust()` (mutation, `onSettled` invalidates `['approvals']`), the line-for-line
+  peers of `useCloudTrust`/`useProposeCloudTrust`; `useApproveChange`'s `onSettled` now also
+  invalidates `['usertrust']` so a committed publish refreshes the active config. Approvals
+  gained a `kindLabel('usertrust.publish') → "User-trust publish"` (peer to cloud-trust).
+  **SSO provenance (`ui/src/components/provenance.tsx`):** a new first-class SSO branch in the
+  shared `JoinedVia` component (used by both Devices and Enrollments). For the SSO case the
+  API records (B6/B7) `attest_provider="sso"`, `attest_account`=issuer/realm,
+  `attest_principal`=email — the generic branch would have rendered an opaque "sso" tag with
+  the email hidden in a tooltip, so SSO now renders explicitly as a permit-toned **"SSO"** chip
+  + the **email inline** + **"@ &lt;issuer&gt;"** beneath it, so an operator sees WHO
+  SSO-enrolled a host. On Devices the provider/issuer remain click-to-filter (the `onFilter`
+  path); on Enrollments they are static. **Gates:** `tsc --noEmit` clean, `npm run build`
+  succeeds, `npm test` 65/65 green; `gen:api` re-run produced no diff (the committed schema
+  already tracked the B17 user-trust types). No Go touched.

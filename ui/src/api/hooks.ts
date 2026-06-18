@@ -12,6 +12,8 @@ export type JoinKeyCreate = components['schemas']['JoinKeyCreate']
 export type JoinKeyCreated = components['schemas']['JoinKeyCreated']
 export type JoinKeyUpdate = components['schemas']['JoinKeyUpdate']
 export type CloudTrustProposeRequest = components['schemas']['CloudTrustProposeRequest']
+export type UserTrustProposeRequest = components['schemas']['UserTrustProposeRequest']
+export type IDPEntry = components['schemas']['IDPEntry']
 export type Lighthouse = components['schemas']['Lighthouse']
 export type RolloutStatus = components['schemas']['RolloutStatus']
 export type RolloutHost = components['schemas']['RolloutHost']
@@ -151,6 +153,17 @@ export function useCloudTrust() {
   })
 }
 
+// --- SSO user-trust config (ADR 0004) — the peer to cloud-trust ---
+
+export type UserTrust = components['schemas']['UserTrustActive']
+
+export function useUserTrustActive() {
+  return useQuery({
+    queryKey: ['usertrust'],
+    queryFn: () => unwrap(api.GET('/admin/v1/usertrust/active')),
+  })
+}
+
 // --- #39 binary releases (nebula + pilot registries + per-lane fleet upgrades) ---
 
 export type ReleasesResponse = components['schemas']['ReleasesResponse']
@@ -219,6 +232,7 @@ export function useApproveChange() {
       void qc.invalidateQueries({ queryKey: ['approval', id] })
       void qc.invalidateQueries({ queryKey: ['policy-active'] })
       void qc.invalidateQueries({ queryKey: ['cloudtrust'] })
+      void qc.invalidateQueries({ queryKey: ['usertrust'] })
     },
   })
 }
@@ -251,6 +265,17 @@ export function useProposeCloudTrust() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (body: CloudTrustProposeRequest) => unwrap(api.POST('/admin/v1/cloudtrust/propose', { body })),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['approvals'] }),
+  })
+}
+
+// User-trust mirrors cloud-trust: the editor proposes a full {default_groups, idp_entries}
+// config (ordered — first-match-wins, S4) through dual-control, reviewed in /approvals.
+// The active config changes only on COMMIT (useApproveChange invalidates ['usertrust']).
+export function useProposeUserTrust() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (body: UserTrustProposeRequest) => unwrap(api.POST('/admin/v1/usertrust/propose', { body })),
     onSettled: () => qc.invalidateQueries({ queryKey: ['approvals'] }),
   })
 }
