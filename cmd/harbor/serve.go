@@ -47,6 +47,7 @@ func cmdCoreAPI(args []string) {
 	tlsKey := fs.String("tls-key", "", "TLS private key PEM (with -tls-cert)")
 	acme := autotls.RegisterFlags(fs, "/var/lib/harbor/acme") // auto-TLS via Let's Encrypt (DNS-01)
 	hostCert := fs.String("host-cert", "", "Core's own Nebula host cert PEM; verified at boot to carry group:control-plane (recommended)")
+	staleAfter := fs.Duration("stale-after", 5*time.Minute, "fleet stale window: an allocation counts as 'used' (ncp_ipam_netblock_used) only while its host heartbeats within this window — keep aligned with admin-api's -stale-after")
 	auditInterval := fs.Duration("audit-verify-interval", time.Hour, "how often to re-verify the audit chain into metrics (0 disables); a tamper raises ncp_audit_verify_tampered_total")
 	lf := addLogFlags(fs)
 	_ = fs.Parse(args)
@@ -97,6 +98,15 @@ func cmdCoreAPI(args []string) {
 		sreg := netblock.New(s.DB, pool, nil, salloc, audit)
 		if _, serr := genesis.BootSeedNetblocks(context.Background(), sreg, pool, netip.Prefix{}, netip.Prefix{}, "boot-seed", log); serr != nil {
 			log.Warn("core-api: boot-seed of central/default netblocks failed; unbound enrollments may error until 'default' exists", "err", serr)
+		}
+		// Scrape-time IPAM utilization gauges (ncp_ipam_netblock_{capacity,allocated,used},
+		// D23) on Core's /metrics. core-api carries -stale-after (default 5m, mirroring
+		// admin-api) and threads it into the collector so ncp_ipam_netblock_used uses the
+		// SAME freshness window in both processes even if an operator overrides it.
+		// RegisterNetblockCollector is idempotent / no-op on a duplicate, so this never
+		// panics (see D23).
+		if rerr := ipam.RegisterNetblockCollector(ipam.NewNetblockCollector(s.DB, sreg, *staleAfter)); rerr != nil {
+			log.Warn("core-api: registering the IPAM netblock collector failed; ncp_ipam_netblock_* gauges will be absent", "err", rerr)
 		}
 	}
 	sg, err := signer.New(signer.Config{
@@ -277,6 +287,17 @@ func cmdAdminAPI(args []string) {
 	// retried next boot, so warn rather than abort startup.
 	if _, err := genesis.BootSeedNetblocks(ctx, nbReg, pool, netip.Prefix{}, netip.Prefix{}, "boot-seed", log); err != nil {
 		log.Warn("admin-api: boot-seed of central/default netblocks failed; unbound enrollments may error until 'default' exists", "err", err)
+	}
+
+	// Scrape-time IPAM utilization gauges (ncp_ipam_netblock_{capacity,allocated,used},
+	// D23): a custom collector reads the registry + store at /metrics, so `used` decays
+	// honestly as hosts go stale. admin-api carries -stale-after, so it uses the SAME
+	// freshness window as its fleet/devices "stale" verdict — "used" and "stale" agree.
+	// RegisterNetblockCollector is a no-op on a second call / duplicate name (no
+	// double-register panic) — see D23. Registered on both core-api and admin-api so the
+	// /metrics each exposes reports correct utilization regardless of which is scraped.
+	if err := ipam.RegisterNetblockCollector(ipam.NewNetblockCollector(s.DB, nbReg, *staleAfter)); err != nil {
+		log.Warn("admin-api: registering the IPAM netblock collector failed; ncp_ipam_netblock_* gauges will be absent", "err", err)
 	}
 
 	api := adminapi.New(adminapi.Config{

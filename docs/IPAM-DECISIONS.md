@@ -176,8 +176,8 @@ build could proceed; flagged here for review. **D#** = decided-by-default during
   - **Dashboard IPAM health panel derives from the netblock list (no dedicated endpoint).** The
     panel (`IPAMHealthCard` in `components/fleet.tsx`, added to the Dashboard grid) lists blocks over
     the *utilization* threshold (red >90%, yellow >75% on the *allocated* %), showing the live
-    *used* % alongside (currently 0 — the heartbeat/`used` wiring is the Phase-4 backend, surfaced
-    honestly). Recent auto-grows / exhaustions are pulled from the audit log by action name
+    *used* % alongside (now wired — see D23; the heartbeat-confirmed `used` count was the Phase-4
+    backend and is live). Recent auto-grows / exhaustions are pulled from the audit log by action name
     (`netblock-autogrow` / `netblock-exhausted`) — the API exposes no dedicated grows/exhaustion
     endpoint (those are audit + Prometheus per the ADR), and the card hint notes this. This
     utilization red/yellow is a DIFFERENT axis from the create-overlay's growth-headroom red/yellow
@@ -244,6 +244,55 @@ build could proceed; flagged here for review. **D#** = decided-by-default during
     an empty table; after the first boot-seed it holds `central` (`/27`, reserved, protected) +
     `default` (kind=default, protected, clear of central); a second invocation (modelling the other
     service booting) reports `seeded=false`, leaves the count at 2, and does not churn the rows.
+
+- **D23 — `used` (live utilization) = fresh-heartbeat ∩ allocated; the per-netblock utilization
+  gauges move to a scrape-time custom collector.** The netblock list + `ncp_ipam_netblock_*` gauges
+  previously reported `used` as a hardcoded `0` (the API) / never set it (the metric), so the
+  dashboard's used-vs-allocated signal was dead. `used` is now computed for real, and the gauges are
+  emitted at scrape time rather than imperatively.
+  - **`used` definition:** an allocation is "used" (live) iff its `overlay_ip` has a heartbeat with
+    `last_seen >= now - StaleAfter` — i.e. the host is NOT stale. The window is the fleet freshness
+    window (`fleet.Thresholds.StaleAfter`, default 5m), so "used" and the fleet/devices "stale"
+    verdict are computed against the SAME threshold and can never disagree. `allocated` = allocations
+    whose IP is in the netblock CIDR; `used` ⊆ `allocated`. The `heartbeats` table is keyed by
+    `overlay_ip` (= the allocated IP), so `used` joins directly to allocations with no device hop.
+  - **API (`internal/adminapi/ipam_ops.go`):** the list handler plucks the fresh overlay-IP set once
+    (`heartbeats WHERE last_seen >= now - StaleAfter`, via `s.cfg.Thresholds.StaleAfter` which `New`
+    defaults to 5m) and, per per-CIDR allocation bucket, counts how many IPs are in that fresh set →
+    fills `NetblockView.Used`. `netblockView` (create/update responses) does the same.
+  - **Gauges → scrape-time collector (`internal/ipam/collector.go`).** The three imperative
+    `promauto` GaugeVecs (`ncp_ipam_netblock_{capacity,allocated,used}`) and `refreshNetblockMetrics`
+    (+ its call site in `Allocate`) are REMOVED. `used`/`allocated` decay between allocation events
+    (a host going stale drops `used` with no alloc to hang an `Inc` on; a quarantine purge drops
+    `allocated`), so an imperative-set gauge is structurally wrong for them. A `NetblockCollector`
+    (a `prometheus.Collector`) computes, per netblock at `Collect` time, capacity (CIDR host count
+    minus the network address, reusing `hostCapacity`), allocated (allocations in CIDR), and used
+    (allocated ∩ fresh heartbeats), reading the store + the netblock set live. It depends on a
+    minimal `ipam.NetblockLister` interface (returning `[]NamedCIDR`) that `*netblock.Registry`
+    implements via a new `NetblockCIDRs` method — avoiding the ipam←netblock import cycle (same
+    pattern as `NetblockResolver`/`allocationLister`).
+  - **The EVENT counters `ncp_ipam_autogrow_total` / `ncp_ipam_exhausted_total` are UNCHANGED**
+    (still imperative `promauto` CounterVecs `Inc`'d at the grow/denial — a counter at a moment is
+    exactly right; only the decaying utilization gauges moved).
+  - **Where it's registered + why:** `ipam.RegisterNetblockCollector` registers the collector on the
+    default Prometheus registry in BOTH long-running servers — `cmd/harbor/serve.go` `cmdAdminAPI`
+    (using its `-stale-after` flag, so the gauge window matches that server's fleet verdict) and
+    `cmdCoreAPI` (no stale flag → the collector defaults a zero window to the fleet-default 5m, the
+    same default admin-api applies). Each is a separate process exposing its own `/metrics` via the
+    `obs.Mount` already wired there, so whichever a Prometheus scrapes reports correct utilization.
+    A failed registration is logged `Warn` (gauges absent), never fatal.
+  - **Dedup / no-panic guard:** registration is wrapped in a process-level `sync.Mutex` + once-flag
+    (`collectorRegDone`) so a second call in the same process is a cheap no-op, and a
+    `prometheus.AlreadyRegisteredError` (duplicate name/collector) is swallowed as success — a
+    process that already allocates (and thus already owns the metric names) cannot panic on register.
+  - **Determinism / nil-safety:** `Collect` runs a few small queries per scrape (fine for the small
+    fleet) and is robust to a nil store/registry or nil receiver (emits nothing, never panics); a
+    transient query error skips that scrape's emission rather than emitting a partial/wrong series.
+  - **Tests:** `adminapi.TestNetblockUsedCountsOnlyFreshHeartbeats` (two allocations in `office`, one
+    fresh + one 10-min-stale heartbeat → API list reports `allocated=2`, `used=1`) and
+    `ipam.TestNetblockCollectorUsedCountsOnlyFresh` (same setup → the collector's
+    `ncp_ipam_netblock_used` series gathered from a registry = 1, `_allocated` = 2, `_capacity` = 255)
+    + `TestNetblockCollectorNilSafe` and `TestRegisterNetblockCollectorDedup` for the guards.
 
 ## Review fixes applied (correctness/robustness, no behavior regressions)
 

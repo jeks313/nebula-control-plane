@@ -369,8 +369,9 @@ export function IPAMHealthCard() {
 
 function NetblockHealthRow({ b }: { b: Netblock }) {
   const tone = utilizationTone(b.pct)
-  // used % keys off the live (heartbeat-confirmed) count vs capacity; 0 until fleet wiring
-  // (Phase 4 backend) lands, so show it honestly rather than implying a reading we lack.
+  // used % keys off the live count vs capacity. `used` is now wired (D23): the backend
+  // counts allocations whose host heartbeats within the fleet stale window (StaleAfter),
+  // so this is heartbeat-confirmed live utilization, not a placeholder.
   const usedPct = b.capacity > 0 ? (b.used / b.capacity) * 100 : 0
   return (
     <li className="flex flex-col gap-1">

@@ -30,7 +30,7 @@ type NetblockView struct {
 	Protected   bool    `json:"protected"`
 	Capacity    int64   `json:"capacity"`  // usable host count (minus the network address)
 	Allocated   int     `json:"allocated"` // current allocations inside the CIDR
-	Used        int     `json:"used"`      // live (heartbeat-confirmed); 0 until Phase 4
+	Used        int     `json:"used"`      // live (heartbeat within the fleet stale window) ⊆ allocated
 	Pct         float64 `json:"pct"`       // allocated/capacity * 100 (one decimal)
 	CreatedAt   string  `json:"created_at"`
 	CreatedBy   string  `json:"created_by,omitempty"`
@@ -128,19 +128,30 @@ func (s *Server) handleNetblocks(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, "load allocations failed", err)
 		return
 	}
+	// One pluck of the FRESH overlay IPs (heartbeat within the fleet stale window): an
+	// allocation is "used" iff its IP is in this set. Same window the fleet uses, so
+	// "used" agrees with the fleet's "stale" verdict (D23). `used` ⊆ `allocated`.
+	fresh, err := s.freshOverlayIPs(ctx)
+	if err != nil {
+		s.fail(w, r, "load heartbeats failed", err)
+		return
+	}
 	out := make([]NetblockView, len(rows))
 	for i, row := range rows {
 		p := row.Prefix()
 		capacity := netblockHostCapacity(p)
-		allocated := 0
+		allocated, used := 0, 0
 		for _, a := range allocIPs {
 			if p.IsValid() && p.Contains(a) {
 				allocated++
+				if fresh[a] {
+					used++
+				}
 			}
 		}
 		out[i] = NetblockView{
 			Name: row.Name, CIDR: row.CIDR, Kind: row.Kind, Description: row.Description,
-			Protected: row.Protected, Capacity: capacity, Allocated: allocated, Used: 0,
+			Protected: row.Protected, Capacity: capacity, Allocated: allocated, Used: used,
 			Pct: pctOf(allocated, capacity), CreatedAt: rfc3339(row.CreatedAt), CreatedBy: row.CreatedBy,
 		}
 	}
@@ -331,6 +342,30 @@ func (s *Server) allocationIPs(ctx context.Context) ([]netip.Addr, error) {
 	return out, nil
 }
 
+// freshOverlayIPs plucks the overlay IPs whose heartbeat is within the fleet stale
+// window (last_seen >= now - StaleAfter) — the fleet's "not stale" set. An allocation
+// is "used" (live) iff its IP is in this set; this uses the SAME window the fleet uses
+// for its stale verdict (s.cfg.Thresholds.StaleAfter, defaulted to 5m in New), so
+// "used" and "stale" never disagree (D23). The heartbeats table is keyed by overlay_ip
+// (= the allocated IP), so this joins directly to allocations with no device hop.
+func (s *Server) freshOverlayIPs(ctx context.Context) (map[netip.Addr]bool, error) {
+	cutoff := s.now().UnixNano() - s.cfg.Thresholds.StaleAfter.Nanoseconds()
+	var ips []string
+	if err := s.cfg.Store.DB.WithContext(ctx).
+		Table("heartbeats").
+		Where("last_seen >= ?", cutoff).
+		Pluck("overlay_ip", &ips).Error; err != nil {
+		return nil, err
+	}
+	out := make(map[netip.Addr]bool, len(ips))
+	for _, str := range ips {
+		if a, err := netip.ParseAddr(str); err == nil {
+			out[a] = true
+		}
+	}
+	return out, nil
+}
+
 // allocRow is a join of ip_allocations + the device name, for the allocations view.
 type allocRow struct {
 	IP          string `gorm:"column:ip"`
@@ -367,21 +402,26 @@ func (s *Server) allocationsIn(ctx context.Context, rng netip.Prefix) ([]Allocat
 }
 
 // netblockView builds the single-row view (used by create/update responses),
-// computing utilization against the live allocations.
+// computing utilization against the live allocations + fresh heartbeats. `used` (live,
+// heartbeat within the fleet stale window) ⊆ `allocated` (D23).
 func (s *Server) netblockView(ctx context.Context, row netblock.Netblock) NetblockView {
 	p := row.Prefix()
 	capacity := netblockHostCapacity(p)
-	allocated := 0
+	allocated, used := 0, 0
 	if ips, err := s.allocationIPs(ctx); err == nil {
+		fresh, _ := s.freshOverlayIPs(ctx) // best-effort; a heartbeat read error leaves used=0
 		for _, a := range ips {
 			if p.IsValid() && p.Contains(a) {
 				allocated++
+				if fresh[a] {
+					used++
+				}
 			}
 		}
 	}
 	return NetblockView{
 		Name: row.Name, CIDR: row.CIDR, Kind: row.Kind, Description: row.Description,
-		Protected: row.Protected, Capacity: capacity, Allocated: allocated, Used: 0,
+		Protected: row.Protected, Capacity: capacity, Allocated: allocated, Used: used,
 		Pct: pctOf(allocated, capacity), CreatedAt: rfc3339(row.CreatedAt), CreatedBy: row.CreatedBy,
 	}
 }

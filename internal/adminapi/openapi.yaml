@@ -1239,7 +1239,7 @@ components:
         protected: { type: boolean, description: "central/default cannot be edited or removed" }
         capacity: { type: integer, description: "usable host count (CIDR size minus the network address)" }
         allocated: { type: integer, description: "current allocations inside the CIDR" }
-        used: { type: integer, description: "live (heartbeat-confirmed) addresses; 0 until the fleet wiring lands (Phase 4)" }
+        used: { type: integer, description: "live addresses: allocations whose host has heartbeated within the fleet stale window (StaleAfter); a subset of allocated, decaying as hosts go stale" }
         pct: { type: number, description: "allocated / capacity * 100 (one decimal)" }
         created_at: { type: string, format: date-time }
         created_by: { type: string }

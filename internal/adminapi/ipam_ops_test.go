@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"testing"
+	"time"
 
 	"github.com/jeks313/nebula-control-plane/internal/adminapi"
 	"github.com/jeks313/nebula-control-plane/internal/ipam"
@@ -298,6 +299,88 @@ func TestIPAMRequiresPerm(t *testing.T) {
 	}
 	if code, _ := req(t, ts, "GET", "/admin/v1/ipam/netblocks/suggest?prefix=27", "carol", nil); code != http.StatusOK {
 		t.Errorf("viewer suggest = %d, want 200", code)
+	}
+}
+
+// TestNetblockUsedCountsOnlyFreshHeartbeats: `used` (live) counts only allocations whose
+// overlay IP has a heartbeat within the fleet stale window — two allocations in a block,
+// one fresh + one stale → used==1, allocated==2 (D23). Uses the same window the fleet
+// uses, so "used" and the fleet's "stale" verdict agree.
+func TestNetblockUsedCountsOnlyFreshHeartbeats(t *testing.T) {
+	s, err := store.Open(store.Config{Driver: "sqlite", DSN: store.DefaultSQLiteDSN(t.TempDir() + "/used.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := migrate.Up(s.DB); err != nil {
+		t.Fatal(err)
+	}
+	audit := func(ctx context.Context, a, ac, tgt, d string) error {
+		_, e := s.AppendAudit(ctx, a, ac, tgt, d)
+		return e
+	}
+	pool := mustPrefix(t, ipamPool)
+	alloc, err := ipam.NewAllocator(s, ipam.Pool{Prefix: pool})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := netblock.New(s.DB, pool, nil, alloc, audit)
+	alloc = alloc.WithResolver(reg)
+	ctx := context.Background()
+	if _, err := reg.Seed(ctx, netblock.NameDefault, mustPrefix(t, "10.44.64.0/18"), netblock.KindDefault, "fallback", "genesis"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reg.Add(ctx, "office", mustPrefix(t, "10.44.20.0/24"), "office", "op"); err != nil {
+		t.Fatal(err)
+	}
+	// Two allocations inside 'office'.
+	freshIP := netip.MustParseAddr("10.44.20.1")
+	staleIP := netip.MustParseAddr("10.44.20.2")
+	if err := alloc.AllocateSpecific(ctx, "host-fresh", freshIP, "token"); err != nil {
+		t.Fatal(err)
+	}
+	if err := alloc.AllocateSpecific(ctx, "host-stale", staleIP, "token"); err != nil {
+		t.Fatal(err)
+	}
+	// Heartbeats: one fresh (now), one stale (well beyond the 5m default window). The
+	// staleAfter window is the New() default (5m), so 10m ago is unambiguously stale.
+	now := time.Now()
+	if err := s.DB.Exec(`INSERT INTO heartbeats (overlay_ip, device_name, last_seen) VALUES (?,?,?)`,
+		freshIP.String(), "host-fresh", now.UnixNano()).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB.Exec(`INSERT INTO heartbeats (overlay_ip, device_name, last_seen) VALUES (?,?,?)`,
+		staleIP.String(), "host-stale", now.Add(-10*time.Minute).UnixNano()).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	srv := adminapi.New(adminapi.Config{
+		Store:     s,
+		Identity:  adminapi.DevHeaderProvider{Roles: []string{"admin"}},
+		Netblocks: reg, Allocator: alloc, Pool: pool,
+	})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	code, list := req(t, ts, "GET", "/admin/v1/ipam/netblocks", "alice", nil)
+	if code != http.StatusOK {
+		t.Fatalf("list status = %d (%v)", code, list)
+	}
+	blocks, _ := list["netblocks"].([]any)
+	var office map[string]any
+	for _, b := range blocks {
+		if m, ok := b.(map[string]any); ok && m["name"] == "office" {
+			office = m
+		}
+	}
+	if office == nil {
+		t.Fatalf("office netblock missing from list: %v", list)
+	}
+	if got := office["allocated"].(float64); got != 2 {
+		t.Errorf("office allocated = %v, want 2", got)
+	}
+	if got := office["used"].(float64); got != 1 {
+		t.Errorf("office used = %v, want 1 (only the fresh heartbeat counts)", got)
 	}
 }
 

@@ -64,7 +64,7 @@ export function IPAM() {
               <table className="w-full text-left">
                 <thead className="border-b border-edge text-[11px] uppercase tracking-wide text-ink-faint">
                   <tr>
-                    {['Name', 'CIDR', 'Kind', 'Bound sources', 'Capacity', 'Allocated', 'Utilization'].map((h) => (
+                    {['Name', 'CIDR', 'Kind', 'Bound sources', 'Capacity', 'Allocated', 'Used', 'Utilization'].map((h) => (
                       <th key={h} className="px-4 py-2 font-medium">{h}</th>
                     ))}
                     {mayManage && <th className="px-4 py-2 text-right font-medium">Actions</th>}
@@ -103,6 +103,12 @@ function NetblockRow({ b, sources, mayManage }: { b: Netblock; sources: string[]
       </td>
       <td className="nums px-4 py-2 text-ink-dim">{b.capacity.toLocaleString()}</td>
       <td className="nums px-4 py-2 text-ink-dim">{b.allocated.toLocaleString()}</td>
+      <td
+        className="nums px-4 py-2 text-ink-dim"
+        title="Live: allocations whose host has heartbeated within the fleet stale window"
+      >
+        {b.used.toLocaleString()}
+      </td>
       <td className="px-4 py-2">
         <div className="flex items-center gap-2">
           <UtilBar pct={b.pct} tone={tone} />
