@@ -5,18 +5,32 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net/netip"
 	"time"
 
 	"github.com/jeks313/nebula-control-plane/internal/cloudtrust"
 	"github.com/jeks313/nebula-control-plane/internal/coreapi"
 	"github.com/jeks313/nebula-control-plane/internal/dualcontrol"
 	"github.com/jeks313/nebula-control-plane/internal/enrollment"
+	"github.com/jeks313/nebula-control-plane/internal/genesis"
+	"github.com/jeks313/nebula-control-plane/internal/ipam"
 	"github.com/jeks313/nebula-control-plane/internal/joinkey"
 	"github.com/jeks313/nebula-control-plane/internal/lighthouse"
+	"github.com/jeks313/nebula-control-plane/internal/netblock"
 	"github.com/jeks313/nebula-control-plane/internal/policy"
 	"github.com/jeks313/nebula-control-plane/internal/rollout"
 	"github.com/jeks313/nebula-control-plane/internal/store/migrate"
+	"github.com/jeks313/nebula-control-plane/internal/usertrust"
 	"gorm.io/gorm/clause"
+)
+
+// Demo IPAM + SSO constants — the overlay pool the fleet + netblocks live in (the
+// admin-api default), the SSO issuer/realm the demo IdP asserts, and the provider
+// discriminator the SSO enroll path stamps on its evidence (internal/enrollment).
+const (
+	demoPoolCIDR = "100.64.0.0/16"
+	ssoIssuer    = "https://idp.demo.hyde.ca"
+	ssoProvider  = "sso"
 )
 
 // cmdSeedDemo populates a store with a believable synthetic fleet so the web console
@@ -85,7 +99,9 @@ func cmdSeedDemo(args []string) {
 	// issued fleet enrollments below can carry join_key_id (the device-provenance link).
 	jkIDs := map[string]int64{}
 	for _, p := range []joinkey.Params{
-		{Name: "laptops-2026", Groups: []string{"laptops"}, MaxUses: 50, TTL: 30 * 24 * time.Hour, QuotaPerHour: 10},
+		// SubRange binds the key to a named netblock (the office key -> office-vpn), so the
+		// JoinKeys UI binding selector shows a real binding (and hosts cluster there).
+		{Name: "laptops-2026", Groups: []string{"laptops"}, SubRange: "office-vpn", MaxUses: 50, TTL: 30 * 24 * time.Hour, QuotaPerHour: 10},
 		{Name: "ci-runners", Groups: []string{"ci", "ephemeral"}, MaxUses: 0, AutoIssue: true, Ephemeral: true},
 		{Name: "datacenter-iad", Groups: []string{"servers", "iad"}, MaxUses: 200, TTL: 90 * 24 * time.Hour},
 	} {
@@ -173,8 +189,10 @@ func cmdSeedDemo(args []string) {
 	ctCfg := cloudtrust.Config{
 		DefaultGroups: []string{"fleet"},
 		AWS: []cloudtrust.AWSAccount{
-			{Account: "111122223333", ARNPatterns: []string{"arn:aws:sts::111122223333:assumed-role/web-*/*"}, Groups: []string{"web"}, AutoIssue: true},
-			{Account: "444455556666", Groups: []string{"db"}}, // manual approval
+			// Netblock binds the prod account to the aws-prod netblock (ADR 0010), so the
+			// CloudTrust UI binding selector shows a real per-scope IPAM binding.
+			{Account: "111122223333", ARNPatterns: []string{"arn:aws:sts::111122223333:assumed-role/web-*/*"}, Groups: []string{"web"}, AutoIssue: true, Netblock: "aws-prod"},
+			{Account: "444455556666", Groups: []string{"db"}}, // manual approval, draws from default
 		},
 	}
 	payload, _ := json.Marshal(ctCfg)
@@ -206,6 +224,164 @@ func cmdSeedDemo(args []string) {
 		fatalf("seed pending policy: %v", err)
 	}
 
+	// ── IPAM (ADR 0010): netblocks, allocations, and a published SSO user-trust config ──
+	//
+	// seed-demo does not run genesis, so the genesis-seeded 'central'/'default' netblocks
+	// are absent. Seed them the same way genesis would (SeedNetblocks — the shared
+	// chokepoint), then carve a few NAMED blocks the fleet clusters into. The pool MUST
+	// match the admin-api default (so the same DSN's IPAM UI agrees), and the named CIDRs
+	// MUST be clear of central (the pool's first /27) — see seedHeartbeats' IP layout.
+	pool := netip.MustParsePrefix(demoPoolCIDR)
+	nbAlloc, err := ipam.NewAllocator(s, ipam.Pool{Prefix: pool})
+	if err != nil {
+		fatalf("seed ipam allocator: %v", err)
+	}
+	nbReg := netblock.New(s.DB, pool, nil, nbAlloc, audit)
+	if _, _, err := genesis.SeedNetblocks(ctx, nbReg, pool, netip.Prefix{}, netip.Prefix{}, "chris@hyde.ca"); err != nil {
+		fatalf("seed netblocks (central+default): %v", err)
+	}
+	for _, nb := range []struct{ name, cidr, desc string }{
+		{"office-vpn", "100.64.10.0/24", "corporate VPN laptops (token join key)"},
+		{"aws-prod", "100.64.20.0/24", "AWS prod EC2 fleet (aws-sigv4 attest)"},
+		{"sso-eng", "100.64.30.0/24", "SSO platform-engineering hosts"},
+		{"sso-contractors", "100.64.40.0/27", "SSO contractor hosts (small, near-exhausted)"},
+	} {
+		if _, err := nbReg.Add(ctx, nb.name, netip.MustParsePrefix(nb.cidr), nb.desc, "chris@hyde.ca"); err != nil {
+			fatalf("seed netblock %s: %v", nb.name, err)
+		}
+	}
+
+	// netblock_id lookup so allocation provenance carries the right block.
+	nbID := map[string]int64{}
+	for _, name := range []string{"central", "default", "office-vpn", "aws-prod", "sso-eng", "sso-contractors"} {
+		row, gerr := nbReg.Get(ctx, name)
+		if gerr != nil {
+			fatalf("seed netblock lookup %s: %v", name, gerr)
+		}
+		nbID[name] = row.ID
+	}
+
+	// ip_allocations with provenance (netblock_id + method). A device row is created for
+	// each so the allocation has an owner; the IPAM page joins allocation IP -> heartbeat
+	// to compute `used` (allocated ∩ fresh heartbeat). We write rows DIRECTLY (not via the
+	// allocator) so we can place specific IPs and drive utilization to chosen levels.
+	seedAlloc := func(ip string, netblockID int64, method string) {
+		var dev ipam.Device
+		// One device per allocation (FirstOrCreate keyed on the synthetic name).
+		if err := s.DB.WithContext(ctx).
+			Where(ipam.Device{Name: "dev-" + ip}).
+			Attrs(ipam.Device{CreatedAt: now.UnixNano()}).
+			FirstOrCreate(&dev).Error; err != nil {
+			fatalf("seed alloc device %s: %v", ip, err)
+		}
+		row := ipam.Allocation{
+			IP: ip, DeviceID: dev.ID, State: "allocated",
+			AllocatedAt: now.UnixNano(), NetblockID: netblockID, Method: method,
+		}
+		if err := s.DB.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&row).Error; err != nil {
+			fatalf("seed allocation %s: %v", ip, err)
+		}
+	}
+
+	// 1) Control plane in 'central' (.1 lighthouse, .2 core), method=genesis.
+	seedAlloc("100.64.0.1", nbID["central"], "genesis")
+	seedAlloc("100.64.0.2", nbID["central"], "genesis")
+
+	// 2) Fleet allocations matching the heartbeat IPs (used = allocated ∩ fresh heartbeat
+	//    is non-zero, clustered by join source). office-vpn + aws-prod are well-used
+	//    (grow), sso-eng is well-used AND pushed to ~80% alloc (yellow + grow), the
+	//    'default' tail-end hosts draw from default.
+	for _, f := range []struct {
+		ip, block, method string
+	}{
+		{"100.64.10.11", "office-vpn", "token"}, {"100.64.10.12", "office-vpn", "token"},
+		{"100.64.10.13", "office-vpn", "token"}, {"100.64.10.14", "office-vpn", "token"},
+		{"100.64.20.15", "aws-prod", "aws-sigv4"}, {"100.64.20.16", "aws-prod", "aws-sigv4"},
+		{"100.64.20.17", "aws-prod", "aws-sigv4"}, {"100.64.20.18", "aws-prod", "aws-sigv4"},
+		{"100.64.30.19", "sso-eng", "sso"}, {"100.64.30.20", "sso-eng", "sso"},
+		{"100.64.30.21", "sso-eng", "sso"}, {"100.64.30.22", "sso-eng", "sso"},
+		{"100.64.64.23", "default", "token"}, {"100.64.64.24", "default", "token"},
+	} {
+		seedAlloc(f.ip, nbID[f.block], f.method)
+	}
+	// The aws-prod issued ec2-db-02 host (no heartbeat) — allocated, not "used".
+	seedAlloc("100.64.20.30", nbID["aws-prod"], "aws-sigv4")
+
+	// 3) Bulk filler to drive the IPAM health card to red/yellow/green:
+	//    - sso-eng (/24, cap 255): fill to ~80% allocated => YELLOW. The 4 SSO hosts above
+	//      are heartbeat-confirmed, so it's "high alloc + meaningful used" = a GROW signal.
+	//    - sso-contractors (/27, cap 31): fill to >90% allocated => RED, with NO fresh
+	//      heartbeats, so used ~0 = a RECLAIM signal.
+	//    office-vpn/aws-prod stay green (well under 75%), with healthy `used` from the fleet.
+	// sso-eng /24 (cap 255): 4 fleet hosts (.19-.22) + filler .50-.249 (200) = 204
+	// allocated => 204/255 ≈ 80.0% (YELLOW). The 4 fleet hosts are fresh, so used is
+	// meaningful (high alloc + real used = a GROW signal, not idle space).
+	for i := 50; i < 250; i++ {
+		seedAlloc(fmt.Sprintf("100.64.30.%d", i), nbID["sso-eng"], "sso")
+	}
+	// sso-contractors /27 (cap 31): allocate .1-.30 (30) => 30/31 ≈ 96.8% RED, no heartbeats.
+	for i := 1; i <= 30; i++ {
+		seedAlloc(fmt.Sprintf("100.64.40.%d", i), nbID["sso-contractors"], "sso")
+	}
+
+	// SSO user-trust config (ADR 0004): published via dual-control exactly like the
+	// cloud-trust config above (propose + approve by distinct actors so it commits and
+	// becomes the ACTIVE config the User Trust page renders). Ordered IDPEntries with
+	// first-match precedence; AD-group uniqueness holds (distinct directory_group per
+	// realm). auto_issue=false on both so the SSO enroll path queues for approval (S8).
+	usertrust.RegisterCommitter(dc)
+	utCfg := usertrust.Config{
+		DefaultGroups: []string{"users"},
+		IDPEntries: []usertrust.IDPEntry{
+			{Realm: ssoIssuer, DirectoryGroup: "AD-Platform-Engineering", MeshGroups: []string{"eng", "platform"}, Netblock: "sso-eng", AutoIssue: false},
+			{Realm: ssoIssuer, DirectoryGroup: "AD-Contractors", MeshGroups: []string{"contractors"}, Netblock: "sso-contractors", AutoIssue: false},
+		},
+	}
+	utPayload, _ := json.Marshal(utCfg)
+	utCh, err := dc.Propose(ctx, usertrust.PublishKind, "demo IdP user-trust", utPayload, "chris@hyde.ca")
+	if err != nil {
+		fatalf("seed user-trust propose: %v", err)
+	}
+	if _, err := dc.Approve(ctx, utCh.ID, "ops@hyde.ca"); err != nil {
+		fatalf("seed user-trust approve: %v", err)
+	}
+
+	// A pending SSO enrollment so the Approvals queue shows an SSO enrollment to approve,
+	// mirroring the SSO enroll path's evidence (provider=sso, account=issuer,
+	// principal=email, region=JSON IdP groups). A contractor (manual approval, S8).
+	ssoGroupsJSON, _ := json.Marshal([]string{"AD-Contractors"})
+	pendingTS := now.Add(-4 * time.Minute).UnixNano()
+	ssoPending := enrollment.Enrollment{
+		EnrollmentID:    "enr-sso-001",
+		DeviceName:      "contractor-vm-01",
+		PubkeyHash:      fmt.Sprintf("%064x", 300),
+		Method:          "oidc", // wire method; provenance/provider is "sso" (B7)
+		Groups:          `["contractors","users"]`,
+		Status:          enrollment.StatusPending,
+		CreatedAt:       pendingTS,
+		AttestProvider:  ssoProvider,
+		AttestAccount:   ssoIssuer,
+		AttestPrincipal: "morgan.contractor@hyde.ca",
+		AttestRegion:    string(ssoGroupsJSON),
+		VerifiedAt:      pendingTS,
+	}
+	if err := s.DB.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&ssoPending).Error; err != nil {
+		fatalf("seed pending sso enrollment: %v", err)
+	}
+
+	// IPAM event-trail audit entries so the dashboard's "recent grows / exhaustion" panel
+	// isn't empty (it filters audit for these two actions). These mirror what the
+	// allocator/registry emit at runtime (netblock.Grow -> netblock-autogrow; an
+	// exhausted block -> netblock-exhausted).
+	for _, a := range []struct{ actor, action, target, detail string }{
+		{"ipam-autogrow", "netblock-autogrow", "office-vpn", `{"cidr":"100.64.10.0/23"}`},
+		{"system", "netblock-exhausted", "sso-contractors", `{"reason":"buddy occupied, non-growing"}`},
+	} {
+		if err := audit(ctx, a.actor, a.action, a.target, a.detail); err != nil {
+			fatalf("seed ipam audit: %v", err)
+		}
+	}
+
 	// Attested enrollments (aws-sigv4) carrying provider evidence — what the UI renders
 	// for cloud-attested hosts.
 	for i, a := range []struct {
@@ -213,7 +389,7 @@ func cmdSeedDemo(args []string) {
 		groups                         []string
 	}{
 		{"ec2-web-01", enrollment.StatusPending, "111122223333", "arn:aws:sts::111122223333:assumed-role/web-prod/i-0abc", "", []string{"fleet", "web"}},
-		{"ec2-db-02", enrollment.StatusIssued, "444455556666", "arn:aws:sts::444455556666:assumed-role/db/i-0def", "100.64.0.30", []string{"fleet", "db"}},
+		{"ec2-db-02", enrollment.StatusIssued, "444455556666", "arn:aws:sts::444455556666:assumed-role/db/i-0def", "100.64.20.30", []string{"fleet", "db"}},
 	} {
 		groups, _ := json.Marshal(a.groups)
 		ts := now.Add(-time.Duration(i+1) * 7 * time.Minute).UnixNano()
@@ -249,24 +425,31 @@ func cmdSeedDemo(args []string) {
 		nameByIP[d.OverlayIP] = d.DeviceName
 	}
 	type prov struct {
-		ip, method, joinKey, account, arn, region string
-		groups                                    []string
+		// For aws-sigv4: account/arn/region are the STS evidence. For sso: account is
+		// the IdP issuer, principal is the user email, region carries the IdP-asserted
+		// directory groups as JSON (exactly how the SSO enroll path records evidence).
+		ip, method, joinKey, account, arn, principal, region string
+		groups                                               []string
 	}
 	provs := []prov{
-		{ip: "100.64.0.11", method: "aws-sigv4", account: "111122223333", arn: "arn:aws:sts::111122223333:assumed-role/web-prod/i-011", region: "eu-central-1", groups: []string{"fleet", "web"}},
-		{ip: "100.64.0.12", method: "aws-sigv4", account: "111122223333", arn: "arn:aws:sts::111122223333:assumed-role/web-prod/i-012", region: "eu-central-1", groups: []string{"fleet", "web"}},
-		{ip: "100.64.0.13", method: "token", joinKey: "datacenter-iad", groups: []string{"servers", "iad"}},
-		{ip: "100.64.0.14", method: "token", joinKey: "datacenter-iad", groups: []string{"servers", "iad"}},
-		{ip: "100.64.0.15", method: "token", joinKey: "datacenter-iad", groups: []string{"servers", "iad"}},
-		{ip: "100.64.0.16", method: "token", joinKey: "datacenter-iad", groups: []string{"servers", "iad"}},
-		{ip: "100.64.0.17", method: "aws-sigv4", account: "444455556666", arn: "arn:aws:sts::444455556666:assumed-role/db/i-017", region: "ap-southeast-1", groups: []string{"fleet", "db"}},
-		{ip: "100.64.0.18", method: "aws-sigv4", account: "444455556666", arn: "arn:aws:sts::444455556666:assumed-role/db/i-018", region: "ap-southeast-1", groups: []string{"fleet", "db"}},
-		{ip: "100.64.0.19", method: "token", joinKey: "laptops-2026", groups: []string{"laptops"}},
-		{ip: "100.64.0.20", method: "token", joinKey: "laptops-2026", groups: []string{"laptops"}},
-		{ip: "100.64.0.21", method: "aws-sigv4", account: "111122223333", arn: "arn:aws:sts::111122223333:assumed-role/web-prod/i-021", region: "eu-central-1", groups: []string{"fleet", "web"}},
-		{ip: "100.64.0.22", method: "aws-sigv4", account: "111122223333", arn: "arn:aws:sts::111122223333:assumed-role/web-prod/i-022", region: "eu-central-1", groups: []string{"fleet", "web"}},
-		{ip: "100.64.0.23", method: "token", joinKey: "datacenter-iad", groups: []string{"servers", "iad"}},
-		{ip: "100.64.0.24", method: "token", joinKey: "ci-runners", groups: []string{"ci", "ephemeral"}},
+		// office-vpn (100.64.10.0/24) — token via the office (laptops-2026) join key.
+		{ip: "100.64.10.11", method: "token", joinKey: "laptops-2026", groups: []string{"laptops"}},
+		{ip: "100.64.10.12", method: "token", joinKey: "laptops-2026", groups: []string{"laptops"}},
+		{ip: "100.64.10.13", method: "token", joinKey: "laptops-2026", groups: []string{"laptops"}},
+		{ip: "100.64.10.14", method: "token", joinKey: "laptops-2026", groups: []string{"laptops"}},
+		// aws-prod (100.64.20.0/24) — aws-sigv4.
+		{ip: "100.64.20.15", method: "aws-sigv4", account: "111122223333", arn: "arn:aws:sts::111122223333:assumed-role/web-prod/i-015", region: "eu-central-1", groups: []string{"fleet", "web"}},
+		{ip: "100.64.20.16", method: "aws-sigv4", account: "111122223333", arn: "arn:aws:sts::111122223333:assumed-role/web-prod/i-016", region: "eu-central-1", groups: []string{"fleet", "web"}},
+		{ip: "100.64.20.17", method: "aws-sigv4", account: "444455556666", arn: "arn:aws:sts::444455556666:assumed-role/db/i-017", region: "ap-southeast-1", groups: []string{"fleet", "db"}},
+		{ip: "100.64.20.18", method: "aws-sigv4", account: "444455556666", arn: "arn:aws:sts::444455556666:assumed-role/db/i-018", region: "ap-southeast-1", groups: []string{"fleet", "db"}},
+		// sso-eng (100.64.30.0/24) — SSO-attested (provider=sso); see the SSO block below.
+		{ip: "100.64.30.19", method: "sso", account: ssoIssuer, principal: "alex.eng@hyde.ca", region: `["AD-Platform-Engineering"]`, groups: []string{"eng", "platform", "users"}},
+		{ip: "100.64.30.20", method: "sso", account: ssoIssuer, principal: "blair.eng@hyde.ca", region: `["AD-Platform-Engineering"]`, groups: []string{"eng", "platform", "users"}},
+		{ip: "100.64.30.21", method: "sso", account: ssoIssuer, principal: "casey.eng@hyde.ca", region: `["AD-Platform-Engineering"]`, groups: []string{"eng", "platform", "users"}},
+		{ip: "100.64.30.22", method: "sso", account: ssoIssuer, principal: "devon.eng@hyde.ca", region: `["AD-Platform-Engineering"]`, groups: []string{"eng", "platform", "users"}},
+		// 'default' bounded fallback (100.64.64.0/18) — datacenter + ci join keys.
+		{ip: "100.64.64.23", method: "token", joinKey: "datacenter-iad", groups: []string{"servers", "iad"}},
+		{ip: "100.64.64.24", method: "token", joinKey: "ci-runners", groups: []string{"ci", "ephemeral"}},
 	}
 	for i, p := range provs {
 		groups, _ := json.Marshal(p.groups)
@@ -283,9 +466,19 @@ func cmdSeedDemo(args []string) {
 			DecidedAt:    ts,
 			Approver:     "ops@hyde.ca",
 		}
-		if p.method == "token" {
+		switch p.method {
+		case "token":
 			row.JoinKeyID = jkIDs[p.joinKey]
-		} else {
+		case "sso":
+			// Mirror the SSO enroll path's evidence: provider=sso, account=issuer,
+			// principal=email, region=JSON-encoded IdP groups. So the Devices/Enrollments
+			// pages render "SSO — email @ issuer" provenance for these hosts.
+			row.AttestProvider = ssoProvider
+			row.AttestAccount = p.account
+			row.AttestPrincipal = p.principal
+			row.AttestRegion = p.region
+			row.VerifiedAt = ts
+		default: // aws-sigv4
 			row.AttestProvider = cloudtrust.ProviderAWS
 			row.AttestAccount = p.account
 			row.AttestPrincipal = p.arn
@@ -297,12 +490,26 @@ func cmdSeedDemo(args []string) {
 		}
 	}
 
-	fmt.Printf("seeded demo fleet: %d devices (each with provenance), 3 lighthouses, 3 join keys, %d issued + 5 queued/decided enrollments (pending + denied), 1 active rollout (v43 canary), a published cloud-trust config + policy, and 1 pending policy change awaiting approval\n", len(devices), len(provs)+1)
+	fmt.Printf("seeded demo fleet: %d devices (each with provenance), 3 lighthouses, 3 join keys (office key -> office-vpn netblock), "+
+		"%d issued + 5 queued/decided enrollments (pending + denied), 1 active rollout (v43 canary), "+
+		"a published cloud-trust config (aws-prod binding) + policy + 1 pending policy change; "+
+		"IPAM: central+default + 4 named netblocks (sso-eng ~80%% yellow, sso-contractors >90%% red), "+
+		"~240 ip_allocations with netblock+method provenance; "+
+		"a published SSO user-trust config (2 IdP entries) + 4 issued SSO enrollments + 1 pending SSO enrollment to approve\n",
+		len(devices), len(provs)+1)
 }
 
 // seedHeartbeats builds a believable ~14-host fleet whose facts drive the dashboard:
 // a couple of certs near the cliff, one stale host, one clock-skewed, one unhealthy,
 // a version spread, and a bundle-version spread (most on v42, the v43 canary leading).
+//
+// The overlay IPs are laid out so each host falls inside one of the demo's named
+// netblocks (seeddemo's IPAM seeding): office-vpn (100.64.10.0/24), aws-prod
+// (100.64.20.0/24), sso-eng (100.64.30.0/24), and a couple in the bounded 'default'
+// block (100.64.64.0/18). Allocation rows for these same IPs are seeded later, so the
+// IPAM page's `used` (allocated ∩ fresh heartbeat) is non-zero and clusters by join
+// source — they MUST stay out of 'central' (100.64.0.0/27), which only holds the
+// lighthouse/core control-plane IPs.
 func seedHeartbeats(now time.Time) []coreapi.Heartbeat {
 	type spec struct {
 		name, ip, pilot, nebula, health string
@@ -312,20 +519,24 @@ func seedHeartbeats(now time.Time) []coreapi.Heartbeat {
 		clockMs                         int
 	}
 	specs := []spec{
-		{"edge-fra-01", "100.64.0.11", "1.4.0", "1.10.3", "ok", 43, 27, 25 * time.Second, 40},
-		{"edge-fra-02", "100.64.0.12", "1.4.0", "1.10.3", "ok", 43, 31, 30 * time.Second, 55},
-		{"db-iad-01", "100.64.0.13", "1.4.0", "1.10.3", "ok", 42, 5, 20 * time.Second, 30}, // expiring (<7d)
-		{"db-iad-02", "100.64.0.14", "1.3.2", "1.10.3", "ok", 42, 3, 35 * time.Second, 60}, // expiring (<7d)
-		{"app-iad-01", "100.64.0.15", "1.4.0", "1.10.3", "ok", 42, 22, 40 * time.Second, 20},
-		{"app-iad-02", "100.64.0.16", "1.4.0", "1.10.3", "degraded", 42, 26, 45 * time.Second, 35}, // unhealthy
-		{"gw-sin-01", "100.64.0.17", "1.4.0", "1.10.3", "ok", 42, 48, 28 * time.Second, 8200},      // clock-skewed
-		{"gw-sin-02", "100.64.0.18", "1.3.2", "1.9.0", "ok", 42, 52, 22 * time.Minute, 70},         // stale (>5m)
-		{"edge-syd-02", "100.64.0.19", "1.4.0", "1.10.3", "ok", 42, 40, 30 * time.Second, 25},
-		{"edge-syd-03", "100.64.0.20", "1.4.0", "1.10.3", "ok", 42, 44, 33 * time.Second, 45},
-		{"app-fra-01", "100.64.0.21", "1.4.0", "1.10.3", "ok", 42, 19, 26 * time.Second, 50},
-		{"app-fra-02", "100.64.0.22", "1.4.0", "1.10.3", "ok", 42, 58, 24 * time.Second, 15},
-		{"db-sin-01", "100.64.0.23", "1.3.2", "1.10.3", "ok", 42, 36, 38 * time.Second, 65},
-		{"worker-iad-01", "100.64.0.24", "1.4.0", "1.10.3", "ok", 42, 50, 29 * time.Second, 33},
+		// office-vpn (token via the office join key).
+		{"edge-fra-01", "100.64.10.11", "1.4.0", "1.10.3", "ok", 43, 27, 25 * time.Second, 40},
+		{"edge-fra-02", "100.64.10.12", "1.4.0", "1.10.3", "ok", 43, 31, 30 * time.Second, 55},
+		{"db-iad-01", "100.64.10.13", "1.4.0", "1.10.3", "ok", 42, 5, 20 * time.Second, 30}, // expiring (<7d)
+		{"db-iad-02", "100.64.10.14", "1.3.2", "1.10.3", "ok", 42, 3, 35 * time.Second, 60}, // expiring (<7d)
+		// aws-prod (aws-sigv4).
+		{"app-iad-01", "100.64.20.15", "1.4.0", "1.10.3", "ok", 42, 22, 40 * time.Second, 20},
+		{"app-iad-02", "100.64.20.16", "1.4.0", "1.10.3", "degraded", 42, 26, 45 * time.Second, 35}, // unhealthy
+		{"gw-sin-01", "100.64.20.17", "1.4.0", "1.10.3", "ok", 42, 48, 28 * time.Second, 8200},      // clock-skewed
+		{"gw-sin-02", "100.64.20.18", "1.3.2", "1.9.0", "ok", 42, 52, 22 * time.Minute, 70},         // stale (>5m)
+		// sso-eng (SSO via the demo IdP) — back the issued SSO enrollments below.
+		{"edge-syd-02", "100.64.30.19", "1.4.0", "1.10.3", "ok", 42, 40, 30 * time.Second, 25},
+		{"edge-syd-03", "100.64.30.20", "1.4.0", "1.10.3", "ok", 42, 44, 33 * time.Second, 45},
+		{"app-fra-01", "100.64.30.21", "1.4.0", "1.10.3", "ok", 42, 19, 26 * time.Second, 50},
+		{"app-fra-02", "100.64.30.22", "1.4.0", "1.10.3", "ok", 42, 58, 24 * time.Second, 15},
+		// 'default' bounded fallback (datacenter / ci join keys).
+		{"db-sin-01", "100.64.64.23", "1.3.2", "1.10.3", "ok", 42, 36, 38 * time.Second, 65},
+		{"worker-iad-01", "100.64.64.24", "1.4.0", "1.10.3", "ok", 42, 50, 29 * time.Second, 33},
 	}
 	out := make([]coreapi.Heartbeat, len(specs))
 	for i, sp := range specs {
