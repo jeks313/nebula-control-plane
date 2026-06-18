@@ -85,7 +85,7 @@ SSO_IDP_METADATA_FILE="${SSO_IDP_METADATA_FILE:-}"
 SSO_ENABLED=0
 [[ -n "$SSO_ACS_URL" ]] && SSO_ENABLED=1
 
-for t in terraform jq go ssh scp openssl aws session-manager-plugin; do command -v "$t" >/dev/null || { echo "missing tool: $t" >&2; exit 1; }; done
+for t in terraform jq go npm ssh scp openssl aws session-manager-plugin; do command -v "$t" >/dev/null || { echo "missing tool: $t" >&2; exit 1; }; done
 [[ -f "$SSH_KEY" ]] || { echo "ssh private key not found: $SSH_KEY (set SSH_KEY=...)" >&2; exit 1; }
 
 SSH_OPTS=(-i "$SSH_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=30 -o ServerAliveInterval=15 -o BatchMode=yes)
@@ -244,8 +244,13 @@ LH="$LH_OVERLAY=$LH_ADDR"
 # ── 0. build + distribute binaries ──────────────────────────────────────────
 if [[ "$SKIP_BUILD" -eq 0 ]]; then
   VER="$(cat "$ROOT/VERSION" 2>/dev/null || echo dev)" # stamp main.version (else binaries report "dev")
-  echo "==> building harbor/pilot/gateway $VER (linux/amd64, cgo-free)"
-  ( cd "$ROOT" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "-X main.version=$VER" -o "$WORK/harbor" ./cmd/harbor \
+  # Build the React admin console bundle FIRST so harbor can embed it via `-tags ui`
+  # (//go:embed all:dist in internal/adminui). The poc serves the full console at :443;
+  # without this, harbor's console is the "not bundled" 501 stub. pilot/gateway have no UI.
+  echo "==> building the admin console UI bundle (npm) -> internal/adminui/dist"
+  ( npm --prefix "$ROOT/ui" install --no-audit --no-fund && npm --prefix "$ROOT/ui" run build )
+  echo "==> building harbor (-tags ui)/pilot/gateway $VER (linux/amd64, cgo-free)"
+  ( cd "$ROOT" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -tags ui -ldflags "-X main.version=$VER" -o "$WORK/harbor" ./cmd/harbor \
     && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "-X main.version=$VER" -o "$WORK/pilot" ./cmd/pilot \
     && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "-X main.version=$VER" -o "$WORK/gateway" ./cmd/gateway )
   # harbor/client are always EC2; the lighthouse + gateway are EC2 nodes only under their
