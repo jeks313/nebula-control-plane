@@ -275,10 +275,10 @@ func TestGenesisRecordsProtectedEnrollments(t *testing.T) {
 	}
 
 	// IDEMPOTENT: re-recording the SAME genesis fingerprint (a re-run / recovery) is a
-	// no-op, not a duplicate or an error. Exercise the record helper directly with the
+	// no-op, not a duplicate or an error. Exercise the shared writer directly with the
 	// already-recorded lighthouse fingerprint.
-	if err := recordGenesisEnrollment(ctx, s.DB, "lh1", res.LighthouseFingerprint, hostPub(t), res.LighthouseCertPEM,
-		[]string{"lighthouse"}, "10.44.0.1", time.Now()); err != nil {
+	if err := RecordControlPlaneEnrollment(ctx, s.DB, res.LighthouseFingerprint,
+		[]string{"lighthouse"}, "10.44.0.1", "lh1", hostPub(t), string(res.LighthouseCertPEM)); err != nil {
 		t.Fatalf("idempotent re-record: %v", err)
 	}
 	var n int64
