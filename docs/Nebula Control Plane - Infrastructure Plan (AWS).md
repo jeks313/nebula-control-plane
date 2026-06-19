@@ -16,6 +16,8 @@ Companion to [[Nebula Control Plane - Design Plan]] (v3), [[Nebula Control Plane
 > - **Tier 2 — Minimal AWS harness**: shrinks to a brief trust-anchor smoke test (≈2 EC2 + 1 KMS key).
 > - **Tier 3 — Full production** (target state, last).
 
+**Status (2026-06-18):** Tier 3 is **built and LIVE** — there is one environment, the **poc**, which *is* the prod stack (`deploy/prod/`, S3 remote state, repo VERSION 0.1.0). Topology on the poc: **Fargate gateway** (off-mesh, pull-based, ADR 0005; public + internal NLBs) · **Fargate lighthouse** (`tun.disabled` nebula behind a client-IP-preserving UDP NLB — now the terraform DEFAULT, validated live; superseding the original "lighthouses → EC2" call below) · **EC2 Harbor Core** (real TUN, overlay 10.44.0.2) · **EC2 client** · **EC2 monitoring** · **Aurora Postgres** · **KMS-backed CA + config-signing** · **ACME/Let's Encrypt edge TLS** · **SSM-only access** (no public SSH). Tiers 1/1+/2 below remain the local-first dev/test story and are unchanged. Remaining prod-grade gaps: HA/multi-AZ, backups/DR for CA material + DB, real console SSO IdP (Entra; currently dev mock-idp), WAF, distroless-hardening verification.
+
 ## Guiding idea: what actually needs a cloud?
 
 Almost nothing, until late. Nebula runs in local containers (privileged for `/dev/net/tun`); Harbor is a Go service + Postgres; the queue/result-store/secrets all have faithful local stand-ins; and — crucially — **the CA-in-a-hardware-module property is reproducible locally with SoftHSM2 via Nebula's PKCS#11 path**. AWS KMS is just a *different backend for the same concept*, so the riskiest feasibility question (M0.3) is answerable on this laptop. The genuinely cloud-bound pieces are: **real KMS/IAM/SCP behavior**, **EC2 instance attestation** (sigv4 from an instance role, IID, `DescribeInstances`), **internet NAT traversal/underlay**, and later HA/DR/PrivateLink.
@@ -183,6 +185,8 @@ If validating the **PKI isolation** model (§6.3) early matters: add a **second 
 
 Everything below is the production target; build it only after Tiers 1–2 prove the system. (This is the original infra design, retained as the destination.)
 
+> **Reality (2026-06-18):** a first cut of Tier 3 is **already live** — but as a **single prod-shaped stack** (the **poc** = prod, `deploy/prod/`, one account, single-AZ), not the full multi-account dev/staging/prod organization sketched in §3.1–3.2. The multi-account Org, separate PKI/Log-Archive accounts, and the dev/staging/prod ladder below remain the destination; per-section "Live / Open" annotations note what the poc has built so far.
+
 ## 3.1 Account architecture (AWS Organizations)
 
 | Account | Holds |
@@ -201,21 +205,23 @@ Everything below is the production target; build it only after Tiers 1–2 prove
 
 ## 3.3 Key decisions (carry over from Tier-2 learnings)
 
-- **EC2 vs Fargate — the TUN gotcha:** anything running `nebula` (Core mesh node M4.1, lighthouses) needs TUN + `CAP_NET_ADMIN` → **EC2**. The public **gateway runs no nebula → Fargate** is fine.
-- **Aurora PostgreSQL** (Multi-AZ; Global Database for DR) for staging/prod; RDS `t4g` for dev.
-- **Terraform** + per-account remote state.
-- **VPC endpoints** (KMS/STS/SSM/Secrets/S3/ECR/Logs) keep AWS-API traffic private; Core never internet-reachable; only gateway ALB + lighthouses are public.
+- **EC2 vs Fargate — the TUN gotcha:** anything running `nebula` *with a real TUN* (Core mesh node M4.1, which routes core-api over the overlay) needs `CAP_NET_ADMIN` → **EC2**. The public **gateway runs no nebula → Fargate** is fine. *(Superseded 2026-06-18: a dedicated **lighthouse** does only control-plane work — discovery + hole-punch coordination over UDP, no data-plane traffic — so it can run nebula with `tun.disabled`, which needs no TUN/privilege and **is Fargate-eligible**. The poc now runs the lighthouse on **Fargate by default**, behind a client-IP-preserving UDP NLB so it still observes each host's post-NAT underlay address; `lighthouse_runtime = "ec2"` remains an override. EC2 is therefore required only for Harbor Core.)*
+- **Aurora PostgreSQL** (Multi-AZ; Global Database for DR) for staging/prod; RDS `t4g` for dev. *(Live on the poc: Aurora Postgres backs both harbor and the queue. Multi-AZ/Global-DR not yet enabled.)*
+- **Terraform** + per-account remote state. *(Live: `deploy/prod/terraform/{foundation,app}`, S3 remote state.)*
+- **VPC endpoints** (KMS/STS/SSM/Secrets/S3/ECR/Logs) keep AWS-API traffic private; Core never internet-reachable; only the gateway and lighthouse load balancers are public. *(Live: the gateway sits behind public + internal NLBs and the lighthouse behind a public UDP NLB — both Fargate; no ALB/WAF yet.)*
 - **SSM Session Manager** for admin + break-glass (no SSH/bastion).
 
 ## 3.4 Production-only infrastructure (by milestone)
 
-- **M2:** PKI KMS keys + cross-account Signer role + **SCP** isolation; Secrets Manager; CloudWatch/AMP/AMG + X-Ray; **WORM** audit in Log Archive.
-- **M3:** public **ALB + WAF** → Fargate gateway; ACM cert; **SQS** + DLQ; **DynamoDB** result store (TTL).
-- **M4:** Core EC2/ASG mesh node; lighthouses ≥2 across AZs.
+> **Poc status (2026-06-18):** the items below were the production target; much is now **live on the poc** (single-AZ, single-account form). Live: KMS CA + config-signing keys (private keys never on disk), Secrets Manager, Fargate gateway + ACME/Let's Encrypt edge TLS (NLBs, not ALB+WAF), Aurora Postgres (queue + result store in-DB rather than SQS/DynamoDB), EC2 Core mesh node, **Fargate lighthouse** (not EC2 ASG ≥2), observability (Prometheus/Loki/Grafana + node_exporter/Alloy + FireLens), and the device reaper (core-api scheduled job; not EventBridge). **Still open** (the prod-grade gaps): cross-account/SCP PKI isolation, WORM audit in a separate account, HA/multi-AZ + ASG, ≥2/≥3 lighthouses, multi-region KMS + DR/backups, Shield/WAF, real console SSO IdP (Entra), EC2-Mac, pentest.
+
+- **M2:** PKI KMS keys + cross-account Signer role + **SCP** isolation; Secrets Manager; CloudWatch/AMP/AMG + X-Ray; **WORM** audit in Log Archive. *(Live: KMS keys (CA + config-signing) + Secrets Manager + observability. Open: cross-account/SCP isolation, WORM.)*
+- **M3:** public **ALB + WAF** → Fargate gateway; ACM cert; **SQS** + DLQ; **DynamoDB** result store (TTL). *(Live: Fargate gateway behind NLBs with ACME/Let's Encrypt TLS; queue + result store live in Aurora rather than SQS/DynamoDB. Open: ALB+WAF.)*
+- **M4:** Core EC2/ASG mesh node; lighthouses ≥2 across AZs. *(Live: single EC2 Core mesh node + a single Fargate lighthouse. Open: ASG, ≥2 multi-AZ lighthouses.)*
 - **M5:** instance IAM roles; cross-account `DescribeInstances`; **PrivateLink** (NLB + VPC Endpoint Service) for private cloud enrollment.
-- **M7:** **EventBridge** / ASG lifecycle hooks → auto-reap on terminate.
+- **M7:** **EventBridge** / ASG lifecycle hooks → auto-reap on terminate. *(Live: a cert-lapse **device reaper** runs as a scheduled core-api job — different mechanism than EventBridge; ASG/terminate hooks still open.)*
 - **M8:** **multi-region KMS**; deletion alarms.
-- **M9:** HA (Multi-AZ Core ASG, Aurora Multi-AZ, ≥3 lighthouses); OIDC IdP (Identity Center or Entra); SIEM (Security Lake/OpenSearch/Splunk); **DR** (Aurora Global + multi-region KMS, tested restore); **Shield Advanced** + WAF; **EC2 Mac** for macOS build/test; spot-fleet load test; gateway pentest.
+- **M9:** HA (Multi-AZ Core ASG, Aurora Multi-AZ, ≥3 lighthouses); OIDC IdP (Identity Center or Entra); SIEM (Security Lake/OpenSearch/Splunk); **DR** (Aurora Global + multi-region KMS, tested restore); **Shield Advanced** + WAF; **EC2 Mac** for macOS build/test; spot-fleet load test; gateway pentest. *(All still open; console SSO currently uses a dev mock-idp.)*
 
 ## 3.5 Network design (production VPC)
 
@@ -226,6 +232,8 @@ Everything below is the production target; build it only after Tiers 1–2 prove
                      │  VPC endpoints: KMS·STS·SSM·Secrets·S3·ECR·Logs
    private data: Aurora PostgreSQL (no internet route)
 ```
+
+> **As built on the poc (2026-06-18):** the public edge is **NLBs**, not an ALB+WAF — the **gateway runs on Fargate** behind a public NLB (+ an internal NLB for harbor's mTLS `collect` pull) and the **lighthouse runs on Fargate** (`tun.disabled`) behind a public client-IP-preserving **UDP NLB** (not an EC2 EIP). Harbor Core stays **EC2** (real TUN, overlay node). WAF is not yet provisioned (a remaining prod-grade gap).
 
 ## 3.6 Security guardrails
 
@@ -244,7 +252,7 @@ SCPs (deny KMS key deletion in PKI, deny disabling CloudTrail/GuardDuty, region 
 - **Windows/macOS local testing:** local KVM Windows guest for the Pilot (M1.10) vs. lean on CI Windows runners? macOS almost certainly CI/EC2-Mac only.
 - **LocalStack fidelity for KMS asymmetric sign** — confirm the emulated `Sign` matches real KMS closely enough, or rely on SoftHSM locally + the Tier-2 harness for the real KMS check.
 - **Tier-2 PKI isolation:** include the second-account SCP test in the minimal harness, or defer to staging?
-- **IdP:** local Keycloak/Dex for dev; AWS Identity Center vs corporate **Entra** for staging/prod.
+- **IdP:** local Keycloak/Dex for dev; AWS Identity Center vs corporate **Entra** for staging/prod. *(Update 2026-06-18: the admin console runs on a **dev mock-idp** on the poc; wiring real console SSO to **Entra** (SAML) is a tracked, still-open prod item — see the Entra SAML runbook. Note this is distinct from end-user SSO **device enrollment** (ADR 0004/0009), which is code-complete + deploy-threaded but off by default.)*
 
 ## Sources / references
 

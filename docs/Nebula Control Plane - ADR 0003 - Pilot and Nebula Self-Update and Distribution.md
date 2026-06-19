@@ -8,6 +8,7 @@ tags: [nebula, adr, pilot, supervisor, distribution, self-update, rollout, suppl
 # ADR 0003 — Pilot + Nebula Self-Update & Distribution
 
 **Status:** Accepted (Phases 1–3 are the direction; in-process nebula deferred behind an isolation-vs-simplicity gate)
+**Status (2026-06-18):** SHIPPED & LIVE — Phases 1, 2 and 3 are all built, merged, and live-validated (Phase 3b re-exec/re-adopt was live-validated on a real macOS/launchd host 2026-06-15; staged canary rollout via the nebula + pilot release registries; failed-sha quarantine for both lanes). Only **Phase 4 (in-process nebula)** remains, still deferred behind the isolation-vs-simplicity gate. Most "open questions to resolve before building" are now answered by the shipped implementation (see that section).
 **Date:** 2026-06-13
 **Decision owners:** Chris Hyde (+ a future second approver, per dual-control)
 
@@ -304,21 +305,29 @@ judged worth the single-process win — neither of which is established today.
 - **−** Distributing executables is a new supply-chain surface; the signed-sha anchor and
   last-good revert are load-bearing.
 
-## Open questions to resolve before building
+## Open questions (mostly resolved as of 2026-06-18 by the shipped implementation)
 
-1. **Artifact source + format** — CDN vs gateway-served; content-addressed object naming;
-   how the enroll (pre-mesh) bootstrap fetch is authenticated (the embed sidesteps this).
-2. **A dedicated release-signing key, or reuse config-signing?** Reusing config-signing is
-   zero-new-trust-root; a separate release key narrows blast radius if it leaks. Decide per
-   the threat model (cf. ADR-0001's trust-model fork).
-3. **Re-adopt mechanics across platforms** — pidfile + signal-0 liveness on Unix; the
-   Windows path (no SIGHUP, different process model) likely degrades to a restart.
-4. **Health gate for self-update** — what signal proves "the new pilot is healthy" (heartbeat
-   re-established within N seconds?) and how the auto-revert is triggered without a working
-   new pilot.
-5. **Rollback floor** — how many last-good binaries to retain; disk budget on small hosts.
-6. **In-process privilege** — running nebula in-process needs tun/CAP_NET_ADMIN for all of
-   pilot; acceptable, or a disqualifier for Phase 4?
+1. **Artifact source + format** — *Resolved.* The bundle carries `nebula_url`/`pilot_url`
+   (URL in the signed payload, sha is the integrity anchor); registries (`nebula_versions`,
+   `pilot_versions`, migrations 000016/000017) catalog gen→version/sha/url, with per-arch
+   artifacts added later (migration 000020). The `go:embed` bootstrap (Phase 2) sidesteps the
+   pre-mesh enroll fetch. CDN-vs-gateway sourcing is an operational choice, not blocking.
+2. **A dedicated release-signing key, or reuse config-signing?** — *Partially settled.* The
+   `keys` schema already carries a `release` kind alongside `config-signing`, but the shipped
+   path authenticates versions via the existing config-signed bundle (zero new trust root). A
+   dedicated release key remains an optional narrowing of blast radius (cf. M8 key-rotation).
+3. **Re-adopt mechanics across platforms** — *Resolved on Unix.* pidfile + signal-0 liveness
+   (3a `AdoptPID`, live-validated on macOS/launchd); Windows is stubbed and degrades to an SCM
+   restart, as predicted.
+4. **Health gate for self-update** — *Resolved.* The new pilot must hold a stable confirm
+   window (30s) and re-establish before `Confirm`; `CheckRevert` at startup restores last-good
+   past the marker deadline, and a failed sha is quarantined to stop re-attempt thrash
+   (live-validated 2026-06-15).
+5. **Rollback floor** — *Partially resolved.* One `<path>.last-good` is retained per binary
+   (plus a quarantine marker); a deeper retention/disk-budget policy on small hosts is not yet
+   formalized.
+6. **In-process privilege** — *Still open (Phase 4 only).* Running nebula in-process would need
+   tun/CAP_NET_ADMIN for all of pilot; deferred with the rest of the in-process evaluation.
 
 ## Relationship to other work
 

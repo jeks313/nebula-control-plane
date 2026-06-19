@@ -1,5 +1,18 @@
 # SSO enrollment build — decisions log (for Chris's review)
 
+**Status (2026-06-18):** CODE-COMPLETE + DEPLOY-THREADED, OFF BY DEFAULT / NOT ROLLED OUT.
+Phases 0+1+2 (S11 scope) are built, merged, and the deploy plumbing is wired (B20): the
+genesis-minted assertion keypair, the SAML SP keypair, and the IdP/ACS knobs all thread
+through `deploy/prod/bootstrap-genesis.sh` + the two terraform secrets, with `SSO_ACS_URL`
+empty as the default fail-closed-disabled trigger. SSO stays disabled (a strict no-op) until
+an operator (1) registers a SECOND SAML app in the IdP, (2) sets `SSO_ACS_URL` + the knobs,
+(3) publishes a user-trust config (`harbor usertrust publish` or the console User Trust page),
+and (4) redeploys. No live SAML IdP has been set up and no live SSO end-to-end ceremony has
+been run. The off-mesh gateway that hosts the portal now runs on **Fargate by default**
+(ADR 0005/0006). OUTSTANDING: live SSO rollout (operator AD app + usertrust publish +
+redeploy); Phase 3 (console edge/core split) and Phase 4 lifecycle (re-SSO at renewal,
+IdP-offboarding→revocation, device-code) — both still deferred (S11).
+
 Autonomous build of SSO-driven user enrollment (ADR 0004) under the ADR 0009 trust-zone
 invariant. Settled decisions (confirmed with Chris) are **S#**; defaults taken during the
 build are **B#** (appended as phases land). Review at the end.

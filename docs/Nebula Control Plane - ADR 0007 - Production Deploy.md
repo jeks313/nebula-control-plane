@@ -11,6 +11,18 @@ tags: [nebula, adr, production, deploy, kms, aurora, postgres, saml, entra-id, h
 **Date:** 2026-06-14
 **Decision owners:** Chris Hyde
 
+**Status (2026-06-18):** Largely SHIPPED & LIVE — the `poc` IS the prod stack now. Aurora
+PostgreSQL (DSN-wired, rotating creds) + KMS-backed CA & config-signing (private keys never
+on disk, live-validated) + per-component ACME/Let's-Encrypt edge TLS (`poc-harbor` /
+`poc-gateway.mesh.failsafe.net`) + distroless Fargate gateway + Fargate lighthouse
+(`tun.disabled`, `preserve_client_ip` proven, now the terraform DEFAULT) + EC2 harbor
+(`-tags ui` React console on :443) + SSM-only node access are all deployed. REMAINING
+prod-grade gaps: **HA/multi-AZ** (Phase 4 code done; ≥2 Cores / ≥3 lighthouses / gateway
+scaling terraform not built — all still `desired_count=1`/single-AZ), **real Entra SAML for
+the console** (Phase 3 code-complete + bootstrap-threaded but the live poc still runs the dev
+mock-IdP), the **durable enrollment queue still on SQLite** (per-node `queue.db`, not yet
+SQS/Postgres), backups/DR depth, and ADR 0006 Phase 3 supply-chain hardening.
+
 ## Context
 
 The cloud deploy proven live on 2026-06-14 (`deploy/terraform`, both-Fargate gateway +
@@ -22,6 +34,13 @@ is **single-AZ**; images are **alpine**. That tree stays as-is for demo/iteratio
 `deploy/prod/` is a **separate, self-contained copy** of that baseline (repointed to its
 own tree; the demo is untouched). **This ADR is the design to bring `deploy/prod/` to
 production grade**, and it is grounded in a code assessment of what harbor already does.
+
+> **Update (2026-06-18):** this design is now overwhelmingly realized — `deploy/prod/` IS
+> the live `poc` stack (S3 remote state, `ca-central-1`). The lab→prod flips below are mostly
+> flipped: KMS keys, Aurora, ACME edge TLS, distroless Fargate (gateway + lighthouse) and
+> SSM-only access are all deployed and validated. The per-phase ✅/Remaining markers below are
+> the source of truth for what is still open (HA terraform, Entra SAML rollout, the durable
+> queue still on SQLite).
 
 ### Key finding — harbor was built for production; the demo just runs the lab-mode options
 
@@ -65,13 +84,19 @@ Target architecture for `deploy/prod/`:
    SAML SP). Step-by-step in the companion runbook (below).
 4. **HA / multi-AZ.** ≥2 harbor Cores across AZs (+ the four shared-state fixes), ≥2
    gateways, ≥3 lighthouses, Aurora Multi-AZ.
-5. **Edge TLS → ACM on an ALB** for public enroll (+ WAF/Shield). Collect stays
+5. **Edge TLS** — *(superseded 2026-06-18: the ALB+ACM+AWS-WAF path was walked back; each
+   component now terminates its OWN TLS with a public Let's Encrypt cert via ACME DNS-01
+   (Cloudflare), NLBs stay L4/TCP passthrough, WAF is Cloudflare's — see Phase 5, SHIPPED &
+   LIVE)*. Originally: ACM on an ALB for public enroll (+ WAF/Shield). Collect stays
    leaf-pinned mTLS; the lighthouse keeps the UDP NLB (`preserve_client_ip` proven live
-   2026-06-14). Multi-AZ subnets.
+   2026-06-14, now the default). Multi-AZ subnets.
 6. **Distroless images** — per **ADR 0006**.
-7. **Observability + backup/DR.** `/metrics` + `/healthz` + `/readyz`, CloudWatch for the
-   harbor node(s), SNS alarms (wire the existing `signer.OnAlarm`), Aurora PITR, KMS
-   multi-Region replica, audit export to S3 Object-Lock.
+7. **Observability + backup/DR.** `/metrics` + `/healthz` + `/readyz`, Aurora PITR, audit
+   export to S3 Object-Lock. *(superseded 2026-06-18: alarming landed as a self-hosted
+   Prometheus/Alertmanager/Grafana/Loki monitoring node rather than CloudWatch+SNS; and KMS
+   multi-Region was NOT done — `multi_region` is fixed at key creation and the live keys are
+   `prevent_destroy`, so DR for the trust root is cross-region snapshot/replica of the
+   encrypted data, not key replication — see Phase 7.)*
 
 ## What exists vs. net-new (the honest inventory)
 
@@ -81,8 +106,8 @@ Target architecture for `deploy/prod/`:
 | **KMS** | `signer.Backend` iface + working pkcs11 backend; `store.Key.Backend/URI` cols | `internal/signer/kms.go` (~100 LOC, aws-sdk-go-v2); `"kms"` case in 3 dispatch switches + `-kms-*-arn` flags | 2× `aws_kms_key` (ECC_P256) + least-priv IAM (`kms:Sign`/`GetPublicKey` only) + CloudTrail |
 | **Entra SAML IdP** | full SAML 2.0 SP (`internal/adminauth/saml.go`), `-saml-*` flags, fail-closed RBAC | OIDC client-secret-from-file *(SAML already uses key files)*; schedule `SessionStore.GC` | register the Enterprise App; inject metadata + SP keypair; sessions ride Aurora |
 | **HA** | N stateless instances; IPAM/queue/joinkey concurrency-safe | 4 fixes: audit advisory lock, **nonce replay** shared store, signer **breaker** shared, **rollout** `FOR UPDATE` | ≥2 Cores multi-AZ; ≥2 gw / ≥3 lh; pre-deploy migrate step |
-| **Edge TLS** | in-gateway TLS wired; collect mTLS real | *(none if ACM/ALB path)* | ALB + ACM for enroll; WAF/Shield; multi-AZ subnets |
-| **Obs / DR** | slog, hash-chained audit, `signer.OnAlarm` hook | `/metrics`+`/healthz`+`/readyz`; wire `OnAlarm`→SNS; optional `audit export` | CloudWatch (EC2 harbor), SNS alarms, Aurora PITR, KMS multi-Region, S3 WORM audit |
+| **Edge TLS** | in-gateway TLS wired; collect mTLS real | `internal/autotls` (ACME DNS-01/Cloudflare) — *done; ALB/ACM path walked back, Phase 5* | NLBs stay L4 passthrough; Cloudflare-token secret + EFS cert cache; multi-AZ subnets *(was: ALB+ACM+AWS-WAF)* |
+| **Obs / DR** | slog, hash-chained audit, `signer.OnAlarm` hook | `/metrics`+`/healthz`+`/readyz` (done); audit verifier metrics; `harbor audit export` writer (open) | self-hosted Prometheus/Alertmanager/Grafana/Loki node, Aurora PITR, S3 Object-Lock audit export *(CloudWatch+SNS+KMS-multi-Region walked back)* |
 
 The recurring theme: the **terraform/ops** column is the bulk of the work; the **code**
 column is a short list of small, localized changes against hooks that already exist.
@@ -91,12 +116,17 @@ column is a short list of small, localized changes against hooks that already ex
 
 Ordered so each phase de-risks the next; KMS + Aurora are the foundation.
 
-- **Phase 1 — Datastore (Aurora).** `aws_rds_cluster` (aurora-postgresql, Multi-AZ) +
-  instances + subnet group + SG (5432 from the harbor SG only) + Secrets Manager DSN;
-  add a `case "postgres"` pool-tuning block at `store.go:63`; **decide the queue backend**
-  (SQS+DLQ recommended — the queue is ephemeral per-gateway today); run `harbor migrate up`
-  as a one-shot init job against the Aurora **writer**; add Postgres CI integration tests.
-- ✅ **Phase 2 — KMS backend (code done; AWS live-validation pending).** `internal/signer/kms.go`
+- ✅ **Phase 1 — Datastore (Aurora). SHIPPED & LIVE.** `aws_rds_cluster` (aurora-postgresql,
+  Multi-AZ) + instances + subnet group + SG (5432 from the harbor SG only) + the RDS-managed
+  rotating master secret are deployed (`app/data.tf`), and the genesis bootstrap wires Core at
+  the Aurora DSN with `DB_BACKEND=aurora` (`-driver postgres -dsn … -db-secret-arn …`, rotating
+  creds via the instance role — no static password on disk/argv). The `case "postgres"`
+  pool-tuning block at `store.go:63` is wired; `harbor migrate up` runs against the Aurora
+  writer. **Remaining:** the durable enrollment **queue is still SQLite** (a per-node
+  `queue.db`, even on the Aurora backend) — the SQS+DLQ / Postgres-dialect queue behind
+  `queue.Queue` is NOT yet built; and Postgres CI integration tests are still outstanding
+  (the Postgres path has no runtime test coverage in CI).
+- ✅ **Phase 2 — KMS backend. SHIPPED & LIVE (live-validated 2026-06-18).** `internal/signer/kms.go`
   implements `signer.Backend` over `aws-sdk-go-v2` (pure-Go, no build tag): `SignDigest` →
   `kms:Sign` MessageType=DIGEST / ECDSA_SHA_256, returning KMS's ASN.1-DER unchanged;
   `PublicKey` → `kms:GetPublicKey`, validates `KeySpec==ECC_NIST_P256`, converts the DER SPKI
@@ -109,9 +139,10 @@ Ordered so each phase de-risks the next; KMS + Aurora are the foundation.
   key id's pubkey ≠ the CA cert. Software + SoftHSM/PKCS#11 paths are unchanged (minimal
   self-hosted / debug). Unit-tested via an injected fake KMS backed by a real P256 key,
   including the full `SelfSignCA → New → Issue → verify` path. The terraform for the keys is
-  the **foundation** stack below. **Still to do:** apply the foundation stack + validate
-  against real AWS KMS (no creds in CI; the live gate, like the 3b host validation), and
-  populate `store.Key.URI`.
+  the **foundation** stack below. ✅ **Live (2026-06-18):** the foundation stack is applied and
+  the `poc` runs the KMS backend against real AWS KMS — the CA + config-signing private keys
+  never touch disk (genesis self-signs the CA cert from the KMS keys; only `software` writes
+  `ca.key`/`config-signing.key`). **Still to do:** populate `store.Key.URI`.
 - ✅ **Terraform structure — hybrid (foundation + app), greenfield.** `deploy/prod/terraform`
   is split into an isolated **`foundation/`** stack (its own state) and an **`app/`** stack
   that reads it via `terraform_remote_state` — so a routine app change can never destroy the
@@ -170,10 +201,16 @@ Ordered so each phase de-risks the next; KMS + Aurora are the foundation.
     strand the rollout into an observe-window auto-rollback. `fmt`/`validate` clean.
   - Other `app/` layers: **edge** pivoted to per-component ACME/Let's-Encrypt (Phase 5 `acme.tf`,
     no ALB/ACM/WAF); **obs** landed in Phase 7. So the originally-listed remaining layers are done.
-- **Phase 3 — IdP (Entra SAML).** Configure the existing SAML SP per the **runbook**;
-  custody a **stable SP keypair**; add OIDC client-secret-from-file (SAML already uses key
-  files); schedule `SessionStore.GC`; sessions persist via Aurora (Phase 1). Pin a
-  `-role-map` from the Entra admin group to `admin` and verify before cutover.
+- **Phase 3 — IdP (Entra SAML). CODE-COMPLETE + BOOTSTRAP-THREADED, NOT ROLLED OUT.** The
+  genesis bootstrap wires the console to real Entra SAML in production posture when the operator
+  supplies `SAML_METADATA_URL`/`_FILE` + `SAML_SP_KEY_FILE`/`_CERT_FILE` + `SAML_ROLE_MAP` (the
+  STABLE SP keypair is delivered `0600`/`0644` over ssh stdin, fail-closed: SAML refuses to
+  launch without HTTPS/ACME and without a role-map). But the **live poc still defaults to the
+  dev mock-IdP** (`-mock-idp -environment development`) — no Entra Enterprise App is registered.
+  **Remaining (operator rollout):** register the Entra Enterprise App per the **runbook**;
+  custody a **stable SP keypair**; pin a `-role-map` from the Entra admin group to `admin`;
+  verify before cutover; (and the still-open `SessionStore.GC` schedule + OIDC
+  client-secret-from-file, since SAML already uses key files).
 - **Phase 4 — HA.** ✅ **The four shared-state code fixes are DONE** (Core-side; the
   credential-less gateway is untouched and gains no DB access):
   - **Audit advisory lock** — `store.AppendAudit` takes `pg_advisory_xact_lock` (Postgres)
@@ -270,16 +307,19 @@ Ordered so each phase de-risks the next; KMS + Aurora are the foundation.
 
 ## Consequences
 
-- **+** A genuinely production-grade posture — non-exportable CA in KMS, Multi-AZ managed
-  DB with PITR, enterprise SSO, HA control plane, TLS+WAF at the edge — reached mostly via
+- **+** A genuinely production-grade posture — non-exportable CA in KMS, managed DB with
+  PITR, end-to-end Let's-Encrypt TLS at the edge with Cloudflare WAF — reached mostly via
   managed AWS services + a short, well-scoped code list, because the architecture
-  anticipated it.
+  anticipated it. *(2026-06-18: mostly LIVE on the `poc`; enterprise SSO for the console and
+  a true HA / Multi-AZ control plane are the main not-yet-rolled-out pieces.)*
 - **+** The demo (`deploy/terraform`) is untouched and stays fast to iterate on.
 - **−** Real net-new code, even if small: the KMS backend, the queue backend, the four HA
   shared-state fixes, metrics/health endpoints, and a few secret-from-file hooks. None are
   architecture changes, but all need tests (the Postgres path currently has **zero**
   runtime test coverage).
-- **−** More moving parts + cost: Aurora, KMS, ALB/WAF, multi-AZ, CloudWatch/SNS.
+- **−** More moving parts + cost: Aurora, KMS, ACME/Cloudflare edge, multi-AZ, the
+  self-hosted Prometheus/Loki/Grafana monitoring node. *(ALB/AWS-WAF/SNS were walked back —
+  see Phase 5 / 7b.)*
 - **−** Operational ceremony grows: the genesis ceremony now creates KMS keys; key rotation
   (CA + config-signing) is designed (staged/active/draining/retired) but **unimplemented**
   and becomes a real prod need.

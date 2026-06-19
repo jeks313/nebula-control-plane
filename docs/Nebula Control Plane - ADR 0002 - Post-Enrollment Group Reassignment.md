@@ -11,6 +11,17 @@ tags: [nebula, adr, groups, enrollment, renewal, revocation, architecture]
 **Date:** 2026-06-13
 **Decision owners:** Chris Hyde (+ a future second approver, per dual-control)
 
+**Status (2026-06-18):** PLANNED — none of the group-reassignment feature is built
+yet (no `desired_groups` columns/migration, no `POST/PATCH /admin/v1/devices/{ip}/groups`
+endpoint, no `device:manage` permission; `coreapi.handleRenew` still reads the static
+`dev.Groups`). What HAS changed since this ADR was written: **M7 revocation is no longer
+unbuilt** — the cert blocklist is SHIPPED & LIVE (`internal/revocation`, migrations
+000013/000014, `pki.blocklist` rendered + propagated via renew/config bundles and a
+`blocklist` rollout lane, `harbor blocklist add/remove/list/status`). So Phase 2's hard
+dependency now exists; the remaining Phase-2 work is wiring a group *reduction* to revoke
+the old cert. (Console blocklist view + dual-control bulk-revoke is the separate 7.2/UI-5
+item; single-host CLI revoke is live.)
+
 ## Context
 
 A host's **groups** are the unit of authority in the mesh: the firewall policy is
@@ -92,12 +103,18 @@ Everything hinges on **add vs. remove**:
   and retain the higher privilege. Truly enforcing a reduction requires **revoking the old
   cert (M7 blocklist)** and propagating the blocklist to peers.
 
-**M7 is unbuilt.** So Phase 1 makes reductions *advisory* (trust-on-cooperation), with a
-residual window equal to the old cert's remaining lifetime — shrinkable with short cert
-TTLs, closeable only by Phase 2. This fork is the reason the work is phased rather than
-shipped whole: the cheap, valuable half (reassignment) does not wait on the expensive,
-security-load-bearing half (revocation), but the UI and the docs must not overstate what a
-removal does until Phase 2 lands.
+**M7 was unbuilt when this ADR was written; it is now SHIPPED & LIVE** (cert blocklist
+in `internal/revocation`, rendered into `pki.blocklist` and propagated via renew/config
+bundles + a `blocklist` rollout lane; `harbor blocklist add/remove/list/status`). The
+fork's reasoning still holds for the *unbuilt Phase 1*: until a reduction is wired to
+revoke the old cert, a removal would be *advisory* (trust-on-cooperation), with a residual
+window equal to the old cert's remaining lifetime — shrinkable with short cert TTLs,
+closeable only by tying the reduction into the now-existing blocklist. This fork is the
+reason the work is phased rather than shipped whole: the cheap, valuable half
+(reassignment) does not wait on the expensive, security-load-bearing half (revocation),
+but the UI and the docs must not overstate what a removal does until the reduction→revoke
+wiring lands. *(Note 2026-06-18: the revocation primitive now exists, so Phase 2 is a wiring
+step rather than a new milestone.)*
 
 ## Considered options
 
@@ -119,7 +136,8 @@ Add to the per-device control-plane record (the issued enrollment row resolved b
 
 The enrollment row's existing `groups` column remains "the groups in the current cert"
 (what the provenance/Devices view reads). On re-issue it is set to `desired_groups`.
-A new migration (next number after 000012) adds the columns in both dialects.
+A new migration (the next free number — migrations are at 000026 as of 2026-06-18; this
+ADR originally said "after 000012") adds the columns in both dialects.
 
 ## The workflow, end to end
 
@@ -178,7 +196,11 @@ A new migration (next number after 000012) adds the columns in both dialects.
   - Tests + adversarial review; document removals as advisory.
 - **Phase 2 — enforceable removals (M7):** on a reduction, revoke the old cert and
   distribute the blocklist in peer bundles so peers reject it. Closes the malicious-host
-  window. Re-run the adversarial review for the revocation path.
+  window. Re-run the adversarial review for the revocation path. *(2026-06-18: the M7
+  revocation/blocklist machinery is now SHIPPED & LIVE — `internal/revocation`, the
+  `pki.blocklist` render + bundle propagation + `blocklist` rollout lane, and the `harbor
+  blocklist` CLI. The remaining Phase-2 work is just calling it from the reduction path,
+  not building revocation itself.)*
 - **Phase 3 — hardening (optional):** dual-control for sensitive group changes; a group
   catalog with privilege tiers; bulk/group-membership management.
 
@@ -190,9 +212,10 @@ A new migration (next number after 000012) adds the columns in both dialects.
 - **+** Authority remains server-side and auditable; the provenance UI reflects the new
   groups for free.
 - **+** Additions are fully effective in Phase 1.
-- **−** Removals are **soft until Phase 2 (M7)** — the single biggest caveat; the residual
+- **−** Removals are **soft until Phase 2** — the single biggest caveat; the residual
   window is the old cert's remaining lifetime. Short cert TTLs mitigate; only revocation
-  closes it.
+  closes it. *(2026-06-18: the M7 revocation primitive now exists, so Phase 2 is a wiring
+  step — removals stay soft only until the reduction path calls the existing blocklist.)*
 - **−** RBAC grows a `device:manage` permission and (Phase 3) potentially a per-host
   dual-control kind — new authority surface to govern.
 - **−** Group membership becomes a mutable, per-host fact diverging from the join-method
@@ -218,8 +241,10 @@ A new migration (next number after 000012) adds the columns in both dialects.
 
 ## Relationship to other work
 
-- **M7 revocation / blocklist** — the hard dependency for enforceable removals (Phase 2);
-  this ADR is a strong motivator to prioritise it.
+- **M7 revocation / blocklist** — the hard dependency for enforceable removals (Phase 2).
+  *(2026-06-18: now SHIPPED & LIVE — `internal/revocation`, `pki.blocklist` render + bundle
+  propagation + `blocklist` rollout lane, `harbor blocklist` CLI. No longer a blocker;
+  Phase 2 just has to call it.)*
 - **Device-provenance slice** — already surfaces a device's groups + "Joined via" origin;
   the editor and the "pending re-issue" badge build directly on it.
 - **ADR 0001 (policy scoping / namespacing)** — namespaced groups (`scope:name`) make a

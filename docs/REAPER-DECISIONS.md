@@ -1,5 +1,11 @@
 # Device reaper — decisions log (for Chris's review)
 
+**Status (2026-06-18):** SHIPPED & LIVE on the poc — `core-api` runs the reaper on its default
+hourly schedule (enabled, conservative; no `-reap-*` flag overrides in `deploy/prod`, so silent-trigger
+stays OFF). All decisions below (R1–R20, incl. the R18–R20 safety fixes) are implemented and merged.
+OUTSTANDING (deferred follow-ons, R7): hard-delete of reaped records; tying IdP-offboarding /
+renewal-denial to reaping (SSO P4).
+
 The reaper turns today's passive cert-expiry into active reclamation: on a schedule, find
 hosts that are gone, reclaim their leaked overlay IPs, prune their stale records, and (where
 the cert is still live) revoke them. It is **destructive + automated**, so the defaults are
