@@ -10,6 +10,8 @@ tags: [networking, nebula, security, ui, admin, design]
 
 Companion to [[Nebula Control Plane - Design Plan]] (v3) and [[Nebula Control Plane - Implementation Plan]] (v2). Those docs name an "admin API/UI" but never design it. This plans the **Harbor web admin UI** ("the console") and brainstorms — exhaustively — what it should do. Section refs *(§…)* point at the design doc.
 
+**Status (2026-06-18):** SHIPPED & LIVE on the poc. The console is a React SPA (`ui/`, in `internal/adminui`) embedded into `harbor` via `-tags ui` and served by core-api on `:443`, mesh-only. Live pages: Dashboard, Enrollments, Devices, Join Keys, Cloud Trust, User Trust, IPAM, Policy, Releases, Approvals, Audit. Server-side RBAC, dual-control, and step-up MFA are wired (`internal/adminapi`, `internal/dualcontrol`). The original "SPA vs server-rendered" tech question (§8) is resolved in favour of a React SPA. The remaining backlog is the §8 open questions and the un-built sub-screens noted inline below; **console admin SSO still runs the dev mock-IdP — real Entra SAML for the console is a separate prod item.** The original aspirational/future-tense framing below is preserved as the design rationale.
+
 ## 1. Purpose & where it fits
 
 The console is the human face of Harbor: the place operators approve devices, author firewall policy, manage IPAM, run rotations, investigate incidents, and configure site-wide defaults. It is **served by Harbor Core over the mesh** (`group:control-plane`), reached through Nebula like any other Core API — plus the out-of-band break-glass path (§10) when the mesh itself is down.
@@ -220,21 +222,23 @@ The **Settings** area holds the site-wide defaults that everything else inherits
 
 The console grows with the backend; don't build screens before their data exists. The **admin CLI (impl 2.8) is the source API** the UI consumes — UI is purely additive.
 
-- **UI-0 (after impl M2–M3):** auth shell (SSO/MFA/RBAC), **read-only Dashboard + Devices list/detail**, Audit viewer. Proves the thin-client/server-enforced model early.
-- **UI-1 (with impl M3):** Enrollment approval queue + tokens; conflict inbox.
-- **UI-2 (with impl M4):** fleet health/expiry dashboards; version-landscape; heartbeat detail.
-- **UI-3 (with impl M5):** group map editor (immutable facts) + cloud-trust settings (approved accounts/subscriptions, auto-assign).
-- **UI-4 (with impl M6):** policy editor + compile preview + invariants + dual-control publish + rollout monitor + drift; Network/IPAM screens.
-- **UI-5 (with impl M7–M8):** revocation/blocklist with propagation status; **CA/key rotation wizards**; lighthouse fleet management.
-- **UI-6 (with impl M9):** detections feed + reconciliation; full Settings; Access/RBAC admin; System/ops (deploys, backups, self-update); break-glass log.
+*(Status 2026-06-18: the early phases are built. The live SPA ships Dashboard, Enrollments, Devices, Join Keys, Cloud Trust, User Trust, IPAM, Policy, Releases, Approvals, and Audit — covering UI-0/UI-1/UI-3/UI-4 and the Releases slice of UI-6. Auth/MFA/RBAC and dual-control are server-enforced. The phase list below stays as the original mapping; ✅/⏳ mark what is and isn't done.)*
+
+- ✅ **UI-0 (after impl M2–M3):** auth shell (SSO/MFA/RBAC), Dashboard + Devices list/detail, Audit viewer — built (session auth runs the dev mock-IdP; real Entra SAML for the console is a prod gap). Proves the thin-client/server-enforced model.
+- ✅ **UI-1 (with impl M3):** Enrollment approval queue + tokens (Enrollments + Approvals + Join Keys pages). ⏳ conflict inbox not yet built.
+- ⏳ **UI-2 (with impl M4):** fleet health/expiry surfaces partly on the Dashboard; dedicated version-landscape + heartbeat-detail screens not yet built.
+- ✅ **UI-3 (with impl M5):** group map / cloud-trust settings (Cloud Trust page; User Trust page for the SSO usertrust map, with SSO enrollment itself off-by-default per ADR 0004/0009).
+- ⏳ **UI-4 (with impl M6):** ✅ policy editor + dual-control publish (Policy page) and IPAM screen (IPAM page) built; ⏳ compile preview / invariant panel / rollout monitor / drift report still thin.
+- ⏳ **UI-5 (with impl M7–M8):** revocation/blocklist, CA/key rotation wizards, lighthouse fleet management — not yet built as dedicated screens.
+- ⏳ **UI-6 (with impl M9):** ✅ self-update / Releases page built (§4.13); ⏳ detections feed + reconciliation, full Settings, Access/RBAC admin, System/ops (deploys, backups), break-glass log — not yet built.
 
 Dual-control UX (P-UI-4) and the preview/guardrail patterns (P-UI-5/7) are built once in UI-0/UI-1 and reused everywhere.
 
 ## 8. Tech & open questions
 
-- **Frontend:** SPA (React/Svelte/SolidJS) consuming the Core admin API, or server-rendered (HTMX/Templ) for a smaller attack surface and no client build. *Recommendation:* lean server-rendered or a minimal SPA — fewer moving parts, easier to keep the UI a dumb client (P-UI-1). **Open question.**
-- **Where served:** by Harbor Core over the mesh; confirm it's a separate process from the signing-critical paths (a UI bug shouldn't touch the Signer).
-- **Auth:** OIDC to the IdP, short sessions, step-up auth, RBAC claims; reuse impl 2.11.
+- **Frontend:** ~~SPA (React/Svelte/SolidJS) consuming the Core admin API, or server-rendered (HTMX/Templ)~~ *(resolved 2026-06-18: built as a **React SPA** in `ui/`, bundled into `internal/adminui` and embedded via `-tags ui`. The "dumb client" goal (P-UI-1) is met by enforcing RBAC/dual-control/MFA server-side regardless of the client.)*
+- **Where served:** by Harbor Core over the mesh *(done: core-api serves the SPA at `/` on `:443`, mesh-only; `/admin/v1` is the JSON API. The Signer stays separate.)*.
+- **Auth:** OIDC to the IdP, short sessions, step-up auth, RBAC claims; reuse impl 2.11 *(built: server-side sessions in `internal/adminauth` support OIDC / GitHub / SAML / a dev mock-IdP; step-up MFA gates the most privileged actions. The poc currently logs in via the **dev mock-IdP** — wiring real Entra SAML for the console is a separate prod item.)*.
 - **API:** the UI must use the *same* versioned admin API as the CLI (no privileged backdoor); everything the UI can do is scriptable.
 - **Offline/break-glass:** define a minimal break-glass UI (or CLI-only) reachable via the out-of-band path (impl 9.2) when the mesh is down.
 - **Real-time:** rollout monitors / propagation status want live updates (SSE/websocket over the mesh) — confirm acceptable.

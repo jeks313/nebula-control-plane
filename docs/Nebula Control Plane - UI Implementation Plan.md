@@ -1,6 +1,6 @@
 ---
 created: 2026-06-13
-updated: 2026-06-13
+updated: 2026-06-18
 source: claude-chat
 status: draft
 project: nebula-control-plane
@@ -8,6 +8,21 @@ tags: [networking, nebula, security, ui, frontend, design, firewall]
 ---
 
 # Nebula Control Plane — UI Implementation Plan
+
+> **Status (2026-06-18):** SHIPPED & LIVE on the poc. The React console
+> (`ui/`, embedded in Core via `go:embed` behind `-tags ui`, served on :443) is
+> deployed and running, with real session auth (OIDC/SAML/GitHub + dev mock-idp
+> for login), RBAC, and step-up MFA. Live screens: Dashboard (health rollup +
+> recent-reaps panel), Enrollments, Devices, Join Keys, Cloud Trust, **User Trust
+> (SSO)**, **IPAM**, Policy (compile + the A1 analysis rail: flow-diff/blast-radius,
+> reachability query, test runner, matrix grid), **Releases**, Approvals, Audit.
+> Still genuinely deferred: the reachability **matrix as the default authoring
+> view** + the **Tag Canvas** (no xyflow/WebGL dep yet), the **topology map**,
+> the live **SSE** stream (A2 — polling stands in), and the trust-ops wizards
+> (CA/key rotation, revocation/blocklist UI). The phase/status callouts below are
+> kept for history; the 2026-06-13 ✅ markers and §11 phasing under-report what has
+> since landed (IPAM, SSO/User-Trust, the device reaper, Releases) — see the
+> inline (superseded 2026-06-18: …) annotations.
 
 Companion to [[Nebula Control Plane - Admin UI Plan]] (the *what* — information
 architecture, all 14 screens, settings, security posture) and the
@@ -109,10 +124,24 @@ lighthouse fleet (`lighthouse`), canary rollout (`rollout`), IPAM (`ipam`), audi
 chain (`store.VerifyAudit`), AWS attestation evidence (`awsattest`), drift (`drift`).
 
 **Gated on unbuilt backend** (screen ships when its data does): **A0/A1/A2** above;
-**SSO/MFA + RBAC roles** (2.11 — the auth shell blocks on this; the dev-auth seam in
-§8 unblocks dogfooding); immutable-fact **group map** (5.5); **revocation** (M7);
+~~**SSO/MFA + RBAC roles** (2.11 — the auth shell blocks on this; the dev-auth seam in
+§8 unblocks dogfooding)~~ *(superseded 2026-06-18: 2.11 SSO + RBAC + step-up MFA
+SHIPPED & LIVE — OIDC/SAML/GitHub + dev mock-idp; the auth shell ships in UI-0b)*;
+immutable-fact **group map** (5.5); **revocation** (M7);
 **CA/key rotation** (M8); **detections + reconciliation + WORM audit** (M9); device
 **posture**; overlay **DNS**; subnet-router **routes** (DSL gap, §4).
+
+> *(superseded 2026-06-18)* Since this section was written, the backend track is
+> largely DONE and several "gated" screens have shipped & gone live on the poc:
+> **A0** (admin API, OpenAPI + contract test, admin tokens), **A1.1/A1.2a** (the
+> reachability/matrix/tests + flow-diff/blast-radius analysis rail), **2.11** (SSO
+> + RBAC + step-up MFA). Net-new since: **IPAM** (ADR 0010 — named netblocks, full
+> console editor, API, Prometheus gauges, dashboard tile — SHIPPED & LIVE),
+> **SSO user enrollment + User-Trust admin UI** (ADR 0004/0009 — CODE-COMPLETE,
+> off by default / not rolled out), the **device reaper** + **ephemeral hosts**
+> (SHIPPED & LIVE; dashboard recent-reaps panel), and the **Releases** console
+> (#39 — binary registries + per-lane fleet upgrades). A2 (SSE) is still unbuilt
+> (polling stands in).
 
 ---
 
@@ -154,15 +183,15 @@ Action column is now three-valued: **Now** (backend exists or A0/A1 covers it) �
 | Capability | Best-in-class | Status | Action |
 |---|---|---|---|
 | Machines list + device detail | Tailscale, defined.net | ✅ | Now |
-| Policy editor w/ inline **tests** that gate publish | Tailscale | ❌ (A1) | **Now** |
-| **Reachability matrix** authoring (from×to grid) | *nobody ships cleanly* | ❌ (A1) | **Now — differentiator + hero (§4/§5)** |
-| Reachability/"why-reachable" query + **nearest-miss** | AWS VPC Reachability Analyzer | ❌ (A1) | **Now** |
+| Policy editor w/ inline **tests** that gate publish | Tailscale | ✅ test runner (A1.1); publish-gate = A1.2b | **Now** |
+| **Reachability matrix** authoring (from×to grid) | *nobody ships cleanly* | ✅ matrix grid (A1.1, read-only rail); authoring = UI-4b | **Now — differentiator + hero (§4/§5)** |
+| Reachability/"why-reachable" query + **nearest-miss** | AWS VPC Reachability Analyzer | ✅ (A1.1) | **Now** |
 | `internet` / egress pseudo-target ("who may reach the internet") | Tailscale autogroup:internet | ❌ (DSL) | **Now — cheapest high-value rule** |
 | Device approval queue + enroll keys | Tailscale, defined.net | ✅ | Now |
 | Live **topology map** (comprehension) | NetBird, ZeroTier, Tetration | ❌ | **Now (policy-permitted) / Later (live)** |
 | Tag/group **delegation** (who may assign a tag) | Tailscale `tagOwners` | partial | Later |
 | **Subnet routers / `unsafe_routes`** (reach a non-mesh CIDR via a node) | Tailscale, NetBird, Netmaker | ❌ (DSL needs a CIDR destination) | **Later — most-used feature after admit (§4)** |
-| Flow-**diff** / blast-radius on change | (weakly: Tailscale text diff) | ❌ (A1) | **Now — the highest-stakes screen** |
+| Flow-**diff** / blast-radius on change | (weakly: Tailscale text diff) | ✅ (A1.2a; visual matrix-overlay diff = UI-4b) | **Now — the highest-stakes screen** |
 | Observed-flows → propose-allow ("ghost layer") | Illumio / Tetration | ❌ | Later (rides the live-tunnel overlay) |
 | Key/CA expiry + rotation UX | Tailscale, defined.net | planned | Later (M8) |
 | Audit / activity log + **tamper-evidence** | all (weaker) | ✅ chain; WORM ❌ | Now (honest label, §8) / Later (WORM = the lead) |
@@ -679,8 +708,10 @@ decisions server-side, strict CSP, no secrets in JS) — richness *and* out of t
   server-side `AdminIdentity` interface with two impls — real OIDC, and an
   env-gated, CI-blocked **`X-Harbor-Dev-Actor`** header — so the running app exercises
   RBAC + dual-control (which needs two *distinct* actors) against a seeded Harbor long
-  before 2.11. Until OIDC lands, the only honestly-shippable app is mesh-only behind
-  the dev seam.
+  before 2.11. ~~Until OIDC lands, the only honestly-shippable app is mesh-only behind
+  the dev seam.~~ *(superseded 2026-06-18: 2.11 landed — generic OIDC, SAML 2.0, and
+  GitHub OAuth all ship, with step-up MFA. The poc runs the dev **mock-idp** for
+  console login; a real IdP (Entra) for the console is a separate prod item.)*
 - **RBAC:** server-enforced on every endpoint; client also hides what the role can't
   do (defense in depth, not the control). Read-only default.
 - **Dual-control UX + single-admin mode [v1→v2]:** privileged actions create a
@@ -737,9 +768,13 @@ decisions server-side, strict CSP, no secrets in JS) — richness *and* out of t
 ## 10. Build & delivery
 
 - **Location:** `ui/` (pnpm + Vite). Built assets **embedded in the Core binary via
-  `go:embed`**, served by a static handler over the mesh — single artifact, lockstep
-  UI↔API versioning, minimal footprint. Confirm **HTTP/2** on the embedded server
-  (SSE multiplexing) and **hash-based CSP** at build time (§8).
+  `go:embed`** (behind a `ui` build tag — `go build -tags ui`; a plain build ships a
+  "not built" stub so CI needs no Node), served by a static handler — single artifact,
+  lockstep UI↔API versioning, minimal footprint. Confirm **HTTP/2** on the embedded
+  server (SSE multiplexing) and **hash-based CSP** at build time (§8). *(superseded
+  2026-06-18: SHIPPED & LIVE — the poc builds harbor `-tags ui` and serves the full
+  console on **:443** at `poc-harbor.<domain>` over the ACME edge TLS, not only over
+  the mesh; HTTPS/CSP/HSTS hardening landed in UI-0.)*
 - **CI:** lint/typecheck/test/build; SCA blocking gate + provenance; Playwright on an
   ephemeral seeded Harbor; Storybook + visual-regression; bundle-size gate; UI bundle
   folded into the Core SBOM/signature.
@@ -1039,6 +1074,16 @@ The v1 UI-0…UI-6 pretended the backend was done. Reframe as a **backend track*
     `migrate up → seed-demo → admin-api -dev-auth`. Fails fast on a non-fresh DB.
   - Adversarially reviewed (7-agent): 2 low + 1 info confirmed, the lows fixed (rollout
     wave fraction is now 1-based/count-correct; seed-demo guards a populated DB).
+  - ✅ **Recent-reaps dashboard panel (2026-06-18) — device reaper, ADR-adjacent.** A
+    `RecentReapsCard` on the Dashboard filters the audit feed for `reaper-reap` (host,
+    reason, whether the cert was revoked, when) — needed because the device reaper
+    deletes the reaped host's heartbeat, so it drops from the heartbeat-driven fleet
+    list. Backend: the **device reaper** (SHIPPED & LIVE on the poc — hourly schedule,
+    cert-lapse + grace, overlay-IP reclaim, stale-heartbeat prune, soft-mark
+    `reaped_at`/`reap_reason`, conservative defaults, `ncp_reaper_*` metrics) +
+    **ephemeral hosts** (recorded at issue, shorter cert TTL, the join-key `ephemeral`
+    toggle now wired). The provenance ephemeral badge note ("auto-reaping is future,
+    impl 2.12") is now superseded — reaping is live.
   - **Deferred (no backend data — confirmed absent):** the **topology map** (no
     reachability-graph endpoint), **drift sparkline**, **force-renew** action,
     lighthouse **liveness/cert-expiry** (registry only until lighthouses heartbeat),
@@ -1071,11 +1116,31 @@ The v1 UI-0…UI-6 pretended the backend was done. Reframe as a **backend track*
     (1 medium + 2 low), all fixed — STS-unavailable now **denies cleanly** (the host
     re-enrolls with a fresh nonce) instead of nacking into a replay-loop, and STS
     429/5xx are classified unavailable rather than a rejection.
-  - **Deferred to UI-3b / later:** the dual-control cloud-trust **editor** (propose/
-    approve UI — read-only today), **Azure/GCP** attestation providers, the full **5.5
-    immutable-fact group map** (per-account default groups stand in for now), live
-    hot-reload of the cloud-trust config (startup-read today, like `-policy-db`), and a
-    device-detail drill-down (needs a `GET /devices/{ip}` endpoint).
+  - **Deferred to UI-3b / later:** ~~the dual-control cloud-trust **editor** (propose/
+    approve UI — read-only today)~~ *(superseded 2026-06-18: the **Cloud Trust** editor
+    SHIPPED — Add accounts / Propose change, dual-control + step-up)*, **Azure/GCP**
+    attestation providers, the full **5.5 immutable-fact group map** (per-account default
+    groups stand in for now), live hot-reload of the cloud-trust config (startup-read
+    today, like `-policy-db`), and a device-detail drill-down (needs a `GET /devices/{ip}`
+    endpoint).
+  - ✅ **SSO user enrollment + User Trust admin UI (2026-06-18) — ADR 0004/0009.** A
+    sibling identity-facts surface to Cloud Trust: a new **User Trust** page
+    (`pages/UserTrust.tsx`, nav `/usertrust`) — the dual-control-published config of which
+    IdP AD-group memberships may SSO-enroll, and the mesh groups + netblock + auto-issue
+    each is granted (ordered, first-match; whole-config republish through the generic
+    `/approvals` flow, gated `usertrust:propose`, mirroring Cloud Trust exactly). SSO
+    **provenance** surfaces on the shared `JoinedVia` cell. Backend: the off-mesh gateway
+    SAML enrollment portal (no CA), `internal/ssoassert` dedicated-key assertion, Core
+    `processSSO` re-verify + usertrust first-match, deploy-threaded through
+    genesis/bootstrap/terraform. **CODE-COMPLETE + DEPLOY-THREADED but OFF BY DEFAULT /
+    NOT rolled out** — SSO stays disabled until an operator creates the AD SAML app,
+    publishes a usertrust config, and sets `sso_acs_url`.
+  - ✅ **IPAM console (2026-06-18) — ADR 0010.** A new **IPAM** page (`pages/IPAM.tsx`,
+    nav `/ipam`): named-netblock CRUD, the live overlay-pool selector/segments, the
+    growth-envelope **Suggest**, and used% live utilization — all SHIPPED & LIVE, with the
+    backend admin API (`/admin/v1` netblock CRUD + suggest + allocations), Prometheus
+    `ncp_ipam_*` gauges, and a dashboard tile. (This subsumes the "Network/IPAM" item the
+    UI-4 line below still lists as part of the headline designer.)
 - **UI-4 — Policy & Group-Tag Designer** *(M6 + A1) — the headline:* matrix-default
   + canvas + DSL, the analysis rail (reachability/tests/diff/blast-radius),
   single-admin-aware dual-control publish, canary monitor, drift panel; Network/IPAM.
@@ -1100,12 +1165,16 @@ The v1 UI-0…UI-6 pretended the backend was done. Reframe as a **backend track*
     commit → active; self-approve → 409). Adversarially reviewed (3-agent): 1 low fixed
     (the transient `committing` state now shows under an All tab, so a change is never
     invisible mid-commit).
-  - **Analysis rail delivered incrementally:** reachability query + test runner + matrix
-    grid (A1.1), and the **active-vs-draft flow-diff + blast-radius** panel (A1.2a). Still
-    **deferred to UI-4b:** the reachability **matrix as the default view**, the **Tag
-    Canvas**, **test authoring/save** + the publish-gate result surfaced in Approvals
+  - **Analysis rail delivered (2026-06-13/-18):** the §4 Policy page now renders the full
+    `AnalysisRail` — the **active-vs-draft flow-diff + blast-radius** panel (A1.2a), the
+    **reachability query** with "why", the **test runner**, and the all-pairs
+    **reachability matrix grid** (A1.1). Still **deferred to UI-4b:** the reachability
+    **matrix as the default authoring view** (it is a read-only rail grid today, not the
+    editor; no TanStack-grid authoring surface yet), the **Tag Canvas** (no xyflow/WebGL
+    dep yet), **test authoring/save** + the publish-gate result surfaced in Approvals
     (A1.2b), the visual **diff overlay onto the matrix**, the CodeMirror DSL editor with
-    rich per-span diagnostics, canary-rollout monitor + drift panel, and Network/IPAM.
+    rich per-span diagnostics, and canary-rollout monitor + drift panel. *(Network/IPAM
+    SHIPPED 2026-06-18 — see the IPAM console note under UI-3.)*
 - ✅ **Device provenance + /devices filtering (2026-06-13) — backend predecessor + UI.**
   The keystone slice that unblocked three §3.4 planned changes at once (provenance + scope
   filters, join-key name on Enrollments, dashboard "why" drill-downs — see those callouts).
@@ -1128,6 +1197,15 @@ The v1 UI-0…UI-6 pretended the backend was done. Reframe as a **backend track*
   cross-builds + migrate up/down/up + UI build + 46 UI tests.
 - **UI-5 — Trust ops** *(M7–M8):* revocation/blocklist + propagation SLO; CA/key
   rotation wizards; lighthouse fleet management.
+  - ✅ **Releases console (2026-06-18) — #39 / ADR 0003.** Out of the original UI-5
+    sequence: a new **Releases** page (`pages/Releases.tsx`, nav `/releases`) — the
+    nebula + pilot binary registries and per-lane staged **fleet upgrades** to a
+    registered generation (binaries added out-of-band via `harbor nebula/pilot add`;
+    no upload in the UI), with the canary rollout start/abort controls. Backed by
+    `/admin/v1` release-registry list + fleet-upgrade endpoints. SHIPPED & LIVE.
+  - **Still deferred:** revocation/blocklist UI + propagation SLO, the CA/key
+    rotation wizards (M8), and dedicated lighthouse fleet management beyond the
+    registry add/remove already on the dashboard.
 - **UI-6 — Enterprise** *(M9):* detections + reconciliation, full Settings, Access/
   RBAC admin, System/ops, Automation (tokens/webhooks), break-glass log, overlay-DNS
   placeholder, JIT time-boxed group.

@@ -10,7 +10,7 @@ tags: [networking, nebula, security, protocol, spec, enrollment, attestation]
 
 Companion to [[Nebula Control Plane - Design Plan]] (v3) and [[Nebula Control Plane - Implementation Plan]]. This is implementation-plan step **3.0**: the enrollment / attestation / bundle wire protocol, written **before** M3 code so M3–M5 implement *against this document*, and so it is the artifact externally reviewed in **9.7**. Section references like *(§4.3)* point at the design doc; step references like *(3.4)* point at the implementation plan.
 
-> **Status.** v1-draft. Normative keywords **MUST / SHOULD / MAY** per RFC 2119. Anything marked *(reserved)* is named here for forward-compatibility but not implemented in v1.
+> **Status.** v1 — **implemented & live** (2026-06-18). The spec was written before M3 code; M3–M5 (token enrollment, cloud attestation, mesh-only renew/heartbeat) and the SSO enrollment extension (ADR 0004, riding the `oidc` method) now implement against it and are deployed on the poc/prod stack. `token` and `aws-sigv4` enrollment + `/v1/certs/renew` + `/v1/heartbeat` are SHIPPED & LIVE; `oidc`/SSO is CODE-COMPLETE but OFF BY DEFAULT (fail-closed until an operator configures it); `azure-imds` remains **reserved / not implemented**. Normative keywords **MUST / SHOULD / MAY** per RFC 2119. Anything marked *(reserved)* is named here for forward-compatibility but not yet implemented.
 
 ---
 
@@ -37,8 +37,12 @@ Binding principles (from design §2.1, §P11):
 | `GET /v1/nonce` | Gateway (public) | none | 3.2 |
 | `POST /v1/enroll` | Gateway (public) | request JWS + method credential | 3.3 |
 | `GET /v1/enroll/{id}` | Gateway (public) | retrieval ticket | 3.6a |
+| `GET /v1/sso/start` | Gateway (public) | none — begins SSO portal flow | ADR 0004 |
+| `POST /v1/sso/acs` | Gateway (public) | IdP SAML callback (RelayState) | ADR 0004 |
 | `POST /v1/certs/renew` | Core (**mesh-only**) | calling tunnel cert (§4.5) | 4.3 |
 | `POST /v1/heartbeat` | Core (**mesh-only**) | calling tunnel cert | 4.6 |
+
+> The two `/v1/sso/*` routes are the off-mesh **SSO enrollment portal** (added 2026-06-18, ADR 0004): `start` mints a device-bound session and redirects the browser to the IdP; `acs` receives the SAML callback and hands back a gateway-signed assertion the host then submits via `POST /v1/enroll` with `method: "oidc"` (§5.4). The portal holds **no CA/DB/overlay identity** — it only vouches "the IdP said this" via a pinned signing key. Both are **disabled by default** (fail-closed until `sso_acs_url` and a usertrust config are set).
 
 The Gateway is reachable from the public internet (and via PrivateLink/Private Endpoint, 5.7). Core endpoints are bound to Core's overlay IP and **MUST NOT** be reachable off-mesh (4.1).
 
@@ -181,7 +185,7 @@ Core consumes the queued candidate and, idempotently:
 2. Authenticates the `method` credential (§5.4).
 3. Enforces **enrollment quotas** (3.10): per-cloud-account, per-instance, and **per-join-key** caps, distinct from the signing circuit-breaker (2.5).
 4. Resolves **groups** from the **join key** (token method, 3.5) or immutable facts (attestation, 5.5) — never from `requested_groups` or mutable tags.
-5. **Approval decision (default-deny for bearer secrets):** a **join-key** (token-method) join goes to **PENDING manual approval (3.9)** unless that key explicitly sets `auto_issue` (a heavily-warned per-key opt-out). **Attestation methods** (aws-sigv4/azure-imds/oidc, and future TPM) may auto-issue. A conflicting existing active enrollment for the same instance/identity always routes to PENDING, never silent re-issue.
+5. **Approval decision (default-deny for bearer secrets):** a **join-key** (token-method) join goes to **PENDING manual approval (3.9)** unless that key explicitly sets `auto_issue` (a heavily-warned per-key opt-out). **Cloud attestation** (`aws-sigv4`, and future `azure-imds`/TPM) may auto-issue against the dual-control cloud-trust allowlist. **SSO (`oidc`)** defaults to **PENDING** as implemented today (the usertrust config governs first-match netblock binding, not silent auto-issue). A conflicting existing active enrollment for the same instance/identity always routes to PENDING, never silent re-issue.
 6. Drives device state `pending → active` (2.12); on auto-issue or after approval: allocates an overlay IP (2.6), assembles + signs the **leaf cert** (CA key, 2.3) and the **bundle** (config-signing key, §6), writes the bundle to the **result store** (3.6a).
 
 Auto-issue vs. **pending approval**: a request may complete immediately (`issued`) or wait for a human (`pending` → later `issued`/`denied`). Both are delivered via the same poll endpoint. **The default for join keys is `pending`** — a host joining on a bearer secret is only admitted to the network after a human approves it in the UI.
@@ -209,10 +213,10 @@ Responses:
 |---|---|---|---|
 | `token` | `{ "token": "<join-key secret>" }` | matched (by hash) to an active **join key** (§4.1c): not expired, `used_count < max_uses`, within quota. **Defaults to PENDING approval** unless the key sets `auto_issue`. Groups come from the key. | 3.4 |
 | `aws-sigv4` | `{ "presigned": { "method":"POST", "url":"https://sts.<region>.amazonaws.com/", "headers":{...}, "body":"Action=GetCallerIdentity&Version=2011-06-15" } }` — the SigV4 signature **MUST** cover headers `X-Harbor-Nonce: <nonce>` and `X-Harbor-Pubkey-Hash: <pubkey_hash>` | Core replays `GetCallerIdentity`; checks account/role-path allowlist + nonce/pubkey binding; secondary IID/DescribeInstances cross-check (5.3) | 5.1–5.3 |
-| `azure-imds` | `{ "attested_document": "<base64 PKCS7>" }` — IMDS attested data with the nonce embedded natively | chain to Azure CA, subscription/vmId allowlist | 5.6 |
-| `oidc` *(reserved, M9)* | `{ "id_token": "<JWT>" }` device-code flow | IdP JWKS, device↔human binding | 9.1 |
+| `azure-imds` *(reserved — not implemented)* | `{ "attested_document": "<base64 PKCS7>" }` — IMDS attested data with the nonce embedded natively | chain to Azure CA, subscription/vmId allowlist | 5.6 |
+| `oidc` (SSO; **code-complete, off by default**) | `{ "assertion": "<compact JWS>" }` — a gateway-signed SSO assertion (ECDSA, `internal/ssoassert`) minted by the SSO portal (§2.1) and bound to `{pubkey_hash, nonce}` *(superseded 2026-06-18: this replaced the originally-planned `{ "id_token" }` device-code shape; device-code is now a future P4 item)* | Core (`processSSO`) re-verifies the **pinned** assertion key + validity window, re-binds the embedded nonce/pubkey, then authorizes against the published **usertrust** config (first-match netblock); default **PENDING** | ADR 0004 |
 
-The **token** method is M3's path; cloud attestation lands in M5. The credential is inside the signed payload, so it is covered by the request JWS and bound to the nonce + pubkey.
+The **token** method (M3) and **aws-sigv4** cloud attestation (M5) are SHIPPED & LIVE; the credential is inside the signed payload, so it is covered by the request JWS and bound to the nonce + pubkey. The **oidc/SSO** path is implemented and deploy-threaded but stays disabled (fail-closed) until an operator stands up the IdP SAML app, publishes a usertrust config, and sets `sso_acs_url`. **azure-imds** is named for forward-compatibility but is **not implemented** — Core rejects it as an unknown method.
 
 ---
 
@@ -330,6 +334,8 @@ Pilot **MUST** reject any command `type` it does not recognize (closed enum).
 ---
 
 ## 10. Open items for review (9.7)
+
+> *(2026-06-18: the protocol is implemented and live; the v1 design choices below were carried into the shipped code as specified. These remain the standing review/verification items rather than blockers.)*
 
 - Confirm acceptability of **P256 key reuse** for ECDH + ES256 PoP, or switch to a dedicated enrollment-auth key.
 - `NONCE_TTL`/`MAX_SKEW`/quota defaults under real clock-skew and fleet-launch storms (9.8).

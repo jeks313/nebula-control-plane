@@ -8,6 +8,15 @@ tags: [nebula, adr, enrollment, sso, oidc, saml, identity, approval, architectur
 # ADR 0004 — SSO-Driven User Enrollment
 
 **Status:** Accepted (Phases 1–3 are the direction; auto-issue and device-code are deferred opt-ins)
+**Status (2026-06-18):** CODE-COMPLETE, NOT ROLLED OUT. Phases 1–2 are built, merged, and
+deploy-threaded but **OFF BY DEFAULT** — `internal/ssoassert` (dedicated-ECDSA signed
+assertion), Core `processSSO` (re-verifies the pinned key + nonce/pubkey binding +
+first-match `internal/usertrust`, default pending), the gateway portal (`internal/gateway/ssoportal.go`,
+`cmd/gateway/sso.go`), `harbor usertrust publish` (dual-control), the admin-API user-trust
+config + UI, SSO provenance, and genesis/bootstrap/terraform threading all exist. SSO stays
+**fail-closed-disabled** until an operator registers the second AD/Entra SAML app, publishes
+a user-trust config, and sets `-sso-acs-url` (empty ⇒ disabled). Phase 3 (lifecycle) and
+Phase 4 (device-code, auto-issue) remain PLANNED. Decision log: `docs/SSO-DECISIONS.md`.
 **Date:** 2026-06-13
 **Decision owners:** Chris Hyde (+ a future second approver, per dual-control)
 
@@ -155,17 +164,22 @@ posture already depend on, sharpened by offboarding.
 
 ## Phased plan
 
-- **Phase 1 — the core flow.** The enrollment portal (IdP redirect/callback reusing
-  `adminauth`, loopback browser flow, assertion signing — no CA), `MethodSSO`, the
-  nonce/pubkey binding, Core verification, **default pending**, and the SSO identity surfaced
-  in the existing approval queue. Delivers the feature.
-- **Phase 2 — user-trust config + provenance UI.** Dual-control `IdP group/domain → mesh
-  groups + admission` (mirror cloud-trust + the editor we just built), and the "Joined via:
-  SSO" provenance cell.
-- **Phase 3 — lifecycle.** Shorter user-cert TTL + re-SSO at renewal; tie IdP offboarding to
-  renewal denial; pair with M7 for active-laptop revocation.
-- **Phase 4 — opt-ins.** Device-code flow for headless admin hosts; optional per-group
-  auto-issue for low-privilege groups (never admin).
+- **Phase 1 — the core flow. ✅ DONE (code-complete, off by default).** The enrollment portal
+  (IdP redirect/callback reusing `adminauth`, SAML ACS, assertion signing — no CA) lives on
+  the off-mesh gateway (`internal/gateway/ssoportal.go`, `cmd/gateway/sso.go`); the `sso`
+  method (`internal/enrollment` `processSSO`), the nonce/pubkey binding (`internal/ssoassert`),
+  Core verification (pinned assertion key + binding + user-trust), **default pending**, and
+  the SSO identity surfaced in the existing approval queue are all built.
+- **Phase 2 — user-trust config + provenance UI. ✅ DONE.** Dual-control `IdP group/domain →
+  mesh groups + admission` (`internal/usertrust`, `harbor usertrust publish` mirroring
+  cloud-trust, admin-API `/usertrust/*` + the console editor), and the SSO provenance
+  ("Joined via: SSO") reusing the provider-agnostic evidence columns.
+- **Phase 3 — lifecycle.** *(PLANNED — not built.)* Shorter user-cert TTL + re-SSO at
+  renewal; tie IdP offboarding to renewal denial; pair with M7 for active-laptop revocation.
+  (The first ephemeral-TTL slice exists for the join-key method, but the SSO re-SSO-at-renewal
+  / offboarding path is not yet implemented.)
+- **Phase 4 — opt-ins.** *(PLANNED — not built.)* Device-code flow for headless admin hosts;
+  optional per-group auto-issue for low-privilege groups (never admin).
 
 ## Consequences
 
@@ -185,21 +199,31 @@ posture already depend on, sharpened by offboarding.
 
 ## Open questions to resolve before building
 
+*(Resolved-status annotations added 2026-06-18; decisions captured in `docs/SSO-DECISIONS.md`.)*
+
 1. **Portal assertion-signing key custody** — a dedicated key Core pins, or reuse an
    existing root? Reuse is zero-new-trust-root; a dedicated key narrows blast radius (cf.
-   the same fork in ADR 0003).
+   the same fork in ADR 0003). **RESOLVED (S6): a dedicated ECDSA P-256 keypair, distinct
+   from the CA; genesis mints it, the gateway holds the private half, Core pins the public
+   half (`-sso-assert-pub`). See `internal/ssoassert`.**
 2. **Portal deployment** — a standalone public service, or a narrowly-scoped public mode of
    an existing tier? It must be public (pre-mesh) yet must not drag the mesh-only console
-   onto the public internet.
+   onto the public internet. **RESOLVED (ADR 0009): HTTP routes (`/v1/sso/start`,
+   `/v1/sso/acs`) on the existing off-mesh gateway, enabled iff `-sso-acs-url` is set — no
+   new tier. Splitting into its own Fargate service later is a pure deploy change.**
 3. **Re-SSO-at-renewal mechanics** — how a user-method renewal re-triggers a browser SSO
    without a poor UX; what grace window applies; how this interacts with the
-   Core-issued-renew command path.
+   Core-issued-renew command path. *(OPEN — Phase 3, not built.)*
 4. **Mesh-group vs console-RBAC mapping** — one IdP-group→both mapping, or two independent
    maps? Keep them separate (reachability vs authority) but decide the config ergonomics.
+   **RESOLVED: two independent maps — the portal maps groups → mesh groups via the published
+   `user-trust` config; the console maps groups → admin RBAC roles separately.**
 5. **Auto-issue policy** — which (if any) IdP groups ever warrant skipping human approval;
-   admin groups never.
+   admin groups never. *(OPEN — Phase 4; SSO defaults to pending today, no auto-issue path.)*
 6. **Anti-relay UX** — exactly what the consent screen shows (device name, fingerprint,
-   requested groups) and how a user is taught to reject an unexpected device.
+   requested groups) and how a user is taught to reject an unexpected device. **RESOLVED in
+   mechanism: the assertion is bound to pubkey-hash + nonce and Core enforces the binding
+   (`ErrSSOBinding`); the consent-screen wording/teaching is still an operator-UX refinement.**
 
 ## Operator setup (live rollout)
 
@@ -237,7 +261,7 @@ portal is optional gateway config, not a rewrite), and the no-issuance invariant
 - The assertion **issuer/realm** (the gateway's `-sso-issuer`, fed to `usertrust.Match`) is the
   IdP's issuer — the same IdP backs both apps.
 
-**Other live-rollout prerequisites (deferred from the build):**
+**Other live-rollout prerequisites (deploy-threaded 2026-06-18 — wired but off by default):**
 - **Distribute the genesis-minted assertion keypair**: the **private** half → the gateway's
   config/secret (`-sso-assert-key` / `$NCP_GW_SSO_ASSERT_KEY_PEM`); the **public** half is pinned
   on Core (`-sso-assert-pub`). Genesis emits `sso-assert.key` / `sso-assert.pub` and records only
@@ -246,7 +270,13 @@ portal is optional gateway config, not a rewrite), and the no-issuance invariant
   app's IdP metadata), `-sso-sp-cert`/`-sso-sp-key`, `-sso-entity-id`, `-sso-issuer`.
 - **Enable Core**: `-sso-assert-pub` (pin) + `-usertrust-db`, and **publish a user-trust config**
   (`harbor usertrust publish`, or the dual-control UI) mapping the AD groups → mesh groups + CIDR.
-- `deploy/prod/bootstrap-genesis.sh` threading of all of the above is not yet wired.
+- **DONE — `deploy/prod/bootstrap-genesis.sh` now threads all of the above (commit `d3ea2ff`),
+  off by default.** When `SSO_ACS_URL` is empty NONE of the SSO threading fires (genesis/recover/
+  gateway/Core are byte-for-behavior unchanged); when set, bootstrap distributes the genesis
+  assertion keypair, mints + snapshots a STABLE RSA SAML SP keypair (the IdP app pins the SP
+  cert), and wires the gateway secret (`deploy/prod/terraform/app/harbor_config.tf` carries the
+  `sso_*` fields, empty by default). The remaining operator steps — register the second SAML app,
+  publish a user-trust config, set `SSO_ACS_URL` — are the only thing gating live SSO.
 
 ## Relationship to other work
 

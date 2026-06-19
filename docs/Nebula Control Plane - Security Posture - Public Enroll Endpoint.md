@@ -7,6 +7,8 @@ tags: [nebula, security, enrollment, gateway, attestation, threat-model, risk]
 
 # Security Posture — The Public Enrollment Endpoint
 
+**Status (2026-06-18):** Accurate as written, with one major update — **revocation (M7) is now built (7.1: blocklist distribution SHIPPED & LIVE)**: `internal/revocation` + `harbor blocklist add|remove|list`, threaded into the signed bundle's `pki.blocklist` (both the renew and enrollment paths), with fast propagation via a blocklist-lane rollout (7.1b) and peer-side handshake refusal proven. The device reaper (also SHIPPED & LIVE) auto-revokes still-live reaped certs. Two caveats remain: the live poc `core-api` does not yet pass `-blocklist-db`, so recorded revocations are not yet pushed into host bundles in the running stack; and the **revocation-as-DoS guards (7.2)** — cannot-blocklist-control-plane/lighthouse + bulk-revoke dual-control + rate-limiting — are still open. See the "Residual risks" and "Additional measures" notes below.
+
 **Audience:** anyone scrutinising the one deliberately internet-facing surface of Harbor —
 the enrollment gateway (`/v1/enroll`). This is where a host that is not yet on the mesh
 asks to join, so it is, by design, reachable from the public internet. That is the point:
@@ -26,9 +28,14 @@ which makes the authoritative decision. A successful enrollment grants only the 
 credential authorises, and the firewall is default-deny group→group, so even an admitted
 host can reach nothing it is not explicitly permitted. The risk is acceptable because the
 *attack surface* (the public gateway) and the *authority* (Core + CA) are separated, the
-credential model is least-privilege and revocable-by-expiry, and abuse is rate-limited and
-audited at every layer. The one structural gap is **revocation (M7) is not yet built**, so
-short certificate lifetimes are currently the only way to bound a mis-issuance.
+credential model is least-privilege and revocable (by blocklist and by expiry), and abuse is
+rate-limited and audited at every layer. The former structural gap — **revocation (M7)** — is **now built
+(7.1: blocklist distribution, SHIPPED & LIVE)**: a host's cert fingerprint can be blocklisted
+and propagated to the healthy fleet via the next signed bundle (`pki.blocklist`), enforced
+peer-side at handshake. Short certificate lifetimes remain a sensible bound, but they are no
+longer the *only* way to recall a mis-issuance. The remaining work is the **revocation-as-DoS
+guards (7.2, still open)** — cannot-blocklist-control-plane/lighthouse + bulk-revoke
+dual-control + rate-limiting — and switching the live poc on (`-blocklist-db` on `core-api`).
 
 ## What the endpoint is, and why it is public
 
@@ -163,9 +170,16 @@ model is least-privilege, and admission is contained downstream.
 1. **Auto-issue bearer keys are the highest-value target.** A leaked join key with
    `auto_issue=true` mints certs with no human in the loop. The bounds (hash-at-rest,
    `max_uses`, TTL, quota, revoke) limit the damage, but auto-issue is the dangerous mode.
-2. **Revocation does not exist yet (M7).** A mis-issued or leaked-credential cert **cannot
-   currently be revoked** — its only bound is its lifetime. This is the single biggest gap:
-   the front door has strong locks, but we cannot yet recall a key that got through.
+2. **Revocation now exists (M7 / 7.1), but has two open edges.** *(updated 2026-06-18)* A
+   mis-issued or leaked-credential cert **can now be revoked**: `internal/revocation`
+   blocklists a fingerprint, which Core renders into the signed bundle's `pki.blocklist` and
+   the healthy fleet enforces peer-side at handshake (`harbor blocklist add|remove|list`; fast
+   propagation via a blocklist-lane rollout, 7.1b). The remaining edges: (a) **the live poc
+   `core-api` does not yet pass `-blocklist-db`**, so revocations are recorded but not yet
+   pushed into host bundles in the running stack — flip that flag to activate propagation; and
+   (b) the **revocation-as-DoS guards (7.2) are not built yet** — the registry does not itself
+   enforce the cannot-blocklist-control-plane/lighthouse invariant, and bulk revoke is not yet
+   dual-control + rate-limited. Short cert lifetimes remain a useful belt-and-suspenders bound.
 3. **Volumetric DoS.** A public endpoint invites floods. Rate limits + body caps + the
    credential-less edge blunt it, but a large distributed flood could still pressure the
    queue or the STS callout. No proof-of-work / CAPTCHA today.
@@ -184,9 +198,14 @@ model is least-privilege, and admission is contained downstream.
 
 Prioritised, roughly highest-leverage first:
 
-1. **Build M7 (revocation / blocklist).** The one structural gap. Until then, **keep
-   certificate TTLs short** — a short TTL is currently the only bound on a mis-issuance,
-   and it also shrinks the window for the ADR-0002 group-removal caveat.
+1. **Finish M7 (revocation / blocklist).** *(updated 2026-06-18)* The core (7.1) is **built &
+   shipped** — blocklist distribution via the signed bundle, peer-side enforced. The remaining
+   work: (a) **turn it on in the live poc** by passing `-blocklist-db` to `core-api` so recorded
+   revocations actually reach host bundles; and (b) **build the 7.2 DoS guards** — make the
+   registry refuse to blocklist control-plane/lighthouse fingerprints, and gate bulk revoke
+   behind dual-control + rate-limiting. Meanwhile **keep certificate TTLs short** — a short TTL
+   is still a useful bound on a mis-issuance, and it also shrinks the window for the ADR-0002
+   group-removal caveat.
 2. **Prefer attestation over bearer keys for auto-issue.** A live, signed cloud identity is
    far stronger than a static shared secret. Consider making auto-issue *require*
    attestation, and keep bearer keys at manual-approval by default (as they are).
@@ -213,7 +232,10 @@ Prioritised, roughly highest-leverage first:
 The public enrollment endpoint is the right thing to expose — it is what lets the mesh
 span networks we do not own — and it is exposed safely: the front door holds no keys, every
 claim is re-verified behind it, admission requires a least-privilege credential, and the
-firewall contains whatever gets in. The honest caveat to put in front of any reviewer is
-**revocation (M7)**: today we admit carefully and bound mis-issuance with short lifetimes,
-but we cannot yet recall an issued identity. Prioritising M7 and keeping TTLs short closes
-the most important remaining gap.
+firewall contains whatever gets in. The former headline caveat — **revocation (M7)** — is
+**now addressed in the core (7.1, SHIPPED & LIVE)**: we can blocklist an issued identity and
+have the healthy fleet refuse it at handshake. The honest caveats that remain for a reviewer
+are smaller and specific: the live poc has not yet been switched on (`-blocklist-db` on
+`core-api`), and the **revocation-as-DoS guards (7.2)** — protecting the control plane from
+being blocklisted and gating bulk revoke behind dual-control + rate limits — are still to
+build. Finishing 7.2, flipping the live flag, and keeping TTLs short closes the remaining gap.
