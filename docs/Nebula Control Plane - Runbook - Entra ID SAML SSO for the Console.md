@@ -7,6 +7,11 @@ tags: [nebula, runbook, saml, entra-id, azure-ad, sso, idp, adminauth, productio
 
 # Runbook — Log into the Harbor console with Microsoft Entra ID (SAML SSO)
 
+**Status (2026-06-18):** PLANNED — not yet performed. Harbor's SAML code path is shipped and the genesis
+bootstrap is fully wired to drive it (the steps below are accurate against current code), but the live poc/prod
+console still runs the **dev mock-IdP**. Switching it to real Entra SAML is the remaining prod-grade console-auth
+gap; this runbook is the procedure to close it, and the first round-trip has not been exercised on real AWS yet.
+
 This guide switches the Harbor admin console from its built-in **fake login** (the "mock IdP",
 fine for a demo) to **"sign in with your Microsoft work account."** It assumes **no prior SAML
 knowledge** — every term is explained, and every value you need is spelled out.
@@ -218,4 +223,4 @@ harbor admin-api \
 
 - **No Harbor code change** — configuration only. (The IdP code follow-ups in ADR 0007 — scheduling `SessionStore.GC` and OIDC-client-secret-from-file — don't affect SAML.)
 - **Sessions live server-side in the database** (Aurora), so logins survive an admin-api instance loss and HA replicas need no sticky sessions.
-- **Not yet live-validated:** like the rest of the production deploy, the end-to-end SAML round-trip hasn't been exercised on real AWS — expect to debug the first attempt with the checklist above.
+- **Not yet live-validated (updated 2026-06-18):** the rest of the production deploy *is* live and exercised on real AWS (the poc is the prod stack — Aurora + KMS + ACME edge TLS + Fargate gateway/lighthouse + SSM-only access; the console is already served with `-tags ui` on :443). What remains is the **console Entra SAML round-trip specifically** — the live console still runs the dev mock-IdP, so an operator must create the Entra Enterprise App, generate the SP keypair, and re-run genesis with the `SAML_*` vars set. Expect to debug the first attempt with the checklist above.

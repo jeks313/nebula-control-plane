@@ -8,6 +8,7 @@ tags: [nebula, adr, gateway, enrollment, queue, security, dmz, architecture]
 # ADR 0005 — Pull-Based Enrollment Gateways
 
 **Status:** Accepted (the B / out-of-mesh model is the direction; supersedes the shared-queue/Postgres split for multi-gateway)
+**Status (2026-06-18):** SHIPPED & LIVE. The off-mesh, pull-based gateway runs on the poc (= the prod stack) as a **Fargate** task (the terraform default), fronted by two NLBs (public enroll + an internal NLB carrying in-VPC enroll + Harbor-only collect); Harbor PULLS candidates over leaf-pinned mTLS (`internal/collect`) against the registry (`internal/gatewayreg`). Phases 1–3 done; Phase 4 PARTIAL (collect metrics shipped; long-poll + rate/depth caps + fleet health view outstanding).
 **Date:** 2026-06-13
 **Decision owners:** Chris Hyde (+ a future second approver, per dual-control)
 
@@ -153,7 +154,7 @@ which is exactly what the pull/off-mesh model grants it.
   handshakes + claims → remove → nothing polled; audit chain intact). Console surface
   deferred with the other UI work. (No "last active" invariant — a gateway is an
   off-mesh sink, so removing the last one only pauses public enrollment.)
-- ✅ **Phase 3 — the demo node.** A standalone public gateway EC2 (own SG: `:8443`
+- ✅ **Phase 3 — the standalone public-edge node.** A standalone public gateway (own SG: `:8443`
   public + the poll port restricted to Harbor; **not** on the mesh), registered with
   Harbor — the real public-edge/Core split, with no Postgres. **Implemented
   (2026-06-14):** `deploy/terraform` gained a 4th node `gateway` (off-mesh, EIP) with
@@ -164,8 +165,7 @@ which is exactly what the pull/off-mesh model grants it.
   now mints leaf-pinned mTLS on each side, starts the off-mesh `gateway` on its node
   (public enroll + Harbor-only collect over a local queue), `harbor gateway add`s it,
   and runs `harbor collect` (replacing `enroll worker`). README + node `NEXT-STEPS`
-  updated. *(Not applied to live AWS here — run `terraform apply` + the bootstrap to
-  demo; expect first-run iteration on a real apply.)*
+  updated.
   **Network isolation (2026-06-14 refinement):** moved off the single default subnet
   to a **dedicated VPC with per-tier subnets** (control/edge/mesh/client). The
   authoritative control is **SG egress lockdown** (stateful): the gateway may egress
@@ -174,9 +174,24 @@ which is exactly what the pull/off-mesh model grants it.
   gateway *initiates nothing*. Defense-in-depth: a restrictive **NACL on the edge
   subnet** (no UDP egress except DNS). The lighthouse stays a mesh member (must keep
   Nebula UDP to harbor) so it can't be fully fenced; its egress is still tightened.
-  *(NACLs are stateless — confirm return-traffic rules on a real apply.)*
-- **Phase 4 — hardening.** Long-poll for low-latency enrollment; per-gateway rate/
-  depth caps + alerting; gateway health in the fleet view.
+  **SHIPPED & LIVE on the poc (superseded 2026-06-18: now Fargate, not EC2).** The off-mesh
+  gateway runs as a **Fargate** task — `gateway_runtime = "fargate"` is the terraform DEFAULT,
+  since the gateway runs no nebula/TUN, so it fits a serverless container (`deploy/prod/terraform/app/gateway_fargate.tf`).
+  Because an internet-facing NLB isn't reachable in-VPC via its public DNS, the live stack runs
+  **two NLBs**: a PUBLIC internet-facing NLB (enroll `:8443` only, for off-cloud clients) and an
+  INTERNAL NLB (in-VPC enroll + the Harbor-only collect `:9443` + a `/metrics` scrape port for
+  Prometheus). The ADR-0005 posture holds: collect is reachable ONLY from Harbor's SG; the task
+  egresses only ECR/Secrets/DNS + Loki logs — it initiates nothing into the mesh. The image is
+  **distroless** (ADR 0006), enroll TLS is the gateway's own Let's Encrypt cert via ACME DNS-01
+  (`poc-gateway.mesh.failsafe.net`), config (nonce key + mTLS material + the optional SSO portal
+  fields) is injected from Secrets Manager, and logs ship to Loki via a FireLens sidecar. The
+  legacy `deploy/terraform` EC2 gateway node above is retained behind `gateway_runtime = "ec2"`.
+  *(NACLs are stateless — return-traffic rules validated on the live apply.)*
+- ◐ **Phase 4 — hardening (PARTIAL).** Collector observability is **SHIPPED & LIVE**:
+  `internal/collect/metrics.go` exports `ncp_collect_*` Prometheus series (cycles, processed,
+  errors by gateway+phase, cycle/last-success timings) scraped via the internal NLB and
+  surfaced on the dashboard. OUTSTANDING: long-poll for low-latency enrollment; per-gateway
+  rate/depth caps + alerting; gateway health in the fleet view.
 
 ## Consequences
 
@@ -200,8 +215,11 @@ which is exactly what the pull/off-mesh model grants it.
 
 ## Open questions to resolve before building
 
+*(All resolved during Phase 1, 2026-06-14 — see the Phase 1 note: leaf-pinned self-signed certs (no CA); fixed-interval poll; admin-paste pin bootstrap; reuse the existing result-TTL; pinned-cert-is-sufficient since Core re-verifies. Kept for the rationale.)*
+
 1. **mTLS identity source** — reuse the genesis CA for the Harbor client + gateway
    server certs (zero new root) or a dedicated gateway-PKI? (Same fork as ADRs 0003/0004.)
+   **Resolved:** neither — leaf-pinned self-signed certs (`internal/collect` pins the peer leaf by SHA-256), no CA.
 2. **Poll cadence vs. long-poll** — fixed interval (simple) vs. long-poll (low-latency
    enrollment); the host's own poll interval interacts with this.
 3. **Registry trust bootstrap** — how a gateway's pinned cert first enters the registry

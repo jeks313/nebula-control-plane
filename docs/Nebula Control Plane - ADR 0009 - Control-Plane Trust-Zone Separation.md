@@ -1,14 +1,14 @@
 ---
 title: "ADR 0009 — Control-Plane Trust-Zone Separation"
 created: 2026-06-15
-status: proposed
+status: accepted
 tags: [nebula, adr, security, sso, enrollment, trust-zones, dmz, architecture]
 ---
 
 # ADR 0009 — Control-Plane Trust-Zone Separation
 
-**Status:** Proposed (the invariant + asymmetric model is the direction; Phase 0 guard is the only immediate build)
-**Date:** 2026-06-15
+**Status (2026-06-18):** Accepted & implemented — Phases 0–2 are CODE-COMPLETE + DEPLOY-THREADED but OFF BY DEFAULT (the SSO enrollment plane stays fail-closed-disabled until an operator publishes a user-trust config and sets `sso_acs_url`). The Phase 0 issuance-bind guard is SHIPPED & LIVE on the poc (it guards both `core-api` and `admin-api`). Phase 3 (opt-in console edge/core split) and Phase 4 (SSO lifecycle) remain deferred/PLANNED.
+**Date:** 2026-06-15 (accepted & built 2026-06-18)
 **Decision owners:** Chris Hyde (+ a future second approver, per dual-control)
 
 ## Context
@@ -26,7 +26,8 @@ to; the exposed side is a sink it drains.
 Two things now stress that picture:
 
 1. **SSO is real (ADR 0004).** Operator console login terminates **OIDC/SAML/GitHub**
-   in `internal/adminauth`, and SSO-driven **user enrollment** is on the roadmap. SSO
+   in `internal/adminauth`, and SSO-driven **user enrollment** is on the roadmap *(now
+   built per this ADR — code-complete, off by default; see Status above)*. SSO
    flows are *inherently* internet-facing — a browser does an IdP redirect; a user
    self-enrolls from a laptop *before* it has a mesh cert.
 2. **The admin-api blurs the boundary.** Today `admin-api` (`cmdAdminAPI`) **terminates
@@ -44,19 +45,22 @@ ADR 0005 itself flagged this: *"the SSO portal is another public front; whether 
 follows the same pull/off-mesh posture is worth aligning (likely yes)."* This ADR is
 that alignment.
 
-### Current trust-boundary map (as built)
+### Current trust-boundary map (updated 2026-06-18)
 
 | Component | Exposure | Holds CA/KMS | Terminates SSO | Can issue | Into Core? |
 |---|---|---|---|---|---|
-| `core-api` + CA signer | mesh-only | **yes** | no | yes (renew) | inbound-only from mesh |
-| `admin-api` (issuance mode) | mesh-only *by convention* | no (uses Consumer's signer) | **yes** | **yes** (approve) | n/a (same box) |
-| `enrollment.Consumer` | mesh-only | **yes** (signer) | no | **yes** | n/a |
-| Enrollment **gateway** (ADR 0005) | internet-facing | no | no (today) | no | **nothing** (Harbor pulls) |
-| ADR 0004 SSO portal (planned) | internet-facing | no (design) | **yes** | no (design) | TBD — *this ADR* |
+| `core-api` + CA signer | mesh-only (issuance-bind guard now enforced) | **yes** | no | yes (renew) | inbound-only from mesh |
+| `admin-api` (issuance mode) | mesh-only — now **structurally enforced** (Phase 0 guard) | no (uses Consumer's signer) | **yes** | **yes** (approve) | n/a (same box) |
+| `enrollment.Consumer` | mesh-only | **yes** (signer) | no | **yes** (incl. `processSSO`) | n/a |
+| Enrollment **gateway** (ADR 0005) | internet-facing | no | **yes (SSO portal built; disabled until configured)** | no | **nothing** (Harbor pulls) |
+| ADR 0004 SSO portal | internet-facing — **on the gateway** (this ADR's resolution; built, off by default) | no (dedicated assertion key, not the CA) | **yes** | no — Core's `processSSO` decides | none (Harbor pulls via `collect`) |
 
 The sharp boundary already exists for **machine** enrollment (gateway = keyless,
-off-mesh, pull-only). It is **blurred** exactly where SSO terminates: the admin-api
-process, and the not-yet-built SSO user-enrollment portal.
+off-mesh, pull-only). It was **blurred** exactly where SSO terminates: the admin-api
+process, and the SSO user-enrollment portal. **(Resolved 2026-06-18:** the Phase 0 guard
+now structurally enforces "issuance-mode binds loopback/overlay only," and the SSO
+enrollment portal was built on the off-mesh gateway per this ADR — keyless, signing only
+a dedicated assertion — rather than as a new public tier. Both ship disabled-by-default.)
 
 ## Decision
 
@@ -74,7 +78,8 @@ Applied to the two planes:
 
 1. **User-enrollment plane (genuinely internet-facing — the live risk).** Build ADR
    0004's SSO enrollment **on the existing ADR 0005 off-mesh gateway**, not as a new
-   public tier. The gateway gains a `wire.MethodSSO` path and a **no-CA assertion
+   public tier. The gateway gains an SSO enrollment path (built as `wire.MethodOIDC`,
+   not a separate `MethodSSO` constant) and a **no-CA assertion
    signer** (reusing the `adminauth` OIDC/SAML/GitHub authenticators); Core grows
    `enrollment.Consumer.processSSO` (mirroring `processAttested`/`processToken`) that
    re-verifies the assertion + the single-use, key-bound nonce, maps IdP group → mesh
@@ -142,45 +147,66 @@ privileged connectivity — which the off-mesh pull model already denies it.
   mode (`-ca-cert`) + a non-loopback/non-overlay bind ⇒ refuse to start unless
   `-allow-public-issuance` is explicitly passed. Near-zero code; makes the boundary
   structural for the binary that exists today.
-- **SSO enrollment on the gateway.** The gateway keeps its public face (`/v1/nonce`,
-  `/v1/enroll`, `/v1/enroll/{id}`) and gains an SSO method: it runs the `adminauth`
-  authenticator, validates the IdP assertion, and emits a `MethodSSO` candidate signed
-  with a **dedicated assertion key** (pinned by Core at `Consumer` build time, rotatable
+- **SSO enrollment on the gateway.** *(Built 2026-06-18 — `internal/gateway/ssoportal.go`;
+  disabled until `SSOConfig.SAML` + `SigningKey` are present, i.e. until `sso_acs_url` is set.)*
+  The gateway keeps its public face (`/v1/nonce`,
+  `/v1/enroll`, `/v1/enroll/{id}`) and gains an SSO method (the `wire.MethodOIDC` path; no
+  separate `MethodSSO` constant was added): it runs the `adminauth`
+  authenticator, validates the IdP assertion, and emits a candidate signed
+  with a **dedicated assertion key** (`internal/ssoassert`, ECDSA P-256, minted at genesis;
+  pinned by Core as `enrollment.Config.AssertionVerifyKey`, rotatable
   without touching the CA ceremony). It still holds **no CA**.
-- **Core grows `processSSO`.** Mirrors `processAttested`/`processToken`: re-verify the
+- **Core grows `processSSO`.** *(Built — `internal/enrollment/enrollment.go` `processSSO`,
+  dispatched from the `wire.MethodOIDC` branch.)* Mirrors `processAttested`/`processToken`:
+  re-verify the
   assertion + nonce + pubkey binding, map IdP identity → mesh group via a **user-trust
-  config** (a dual-control published store, mirroring `cloudtrust`), and default to
+  config** (`internal/usertrust`, a dual-control published store, `usertrust.Match`
+  first-match-wins, mirroring `cloudtrust`), and default to
   **pending** (per-group auto-issue an explicit opt-in). IdP provenance (email, groups,
-  issuer) lands in the enrollment evidence columns + the console approval queue.
+  issuer) lands in the enrollment evidence columns + the console approval queue. Fails
+  closed when no pinned key or no published user-trust config (`ErrSSONotConfigured`).
 - **Transport: unchanged.** `internal/collect` leaf-pinned mTLS pull, verbatim. The
   edge initiates nothing; Harbor pulls.
-- **Console split: available, not mandatory.** Two `adminapi.New()` instantiations
-  selectable by flag/subcommand — **edge** (`CanIssue=false`, no `Consumer`, serving
-  only `/admin/v1/auth/*` + session minting) and **core** (the `Consumer` + approvals +
-  fleet, mesh-only). Ships disabled by default.
+- **Console split: deferred (Phase 3, not built).** The design is two `adminapi.New()`
+  instantiations selectable by flag/subcommand — **edge** (`CanIssue=false`, no `Consumer`,
+  serving only `/admin/v1/auth/*` + session minting) and **core** (the `Consumer` +
+  approvals + fleet, mesh-only). *(Status 2026-06-18: NOT built — the Phase 0 issuance-bind
+  guard already closes the latent gap, so the split was deferred per SSO-DECISIONS S11.
+  `adminapi.Config.CanIssue` exists today and gates the approve endpoint, but the edge/core
+  process split itself is unimplemented.)*
 - **Session model: unchanged.** Keep `httpOnly` session cookies + CSRF + step-up MFA
   freshness (`mfa-freshness`, default 15m) on privileged actions, enforced **on the
   core side** after any split. No bearer tokens.
 
 ## Phased plan
 
-- **Phase 0 — ratify + the startup guard (days; cheapest, highest-value).** Land the
-  invariant in this ADR and the `admin-api` guard (refuse `-ca-cert` + public bind
-  without `-allow-public-issuance`). Document the console as mesh-only in production.
+- **Phase 0 — ratify + the startup guard (days; cheapest, highest-value). ✅ SHIPPED & LIVE.**
+  Landed the
+  invariant in this ADR and the issuance-bind guard (`cmd/harbor/serve.go`
+  `checkIssuanceBind`: refuse `-ca-cert` + non-loopback/non-overlay bind
+  without `-allow-public-issuance`) — applied to **both** `core-api` and `admin-api`.
+  Console documented mesh-only in production.
   This makes "internet-facing SSO terminator holds no issuance authority" *structurally
-  enforced* for the existing binary, with near-zero code.
-- **Phase 1 — SSO enrollment on the off-mesh edge (~2–3 weeks).** `wire.MethodSSO` + a
-  no-CA assertion signer at the gateway (reusing `adminauth`); `enrollment.Consumer.processSSO`
-  in mesh-only Core (verify assertion + nonce/pubkey binding, default pending, surface
-  IdP evidence). Reuse `internal/collect` pull verbatim. Dedicated assertion-signing key.
-- **Phase 2 — user-trust config (~1–2 weeks).** IdP group/domain → mesh group mapping +
+  enforced* for the existing binaries.
+- **Phase 1 — SSO enrollment on the off-mesh edge. ✅ CODE-COMPLETE, NOT ROLLED OUT.**
+  Built as the `wire.MethodOIDC` path (no separate `MethodSSO` constant) + a
+  no-CA assertion signer at the gateway (`internal/gateway/ssoportal.go`, reusing `adminauth` SAML);
+  `enrollment.Consumer.processSSO` in mesh-only Core (verify assertion + nonce/pubkey binding,
+  default pending, surface IdP evidence). Reuses `internal/collect` pull verbatim. Dedicated
+  assertion-signing key minted at genesis (`internal/ssoassert`). Off by default
+  (fail-closed-disabled until `sso_acs_url` is set + a user-trust config is published).
+- **Phase 2 — user-trust config. ✅ CODE-COMPLETE, NOT ROLLED OUT.** IdP group/domain → mesh
+  group mapping +
   per-group admission posture (pending-by-default; auto-issue opt-in), dual-control
-  published (mirror `cloudtrust` table/CRUD). SSO provenance in the approval queue.
-- **Phase 3 — optional console split (deploy-mode, ~6–9 days).** Extract `EdgeRoutes`
+  published (`internal/usertrust` + `/admin/v1/usertrust/*` propose/approve/active, mirroring
+  `cloudtrust`). SSO provenance in the approval queue + UI.
+- **Phase 3 — optional console split (deploy-mode, ~6–9 days). ⏸ DEFERRED / NOT BUILT.**
+  Would extract `EdgeRoutes`
   (auth/session only) from `CoreRoutes` (Signer + approval, mesh-only) as two
-  instantiations selectable by flag. Disabled by default; deployments keep the console
-  mesh-only unless they explicitly opt into a public edge.
-- **Phase 4 — SSO lifecycle (~2 weeks).** Re-SSO at renewal tied to nonce + cert-id;
+  instantiations selectable by flag. Deferred per SSO-DECISIONS S11 — the Phase 0 guard
+  already closes the latent gap; revisit only if the console is ever exposed.
+- **Phase 4 — SSO lifecycle (~2 weeks). ⏸ DEFERRED / NOT BUILT.** Re-SSO at renewal tied to
+  nonce + cert-id;
   subject (email) re-binding to block lateral-move certs; IdP offboarding via
   heartbeat/renew denial + revocation. Adopt ADR 0005 Phase 4 long-poll if SSO-enrollment
   latency becomes a UX problem.
@@ -206,25 +232,36 @@ privileged connectivity — which the off-mesh pull model already denies it.
 - **−** New key custody: the dedicated assertion-signing key on an internet-facing host
   (rotatable independent of the CA).
 
-## Open questions to resolve before building
+## Open questions (status as of 2026-06-18)
 
 1. **Permanent console posture** — is mesh-only (reach-through-tunnel) the *permanent*
    production stance, or must the console ever be internet-facing? This decides whether
    Phase 3's edge/core split is ever deployed or stays latent-defense-only. Ratify or
-   revise the Security Posture doc's "admin happens over the mesh."
-2. **Assertion-signing key** — dedicated key (recommended) vs. reuse the genesis CA
-   (ADR 0004 open Q#1, still open). Confirm the rotation story on an off-mesh host.
+   revise the Security Posture doc's "admin happens over the mesh." *(Still open. Console
+   remains mesh-only on the poc; Phase 3 not built.)*
+2. **Assertion-signing key** — ~~dedicated key (recommended) vs. reuse the genesis CA~~
+   **RESOLVED (2026-06-18): dedicated key** (SSO-DECISIONS S6) — a P-256 key in
+   `internal/ssoassert`, minted at genesis (only the public half recorded in the DB key
+   registry), distinct from the CA. Rotatable independent of the CA ceremony.
 3. **Consent anti-relay fingerprint** — where does the device/groups consent screen
    render when the gateway (no mesh-group knowledge) terminates SSO? Device-name at the
    edge + group/admission at Core approval, or push minimal group hints to the edge?
-4. **Guard enforcement mechanism** — refuse `-ca-cert` on a public bind vs. require an
-   explicit `-allow-public-issuance`; what counts as "public" (non-loopback?
-   non-overlay?). The current code has no such guard.
+   *(Largely open; current build lands PENDING and surfaces IdP evidence + resolved
+   groups in the Core approval queue.)*
+4. **Guard enforcement mechanism** — ~~refuse `-ca-cert` on a public bind vs. require an
+   explicit `-allow-public-issuance`; what counts as "public"~~ **RESOLVED (2026-06-18):
+   built** as `checkIssuanceBind` (`cmd/harbor/serve.go`) — issuance mode (`-ca-cert`) is
+   allowed only on loopback (127.0.0.0/8, ::1) or within the overlay pool; the unspecified
+   address and any other non-loopback/non-overlay bind are refused unless
+   `-allow-public-issuance` is passed.
 5. **Session model under a future split** — confirm `httpOnly`+CSRF is retained and the
-   bearer-token/broker model is *explicitly* rejected, so it isn't reintroduced.
+   bearer-token/broker model is *explicitly* rejected, so it isn't reintroduced. *(Settled
+   in this ADR's Decision/rejected-options; the split itself is deferred so this is moot
+   until Phase 3 is revisited.)*
 6. **SSO renewal & offboarding** — does user-cert renewal require re-SSO (re-asserting
    IdP identity), and how is subject (email) re-bound at renewal to prevent lateral-move
-   certs? Out of scope for Phase 1, but the Core renewal path needs the hook designed now.
+   certs? *(Still open — this is Phase 4, deferred/not built; the Core renewal path still
+   needs the hook designed.)*
 
 ## Relationship to other work
 

@@ -9,6 +9,8 @@ tags: [nebula, runbook, genesis, bootstrap, aws, production, pki, kms, standup]
 
 # Runbook — Stand up the Nebula Control Plane on AWS (genesis bootstrap)
 
+**Status (2026-06-18):** LIVE. This exact flow built the `poc` stack — which *is* the production control plane today (`deploy/prod/`, S3 remote state in `ca-central-1`, `poc-harbor`/`poc-gateway.mesh.failsafe.net`). KMS-backed trust roots, Aurora, ACME edge TLS, Fargate gateway **and** Fargate lighthouse, SSM-only node access, and the full React console on :443 are all running.
+
 This is the **start-to-finish** guide for bringing a fresh Nebula control plane online on AWS. It
 assumes **no prior knowledge** of the system — every term is explained — and it matches what the
 orchestration script `deploy/prod/bootstrap-genesis.sh` actually does today (KMS-backed trust root,
@@ -19,9 +21,9 @@ You run two things, in order: **`terraform apply`** (creates the cloud infrastru
 bootstrap script** (wires the software on top). The bootstrap runs **from your laptop** and drives
 the cloud nodes over SSH — you never log into them by hand.
 
-> ⚠️ **Not yet battle-tested.** As of this writing nothing here has been run against real AWS. The
-> terraform validates and the scripts are reviewed, but the first real run is the first real test —
-> expect to debug it with the checklist at the end.
+> ✅ **Battle-tested (2026-06-18).** This flow has been run against real AWS — it stood up the live
+> `poc`/prod stack. Earlier this said "nothing here has been run against real AWS"; that is no longer
+> true. The checklist at the end is still the right thing to walk for a fresh standup.
 
 Conceptual background: **Design Plan §3.1** (the ceremony) + **Protocol Spec §6** (the bundle
 signature); the KMS / SAML / TLS / HA decisions are in **ADR 0007**.
@@ -74,7 +76,7 @@ start the mesh → cloud-trust → gateway → console). You run it once; it doe
 **1. Apply terraform first — foundation, then app.** The bootstrap reads its inputs from terraform
 outputs; if you skip this it has nothing to read.
 - **`deploy/prod/terraform/foundation/`** (apply first) — the **state bucket** + the two **KMS trust-root keys** (CA + config-signing). These keys must exist *before* genesis; genesis uses them, it does not create them.
-- **`deploy/prod/terraform/app/`** (apply second) — the VPC, the Aurora database, the EC2 nodes (Harbor / lighthouse / client / monitoring), the gateway (Fargate by default), and the Cloudflare-token secret. It reads the foundation's KMS ARNs via remote state.
+- **`deploy/prod/terraform/app/`** (apply second) — the VPC, the Aurora database, the EC2 nodes (Harbor / client / monitoring), the gateway and the lighthouse (both **Fargate by default**; override `gateway_runtime`/`lighthouse_runtime` to `ec2` for a VM), and the Cloudflare-token secret. It reads the foundation's KMS ARNs via remote state.
 
 **2. Decide the overlay pool.** `POOL` (default `10.44.0.0/16`) is the mesh's private address range.
 ⚠️ **Never use `100.64.0.0/10` if you also run Tailscale** — its anti-spoof rules silently drop that
@@ -160,7 +162,7 @@ stays on **8444**.
 | # | Phase | In plain terms |
 |---|---|---|
 | 0 | **Build + distribute** | compiles `harbor`/`pilot`/`gateway` and `scp`s them to the nodes (skip with `--skip-build`) |
-| 1 | **Lighthouse init** | creates the lighthouse's own mesh key on the node (the private key never leaves it) |
+| 1 | **Lighthouse init** | creates the lighthouse's own mesh key. EC2 lighthouse: on the node (key never leaves it). Fargate lighthouse (the default): the keypair is generated off-box and injected via the config secret (the task filesystem is ephemeral) |
 | 2 | **Harbor init** | creates Harbor's own mesh key + points it at the lighthouse, then opens the Nebula firewall for Core's ports (8444 + 443) so the mesh can reach the console |
 | 3 | **Migrate + genesis** | runs DB migrations, then **the genesis ceremony** above (CA + config-signing + the first certs), pulling the public artifacts back to your laptop |
 | 4 | **Lighthouse start** | installs its cert and starts `nebula` — the mesh now has a discovery point |

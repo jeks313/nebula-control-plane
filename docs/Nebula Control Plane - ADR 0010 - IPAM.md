@@ -1,14 +1,23 @@
 ---
 title: "ADR 0010 — IPAM: Named Netblocks & Per-Join-Method Allocation"
 created: 2026-06-17
-status: proposed
+status: shipped
 tags: [nebula, adr, ipam, enrollment, networking, allocation]
 ---
 
 # ADR 0010 — IPAM: Named Netblocks & Per-Join-Method Allocation
 
-**Status:** Proposed
-**Date:** 2026-06-17
+**Status (2026-06-18):** SHIPPED & LIVE on the poc. All five phases are built and merged:
+named netblocks with a DB-backed `NetblockResolver` (`internal/netblock`, `internal/ipam`),
+per-join-method binding (join-key `sub_range` / cloud-trust `AWSAccount.Netblock` / SSO
+usertrust netblock), allocation provenance (`ip_allocations.netblock_id` + `method`),
+auto-grow into the buddy, genesis-seeded `central`/`default` reservations, the growth-envelope
+`Suggest` placement, live used% utilization, the IPAM admin API (`ipam_ops.go`,
+`PermIPAMManage`) + React console page (`ui/src/pages/IPAM.tsx`) + dashboard IPAM panel, and
+`ncp_ipam_*` Prometheus gauges. Decision log: `IPAM-DECISIONS.md` (D1–D23). The text below is
+the original design rationale; status annotations note where reality moved past the original
+plan. Remaining optional refinements are in *Open questions*.
+**Date:** 2026-06-17 (shipped 2026-06-18)
 **Decision owners:** Chris Hyde (+ a future second approver, per dual-control)
 
 ## Context
@@ -44,7 +53,10 @@ The foundations for something better already exist but are **unwired**:
 
 ### Current behavior (as built)
 
-| Concern | Today |
+*(Pre-ADR baseline, the flat-pool state this ADR replaced — all of these have since been
+addressed by the shipped IPAM work.)*
+
+| Concern | Today (pre-ADR) |
 |---|---|
 | Allocation order | Global sequential first-free over the whole pool |
 | Per-join routing | None — all methods pass empty `subRange` |
@@ -67,9 +79,10 @@ back to a **default** netblock. Confirmed decisions:
    *which block* a host draws from, plus sequential fill within it.
 2. **Cloud-trust binds per scope** — a netblock attaches to each `cloudtrust.AWSAccount`
    entry (the "scope" shown in the UI), not per-account-globally.
-3. **SSO is a future, distinct join method** ([[ADR 0004 - SSO-Driven User Enrollment]]):
-   AD-group → mesh-groups entries, peer to join-keys and cloud-trusts. The netblock
-   binding is **designed in** (the `issue()` hook is generic) but **not built** here.
+3. **SSO is a distinct join method** ([[ADR 0004 - SSO-Driven User Enrollment]]):
+   usertrust entries (AD-group → mesh-groups), peer to join-keys and cloud-trusts. The
+   netblock binding was **designed in** here (the `issue()` hook is generic) and is now
+   **built** as part of ADR 0004 (code-complete, off by default until SSO is rolled out).
 4. **`default` is a fixed-size CIDR** carved at genesis. Named netblocks carve from the
    remaining free space; an unbound join method draws from the bounded `default` block.
 
@@ -120,10 +133,12 @@ entities → `central` (genesis). Non-overlap is enforced across all netblocks.
 |---|---|---|
 | **Join-key** | `join_keys.sub_range` (exists; → rename `netblock` later) | At `enrollment.go:303`, read `jk.Netblock`; thread into `issue(..., jk.Netblock, "token")`. |
 | **Cloud-trust** | new `cloudtrust.AWSAccount.Netblock`; returned by `MatchAWS` | At `enrollment.go:383`, thread into `issue(..., netblock, "aws-sigv4")`. Rides the existing `cloudtrust.propose/active` dual-control publish. |
-| **SSO** (future) | SSO-entry config carries a `Netblock` field | `issue(..., netblock, "sso")` — hook present now, inert until SSO ships. |
+| **SSO** | usertrust entry carries a `Netblock` field | `issue(..., netblock, providerSSO)` — now WIRED (`enrollment.go:601`) as part of ADR 0004; the SSO path is code-complete but off by default until an operator publishes a usertrust config. |
 
-`issue()` (`enrollment.go:591`) gains `(netblockName, method string)`; the three sites pass
-their values. This is the central change that makes per-method CIDRs real.
+`issue()` gains `(netblockName, method, ephemeral)` and all four call sites
+(`enroll-auto`/token, `enroll-attested`/aws-sigv4, `enroll-sso`/sso, and the approve path)
+pass their values (`enrollment.go:926`). This is the central change that makes per-method
+CIDRs real. *(Shipped 2026-06-18: built across all four methods, including the SSO hook.)*
 
 ## Data model & migrations
 
@@ -300,19 +315,22 @@ then completes the allocation. Two racing growers serialize on the row.
 
 ## Phased plan
 
-1. **Backend core** — migrations; `netblock.Registry`; allocator `NetblockResolver` +
-   provenance; **auto-grow on exhaustion**; genesis `central`/`default`; wire
-   `join_keys.sub_range` + `issue()` threading; the `ncp_ipam_*` utilization/grow/exhaustion
-   metrics + audit entries. Per-join-key CIDRs, central reservation, and auto-grow work
-   end-to-end (CLI/tests).
-2. **Cloud-trust binding** — `AWSAccount.Netblock` through propose/active + enrollment.
-3. **Admin API + UI table** — netblock CRUD, utilization, binding selectors.
-4. **Visual overlay + suggester + dashboard** — the growth-aware placement function (Go,
-   shared by the `suggest` endpoint and the submit-time default), the live SVG selector with
-   the green/purple/red/yellow growth-headroom coloring, and the Dashboard IPAM health panel
-   (red >90% / yellow >75% utilization + recent grows/exhaustions).
-5. **SSO** (with [[ADR 0004 - SSO-Driven User Enrollment]]) — SSO entries + their netblock
-   binding (hook already present).
+*All five phases SHIPPED & LIVE on the poc (2026-06-18).*
+
+1. ✅ **Backend core** — migrations (`000022_ipam_netblocks`, `000023_ip_allocation_provenance`);
+   `netblock.Registry`; allocator `NetblockResolver` + provenance; **auto-grow on exhaustion**
+   (`Registry.Grow`); genesis `central`/`default`; wire `join_keys.sub_range` + `issue()`
+   threading; the `ncp_ipam_*` utilization/grow/exhaustion metrics + audit entries. Per-join-key
+   CIDRs, central reservation, and auto-grow work end-to-end.
+2. ✅ **Cloud-trust binding** — `AWSAccount.Netblock` through propose/active + enrollment.
+3. ✅ **Admin API + UI table** — netblock CRUD (`ipam_ops.go`, `PermIPAMManage`), utilization,
+   binding selectors.
+4. ✅ **Visual overlay + suggester + dashboard** — the growth-aware placement function
+   (`netblock.Suggest`, shared by the `suggest` endpoint and the submit-time default), the live
+   SVG selector with the green/purple/red/yellow growth-headroom coloring, and the Dashboard
+   IPAM health panel (red >90% / yellow >75% utilization + recent grows/exhaustions).
+5. ✅ **SSO** (with [[ADR 0004 - SSO-Driven User Enrollment]]) — usertrust netblock binding wired
+   into the SSO `issue()` path; code-complete and off by default until SSO is rolled out.
 
 ## Consequences
 
@@ -326,27 +344,30 @@ then completes the allocation. Two racing growers serialize on the row.
 - **No back-compat needed:** the poc mesh is disposable, so a fresh genesis is assumed; no
   migration of existing allocations.
 
-## Open questions to resolve before building
+## Open questions (resolved as built; remaining refinements)
 
-- **Netblock resize/edit semantics (decided):** an edit that would strand live allocations
-  outside the new range is **blocked** — the operator reclaims/renumbers those hosts first.
-  No quarantine-and-migrate.
-- **Growth-margin default (tunable):** `MARGIN_BITS = 3` (a `/27` soft-claims a `/24`, and
-  the red/yellow zone spans that `/24`). Set `2` for a tighter `/25` zone. Per-block override
-  (or a hint from expected host count) is a possible later refinement.
-- **`central`/`default` auto-grow:** default **off** (their sizing is a deliberate genesis
-  decision; exhaustion is an operator signal). A flag could let `default` grow into its free
-  buddy like a named block — decide if that's wanted.
-- **Utilization "used" definition:** the red/yellow threshold keys off *allocated* % (what
-  causes allocation failure); the live *used* % (heartbeats, `internal/fleet`) is shown for
-  context to distinguish "grow" from "reclaim". Confirm whether any threshold should instead
-  key off live %.
-- **`central` headroom convention:** which IPs in `central` are reserved for which backend
-  roles (monitoring, future services) — a small documented map vs ad-hoc.
-- **Netblock change control:** RBAC + step-up + audit (proposed, matching join-key/lighthouse
-  management) vs full dual-control publish like policy/cloudtrust. Carving address space is
-  sensitive but not signer-grade; start with RBAC + audit.
-- **`sub_range` → `netblock` rename:** cosmetic; defer to avoid churn.
+*Resolved during the build (see `IPAM-DECISIONS.md`, D1–D23):*
+
+- **Netblock resize/edit semantics (decided & built):** an edit that would strand live
+  allocations outside the new range is **blocked** — the operator reclaims/renumbers those
+  hosts first. No quarantine-and-migrate.
+- **`central`/`default` auto-grow (decided & built):** **off** — their sizing is a deliberate
+  genesis decision; exhaustion is an operator signal. Only `named` blocks auto-grow.
+- **Utilization "used" definition (decided & built):** the red/yellow threshold keys off
+  *allocated* %; the live *used* % (heartbeats, the same `internal/fleet` stale window) is
+  computed by the IPAM collector and shown alongside to distinguish "grow" from "reclaim".
+- **Netblock change control (decided & built):** RBAC (`PermIPAMManage`) + step-up + audit,
+  matching join-key/lighthouse management — not full dual-control publish.
+
+*Still open — optional refinements (not blocking):*
+
+- **Growth-margin per-block override:** `MARGIN_BITS = 3` is a global default (a `/27`
+  soft-claims a `/24`). A per-block override (or a hint from expected host count) is a possible
+  later refinement.
+- **`central` headroom convention:** a small documented role-map of which `central` IPs are
+  reserved for which backend roles (monitoring, future services) — vs the current ad-hoc layout.
+- **`sub_range` → `netblock` rename:** cosmetic; `join_keys.sub_range` is still the column name;
+  deferred to avoid churn.
 
 ## Relationship to other work
 
