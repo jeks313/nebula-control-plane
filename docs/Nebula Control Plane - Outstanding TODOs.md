@@ -29,7 +29,7 @@ Repo VERSION 0.1.0. One live environment: the "poc" which IS the prod stack (dep
 - Console/UI build-out: many designed screens, the reachability-matrix authoring grid, topology map, trust-ops wizards.
 - Cross-platform Pilot parity (M10), code review cleanups, doc polish.
 
-Deduped backlog count: **51 items** (P0: 7, P1: 22, P2: 22).
+Deduped backlog count: **51 items** (P0: 6 open + 1 ✅ done, P1: 22, P2: 22). **Resolved 2026-06-19:** revocation propagation (`-blocklist-db`) — see the ✅ row below.
 
 ---
 
@@ -37,7 +37,7 @@ Deduped backlog count: **51 items** (P0: 7, P1: 22, P2: 22).
 
 | Item | Area | Effort | Why / rationale | Source doc(s) |
 |------|------|--------|-----------------|---------------|
-| Turn on revocation propagation in the live poc (`-blocklist-db` to core-api) | deploy/prod bootstrap-genesis.sh / coreapi | S | Verified: flag defaults `false` and genesis never sets it, so blocklist entries (incl. reaper-added revocations) are recorded in the DB but never rendered into host bundles' `pki.blocklist`. Revocation is silently inert on the running stack. | Security Posture - Public Enroll Endpoint |
+| ✅ **DONE 2026-06-19** — revocation propagation (`-blocklist-db`) | deploy/prod bootstrap-genesis.sh / coreapi | S | Enabled live on the poc (core-api renew path + collect gateway-enroll path) and persisted in the prod bootstrap; revocations registry was empty so no backfill needed. Was: blocklist entries recorded in the DB but never rendered into bundles' `pki.blocklist` (flag defaulted `false`, never set) — revocation silently inert. | Security Posture - Public Enroll Endpoint |
 | Build M7 §7.2 revocation-as-DoS guards: registry must refuse to blocklist control-plane/lighthouse fingerprints; bulk revoke must be dual-control + rate-limited | internal/revocation + internal/dualcontrol + admin API | M | Verified in revocation.go: the P10 "cannot-blocklist-control-plane" invariant and bulk-revoke dual-control/rate-limit are explicitly the caller's responsibility and NOT enforced. A bad/compromised revoke could blocklist the control plane. | Security Posture - Public Enroll Endpoint |
 | Cryptographically-enforced dual-control for the genesis ceremony | deploy/prod genesis / harbor genesis | L | The alice/bob two-operator names are audit-log strings only today; one person can run the entire trust-root ceremony. Real cryptographic dual-control over the CA root is named future hardening. | Genesis Runbook |
 | CA + config-signing (+ release) key rotation machinery (M8 8.1-8.7), incl. staged/active/draining/retired states and emergency-distrust path | internal/signer + cmd/harbor/ca.go | L | Entire M8 milestone unstarted; with keys now in KMS in prod, trust roots cannot be rotated online and no rotation drill has run. A compromised/expiring root has no online recovery path. | ADR 0007; Implementation Plan; Design Plan |
