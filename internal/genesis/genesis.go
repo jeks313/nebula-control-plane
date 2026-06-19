@@ -223,8 +223,8 @@ func Run(ctx context.Context, s *store.Store, caBackend, configBackend signer.Ba
 	// signer, NOT the enrollment path, so without this row the guard would see a
 	// not-found fingerprint and ALLOW the control plane to be blocklisted (also why
 	// genesis certs could not renew — coreapi.handleRenew needs an issued row).
-	if err := recordGenesisEnrollment(ctx, s.DB, p.LighthouseName, lhFP, pub, lhPEM,
-		[]string{policy.GroupLighthouse}, p.LighthouseIP.String(), now); err != nil {
+	if err := RecordControlPlaneEnrollment(ctx, s.DB, lhFP,
+		[]string{policy.GroupLighthouse}, p.LighthouseIP.String(), p.LighthouseName, p.LighthousePub, string(lhPEM)); err != nil {
 		return Result{}, fmt.Errorf("genesis: record lighthouse enrollment: %w", err)
 	}
 
@@ -268,8 +268,8 @@ func Run(ctx context.Context, s *store.Store, caBackend, configBackend signer.Ba
 		// Record an issued enrollment row for Core (only when CorePub was provided, i.e.
 		// a Core cert was actually minted) so the P10 revocation guard resolves Core's
 		// fingerprint to group:control-plane and refuses to blocklist it (Blocker 1).
-		if err := recordGenesisEnrollment(ctx, s.DB, coreName, coreFP, cpub, cPEM,
-			[]string{policy.GroupControlPlane}, p.CoreIP.String(), now); err != nil {
+		if err := RecordControlPlaneEnrollment(ctx, s.DB, coreFP,
+			[]string{policy.GroupControlPlane}, p.CoreIP.String(), coreName, p.CorePub, string(cPEM)); err != nil {
 			return Result{}, fmt.Errorf("genesis: record core enrollment: %w", err)
 		}
 		if err := audit(p.OperatorA, "genesis-core", coreName, fmt.Sprintf(`{"fingerprint":%q,"groups":[%q]}`, coreFP, policy.GroupControlPlane)); err != nil {
@@ -478,37 +478,48 @@ func defaultBlock(pool netip.Prefix) netip.Prefix {
 	return p
 }
 
-// recordGenesisEnrollment writes the issued `enrollments` row for a genesis-minted
-// control-plane cert (lighthouse / Core), so the P10 revocation guard resolves the
-// cert's fingerprint to its reserved group and refuses to blocklist it, and so
-// coreapi.handleRenew (which needs an issued row) can renew the cert. Genesis mints
-// these certs via the signer, bypassing the normal enrollment path that would write
-// this row — so we write it here with the same column set that path uses
-// (internal/enrollment.record): pubkey is the raw key point, pubkey_hash is
-// wire.PubkeyHash(pub), groups is the JSON array, status='issued', method='genesis'.
+// RecordControlPlaneEnrollment writes the issued `enrollments` row for a
+// control-plane cert (lighthouse / Core) minted OUTSIDE the normal enrollment path —
+// genesis (via the signer) and the `harbor backfill-cp-enrollment` break-glass tool
+// (for pre-fix genesis certs that were minted before genesis recorded this row). The
+// row makes two control-plane invariants resolve the cert's fingerprint: the always-on
+// P10 revocation guard (internal/revocation.protectControlPlane) refuses to blocklist
+// it, and coreapi.handleRenew (which needs an issued row) can renew it.
 //
-// IDEMPOTENT: genesis may be re-run/recovered, so this skips the insert if an issued
-// row for this fingerprint already exists (matching how protectControlPlane queries:
-// fingerprint normalized to lowercase, status='issued'). The fingerprint is lowercased
-// to mirror normFingerprint (nebula's Fingerprint() is already lowercase hex).
-func recordGenesisEnrollment(ctx context.Context, db *gorm.DB, name, fp string, pub, certPEM []byte, groups []string, overlayIP string, now time.Time) error {
-	fp = strings.ToLower(strings.TrimSpace(fp))
+// It writes the SAME column set the normal enrollment path uses
+// (internal/enrollment.record): pubkey is the RAW key point (decoded from pubPEM),
+// pubkey_hash is wire.PubkeyHash(point), groups is the JSON array, status='issued',
+// method='genesis'. The fingerprint is normalized to lowercase to mirror
+// revocation.normFingerprint (nebula's Fingerprint() is already lowercase hex).
+//
+// IDEMPOTENT: callers may re-run (genesis recovery, a repeated backfill), so it skips
+// the insert if an issued row for this fingerprint already exists — matching how
+// protectControlPlane queries (fingerprint lowercased, status='issued').
+func RecordControlPlaneEnrollment(ctx context.Context, db *gorm.DB, fingerprint string, groups []string, overlayIP, deviceName string, pubPEM []byte, certPEM string) error {
+	fp := strings.ToLower(strings.TrimSpace(fingerprint))
+	if fp == "" {
+		return errors.New("genesis: control-plane enrollment requires a fingerprint")
+	}
+	pub, _, _, err := cert.UnmarshalPublicKeyFromPEM(pubPEM)
+	if err != nil {
+		return fmt.Errorf("genesis: parse public key: %w", err)
+	}
 	var n int64
 	if err := db.WithContext(ctx).Table("enrollments").
 		Where("fingerprint = ? AND status = ?", fp, "issued").Count(&n).Error; err != nil {
 		return err
 	}
 	if n > 0 {
-		return nil // already recorded (re-genesis / recovery) — no-op
+		return nil // already recorded (re-genesis / recovery / repeat backfill) — no-op
 	}
 	groupsJSON, err := json.Marshal(groups)
 	if err != nil {
 		return err
 	}
-	ts := now.UnixNano()
+	ts := time.Now().UnixNano()
 	return db.WithContext(ctx).Table("enrollments").Create(map[string]any{
 		"enrollment_id": "genesis-" + fp,
-		"device_name":   name,
+		"device_name":   deviceName,
 		"pubkey_hash":   wire.PubkeyHash(pub),
 		"pubkey":        pub,
 		"method":        "genesis",
