@@ -8,15 +8,19 @@ tags: [nebula, adr, fargate, containers, distroless, supply-chain, security, mai
 # ADR 0006 — Distroless Container Images for the Fargate Gateway & Lighthouse
 
 **Status:** Accepted
+**Status (2026-06-18):** SHIPPED & LIVE — Phases 1 + 2 (gateway + lighthouse distroless) are deployed on the poc/prod stack; both Fargate runtimes are now the terraform DEFAULT. Phase 3 (supply-chain hardening: digest pins / IMMUTABLE / lifecycle policy / platform_version) is the only PLANNED remainder.
 **Date:** 2026-06-14
 **Decision owners:** Chris Hyde
 
 ## Context
 
 ADR 0005 moved the enrollment gateway off-mesh. The live-apply work (2026-06-14) then
-made both the **gateway** and — as a spike — the **lighthouse** runnable as serverless
+made both the **gateway** and — initially as a spike — the **lighthouse** runnable as serverless
 **Fargate** containers (`gateway_runtime` / `lighthouse_runtime = "fargate"`,
-`deploy/fargate/`), proven end-to-end on real AWS.
+`deploy/fargate/`), proven end-to-end on real AWS. *(Update 2026-06-18: Fargate is now the
+terraform **default** for both the gateway and the lighthouse — no longer a spike — and the
+client-IP-preserving UDP NLB in front of the lighthouse is validated live; the distroless
+images below run in the live poc/prod stack.)*
 
 Both images today are **`alpine:3.20`** + a single static binary + a **`/bin/sh`
 entrypoint**:
@@ -88,9 +92,10 @@ Phased. The image-hardening items previously tracked as standalone todos (#21–
 folded in here as **Phase 3** — they are all "harden the Fargate image supply chain" and
 belong with this decision.
 
-**Implementation note (done):** Phases 1 + 2 landed in the **production** tree
-(`deploy/prod/fargate/`), which is the tree slated for distroless by ADR 0007 Phase 6 — not
-the demo `deploy/fargate/`, which ADR 0007 keeps on alpine for fast iteration. The shared
+**Implementation note (done; LIVE 2026-06-18):** Phases 1 + 2 landed in the **production** tree
+(`deploy/prod/fargate/`) and are deployed on the live poc/prod stack — that tree IS the prod
+stack — not the demo `deploy/fargate/`, which keeps its alpine + shell entrypoints for fast
+iteration. The shared
 binaries (`cmd/gateway`'s env-var config, the new `cmd/nebula-boot`) are backward-compatible,
 so the demo tree's alpine + shell entrypoints keep working unchanged. The base uses the
 `:nonroot` tag (uid 65532); `@sha256` digest-pinning is Phase 3 below.
@@ -107,7 +112,10 @@ so the demo tree's alpine + shell entrypoints keep working unchanged. The base u
   nebula. `nebula.Dockerfile` is distroless:nonroot (fetch stage stays alpine for curl/tar +
   sha-verify), carrying nebula + the shim; bare-shim `ENTRYPOINT`. `nebula-entrypoint.sh`
   deleted. Both bind only high ports (UDP 4242 + the TCP stats port) — no privilege without a TUN.
-- **Phase 3 — supply-chain hardening** (folds in former todos #21–#25):
+- **Phase 3 — supply-chain hardening** (PLANNED, not yet started — folds in former todos #21–#25;
+  the live state as of 2026-06-18 is `:latest` tags, `MUTABLE` ECR repos, no lifecycle policy,
+  no `platform_version` pin, and both Dockerfiles still carry `TODO (ADR 0006 Phase 3)` base-pin
+  comments):
   - Pin both images by **digest** and set the ECR repos `image_tag_mutability = "IMMUTABLE"`
     (reproducibility + rollback vs today's `:latest` / `MUTABLE`). *(was #21)*
   - Add an **ECR lifecycle policy** to each repo (expire untagged / keep last K). *(was #22)*
@@ -115,15 +123,15 @@ so the demo tree's alpine + shell entrypoints keep working unchanged. The base u
     digest deliberately when refreshing the base. *(replaces the alpine-pin item #24)*
   - **Pin the ECS `platform_version`** on both services (optional; LATEST auto-patches
     today). *(was #23)*
-  - Document the **rebuild/redeploy cadence** in `deploy/fargate/README.md` — now much
+  - Document the **rebuild/redeploy cadence** in `deploy/prod/fargate/README.md` — now much
     lighter: rebuild only on a Go-stdlib (gateway) or nebula (bump `NEBULA_VERSION` +
     `NEBULA_SHA256`) advisory, **not** on every Alpine CVE; review ECR scan-on-push
     findings; `build-push.sh <component> && aws ecs update-service --force-new-deployment`.
     *(was #25)*
 
-`deploy/fargate/build-push.sh` already builds the static gateway and downloads + sha-verifies
-nebula; it gains the `cmd/nebula-boot` build and the distroless `--platform linux/amd64`
-build context.
+`deploy/prod/fargate/build-push.sh` builds the static gateway and downloads + sha-verifies
+nebula; as of Phases 1 + 2 it **also builds the `cmd/nebula-boot` shim** and uses the distroless
+`--platform linux/amd64` build context (done — no longer pending).
 
 ## Consequences
 
@@ -148,15 +156,17 @@ build context.
 
 - **ADR 0005 (Pull-Based Enrollment Gateways)** — created the off-mesh gateway + the pull
   model; the Fargate runtimes (and these images) are how that gateway, and the lighthouse
-  spike, run serverless. This ADR hardens those images.
-- **`deploy/fargate/`** — `Dockerfile`, `nebula.Dockerfile`, `build-push.sh`, and the two
-  entrypoints (to be removed). `build-push.sh` already does the static builds + nebula
-  sha-verify; it gains the shim.
-- **`cmd/gateway`** — gains env-var config. **`cmd/nebula-boot`** — new, the lighthouse
-  config-injector shim.
+  (now the default runtime, no longer a spike), run serverless. This ADR hardened those images.
+- **`deploy/prod/fargate/`** (the live prod tree) — `Dockerfile`, `nebula.Dockerfile`,
+  `build-push.sh`. Both shell entrypoints have been **removed** (the distroless images run
+  bare binaries); `build-push.sh` does the static builds + nebula sha-verify + the shim build.
+  The demo `deploy/fargate/` still keeps its alpine + `entrypoint.sh` / `nebula-entrypoint.sh`.
+- **`cmd/gateway`** — reads its key/cert material from `$NCP_GW_*` env (done). **`cmd/nebula-boot`**
+  — the lighthouse config-injector shim, reads `$NCP_LH_*` env (done).
 - **Lighthouse on Fargate** — only feasible because a dedicated lighthouse runs
   `tun.disabled` (no TUN, no privilege); a `nonroot` distroless image is consistent with
-  that (no privileged needs at all).
+  that (no privileged needs at all). This is now the live default behind a client-IP-preserving
+  UDP NLB (validated 2026-06-18).
 - **Live-apply findings (2026-06-14)** — proving the both-Fargate topology surfaced the
   maintenance question that drove this decision; the supply-chain hardening (Phase 3) was
-  first captured as standalone todos and is folded in here.
+  first captured as standalone todos and is folded in here (still PLANNED).

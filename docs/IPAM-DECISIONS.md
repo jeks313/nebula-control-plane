@@ -1,13 +1,32 @@
 # IPAM build — decisions log (for Chris's review)
 
+**Status (2026-06-18):** SHIPPED & LIVE on the poc. Phases 1–4 are deployed — named netblocks +
+DB-backed `NetblockResolver`, resolver-backed allocator with auto-grow, genesis `central`/`default`
+reservations, per-join-method netblock binding (join-key `sub_range`, cloud-trust, SSO usertrust),
+provenance on `ip_allocations` (`netblock_id`+`method`), the admin IPAM API + React console page +
+binding selectors + dashboard, and live `used` utilization (fresh-heartbeat ∩ allocated) wired into
+the API, the scrape-time `ncp_ipam_*` collector, and the dashboard. The Phase-5 SSO binding (D1) has
+since landed (code-complete, off by default — see D1). Outstanding (optional): per-block
+growth-margin override (D4), `sub_range`→`netblock` column rename (D6), `central` role-map doc.
+
 Autonomous build of ADR 0010. Each decision below was taken with a reasonable default so the
 build could proceed; flagged here for review. **D#** = decided-by-default during the build.
 
 ## Seeded from ADR 0010 open questions
 
-- **D1 — SSO binding (phase 5) NOT built.** SSO enrollment doesn't exist (ADR 0004 future).
-  The netblock binding is designed generically (`issue(..., netblock, method)` is method-agnostic),
-  so SSO slots in later with zero IPAM rework. *Default: defer; build phases 1–4 only.*
+- **D1 — SSO binding (phase 5) — deferred at build time; SHIPPED since (code-complete, off by
+  default).** *Original decision:* SSO enrollment didn't exist yet (ADR 0004 future). The netblock
+  binding was designed generically (`issue(..., netblock, method)` is method-agnostic) so SSO could
+  slot in later with zero IPAM rework. *Default: defer; build phases 1–4 only.*
+  **(Updated 2026-06-18: the prediction held — Phase 5 landed with no IPAM rework.)** SSO enrollment
+  now exists (ADR 0004 + control-plane trust-zone ADR 0009): `usertrust.Config` entries carry a
+  `Netblock` field, `usertrust.Match` returns it first-match-wins alongside groups/auto-issue, and
+  `enrollment.processSSO` threads the matched netblock straight into `issue(..., netblock, providerSSO, …)`
+  with IPAM provenance `method="sso"`; the Approve path re-derives the SSO netblock in
+  `approveNetblock`. So all four binding methods (join-key `sub_range`, cloud-trust, SSO usertrust,
+  genesis) now flow through the same allocator path. SSO itself is CODE-COMPLETE + DEPLOY-THREADED but
+  OFF BY DEFAULT / not rolled out (it stays fail-closed-disabled until an operator stands up the AD
+  SAML app, publishes a usertrust config, and sets `sso_acs_url`) — see SSO-DECISIONS.md.
 - **D2 — `central`/`default` do NOT auto-grow.** Their sizing is a deliberate genesis decision;
   exhaustion is surfaced (audit + metric + dashboard) for operator action, not auto-grown.
   *Default per ADR open question.*
