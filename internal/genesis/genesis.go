@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"strings"
 	"time"
 
 	"github.com/jeks313/nebula-control-plane/internal/ipam"
@@ -27,7 +28,9 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/signer"
 	"github.com/jeks313/nebula-control-plane/internal/ssoassert"
 	"github.com/jeks313/nebula-control-plane/internal/store"
+	"github.com/jeks313/nebula-control-plane/internal/wire"
 	"github.com/slackhq/nebula/cert"
+	"gorm.io/gorm"
 )
 
 // Params drives a genesis run.
@@ -214,6 +217,16 @@ func Run(ctx context.Context, s *store.Store, caBackend, configBackend signer.Ba
 		return Result{}, fmt.Errorf("genesis: issue lighthouse cert: %w", err)
 	}
 	lhFP, _ := lhCert.Fingerprint()
+	// Record an issued enrollment row for the lighthouse so the P10 revocation guard
+	// (internal/revocation.protectControlPlane) resolves its fingerprint to the
+	// reserved group and refuses to blocklist it. Genesis mints this cert via the
+	// signer, NOT the enrollment path, so without this row the guard would see a
+	// not-found fingerprint and ALLOW the control plane to be blocklisted (also why
+	// genesis certs could not renew — coreapi.handleRenew needs an issued row).
+	if err := recordGenesisEnrollment(ctx, s.DB, p.LighthouseName, lhFP, pub, lhPEM,
+		[]string{policy.GroupLighthouse}, p.LighthouseIP.String(), now); err != nil {
+		return Result{}, fmt.Errorf("genesis: record lighthouse enrollment: %w", err)
+	}
 
 	// 3b. Optional first Core (control-plane) certificate, symmetric with the
 	// lighthouse and issued from Core's own public key (P1). Minting it here means the
@@ -252,6 +265,13 @@ func Run(ctx context.Context, s *store.Store, caBackend, configBackend signer.Ba
 		}
 		corePEM = cPEM
 		coreFP, _ = coreCert.Fingerprint()
+		// Record an issued enrollment row for Core (only when CorePub was provided, i.e.
+		// a Core cert was actually minted) so the P10 revocation guard resolves Core's
+		// fingerprint to group:control-plane and refuses to blocklist it (Blocker 1).
+		if err := recordGenesisEnrollment(ctx, s.DB, coreName, coreFP, cpub, cPEM,
+			[]string{policy.GroupControlPlane}, p.CoreIP.String(), now); err != nil {
+			return Result{}, fmt.Errorf("genesis: record core enrollment: %w", err)
+		}
 		if err := audit(p.OperatorA, "genesis-core", coreName, fmt.Sprintf(`{"fingerprint":%q,"groups":[%q]}`, coreFP, policy.GroupControlPlane)); err != nil {
 			return Result{}, err
 		}
@@ -456,6 +476,50 @@ func defaultBlock(pool netip.Prefix) netip.Prefix {
 		return netip.PrefixFrom(pool.Addr(), want).Masked()
 	}
 	return p
+}
+
+// recordGenesisEnrollment writes the issued `enrollments` row for a genesis-minted
+// control-plane cert (lighthouse / Core), so the P10 revocation guard resolves the
+// cert's fingerprint to its reserved group and refuses to blocklist it, and so
+// coreapi.handleRenew (which needs an issued row) can renew the cert. Genesis mints
+// these certs via the signer, bypassing the normal enrollment path that would write
+// this row — so we write it here with the same column set that path uses
+// (internal/enrollment.record): pubkey is the raw key point, pubkey_hash is
+// wire.PubkeyHash(pub), groups is the JSON array, status='issued', method='genesis'.
+//
+// IDEMPOTENT: genesis may be re-run/recovered, so this skips the insert if an issued
+// row for this fingerprint already exists (matching how protectControlPlane queries:
+// fingerprint normalized to lowercase, status='issued'). The fingerprint is lowercased
+// to mirror normFingerprint (nebula's Fingerprint() is already lowercase hex).
+func recordGenesisEnrollment(ctx context.Context, db *gorm.DB, name, fp string, pub, certPEM []byte, groups []string, overlayIP string, now time.Time) error {
+	fp = strings.ToLower(strings.TrimSpace(fp))
+	var n int64
+	if err := db.WithContext(ctx).Table("enrollments").
+		Where("fingerprint = ? AND status = ?", fp, "issued").Count(&n).Error; err != nil {
+		return err
+	}
+	if n > 0 {
+		return nil // already recorded (re-genesis / recovery) — no-op
+	}
+	groupsJSON, err := json.Marshal(groups)
+	if err != nil {
+		return err
+	}
+	ts := now.UnixNano()
+	return db.WithContext(ctx).Table("enrollments").Create(map[string]any{
+		"enrollment_id": "genesis-" + fp,
+		"device_name":   name,
+		"pubkey_hash":   wire.PubkeyHash(pub),
+		"pubkey":        pub,
+		"method":        "genesis",
+		"groups":        string(groupsJSON),
+		"status":        "issued",
+		"cert_pem":      certPEM,
+		"overlay_ip":    overlayIP,
+		"fingerprint":   fp,
+		"created_at":    ts,
+		"decided_at":    ts,
+	}).Error
 }
 
 // keyID is the base64url SHA-256 of a public key — the same identifier the

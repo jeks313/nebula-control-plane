@@ -5,9 +5,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/netip"
 	"time"
 
 	"github.com/jeks313/nebula-control-plane/internal/enrollment"
+	"github.com/jeks313/nebula-control-plane/internal/genesis"
 	"github.com/jeks313/nebula-control-plane/internal/revocation"
 	"github.com/jeks313/nebula-control-plane/internal/rollout"
 )
@@ -22,7 +24,7 @@ import (
 // enrollment. Bulk revoke + the can't-blocklist-control-plane invariant land in 7.2.
 func cmdBlocklist(args []string) {
 	if len(args) < 1 {
-		fatalf("blocklist: want add|remove|list|status")
+		fatalf("blocklist: want add|bulk-revoke|remove|list|status")
 	}
 	sub := args[0]
 	fs := flag.NewFlagSet("blocklist "+sub, flag.ExitOnError)
@@ -39,6 +41,13 @@ func cmdBlocklist(args []string) {
 	waveSize := fs.Int("wave-size", 0, "hosts per post-canary wave (0 = all remaining in one wave)")
 	observe := fs.Duration("observe", 5*time.Minute, "per-wave convergence window before judging it stuck")
 	missingAfter := fs.Duration("missing-after", 3*time.Minute, "heartbeat silence => host considered down")
+	// bulk-revoke flags (7.2): the dual-controlled, rate-limited many-host path. Defined
+	// on the shared flag set (harmless for the single-host subcommands) so `bulk-revoke`
+	// dispatches through the same positional switch the CLI-surface guardrail enumerates.
+	fpFile := fs.String("fingerprints", "", "bulk-revoke: file of fingerprints, one hex sha256 per line")
+	opA := fs.String("operator-a", "", "bulk-revoke: proposing operator (required)")
+	opB := fs.String("operator-b", "", "bulk-revoke: approving operator (required, must differ from -operator-a)")
+	pool := fs.String("pool", "", "overlay pool CIDR; REQUIRED for add/remove/bulk-revoke — derives the always-on central-block guard (genesis.CentralBlock(pool))")
 	_ = fs.Parse(args[1:])
 
 	s := openStore(*driver, *dsn)
@@ -69,6 +78,27 @@ func cmdBlocklist(args []string) {
 			fatalf("blocklist %s: -fingerprint or -device is required", sub)
 			return ""
 		}
+	}
+
+	// centralGuard derives the always-on central-block guard from -pool, fail-closed,
+	// and wires it onto reg. Every Add-capable path (single add + remove-then-readd, and
+	// the reaper / bulk-revoke elsewhere) mirrors the reaper's deterministic central
+	// guard (serve.go): the reserved block is the pool's first /27 (genesis.CentralBlock),
+	// so a control-plane host can never be blocklisted even on the -fingerprint path where
+	// no IP is supplied. -pool missing or invalid fails closed (no silent opt-out).
+	centralGuard := func() {
+		if *pool == "" {
+			fatalf("blocklist %s: -pool is required (the always-on central-block guard derives from it)", sub)
+		}
+		p, perr := netip.ParsePrefix(*pool)
+		if perr != nil {
+			fatalf("blocklist %s: bad -pool %q: %v", sub, *pool, perr)
+		}
+		central := genesis.CentralBlock(p)
+		if !central.IsValid() {
+			fatalf("blocklist %s: central guard could not be computed from -pool %q (fail-closed)", sub, *pool)
+		}
+		reg.WithCentralBlock(central)
 	}
 
 	// startRollout paces a blocklist change across the healthy fleet (7.1b). The
@@ -102,7 +132,10 @@ func cmdBlocklist(args []string) {
 	}
 
 	switch sub {
+	case "bulk-revoke":
+		bulkRevoke(s, *fpFile, *reason, *opA, *opB, *pool)
 	case "add":
+		centralGuard()
 		f := resolve()
 		switch _, err := reg.Add(ctx, f, *reason, *actor); {
 		case errors.Is(err, revocation.ErrAlreadyActive):
@@ -114,6 +147,7 @@ func cmdBlocklist(args []string) {
 			startRollout()
 		}
 	case "remove":
+		centralGuard()
 		f := resolve()
 		var active int64
 		s.DB.WithContext(ctx).Table("revocations").Where("fingerprint = ? AND state = ?", f, revocation.StateActive).Count(&active)
