@@ -3,6 +3,7 @@ package genesis
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/netip"
 	"path/filepath"
 	"testing"
@@ -11,6 +12,7 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/hostkey"
 	"github.com/jeks313/nebula-control-plane/internal/ipam"
 	"github.com/jeks313/nebula-control-plane/internal/netblock"
+	"github.com/jeks313/nebula-control-plane/internal/revocation"
 	"github.com/jeks313/nebula-control-plane/internal/signer"
 	"github.com/jeks313/nebula-control-plane/internal/store"
 	"github.com/jeks313/nebula-control-plane/internal/store/migrate"
@@ -213,6 +215,76 @@ func TestBootSeedNetblocksUpgradePath(t *testing.T) {
 	// The central row is byte-identical (no churn from the no-op second call).
 	if again, _ := reg.Get(context.Background(), netblock.NameCentral); again.CIDR != central.CIDR || again.CreatedAt != central.CreatedAt {
 		t.Fatalf("central changed across the idempotent second boot-seed: %+v vs %+v", again, central)
+	}
+}
+
+// TestGenesisRecordsProtectedEnrollments (Blocker 1): genesis must write an issued
+// `enrollments` row for the lighthouse AND (when CorePub is given) Core, carrying the
+// reserved group, so the always-on P10 revocation guard resolves their fingerprints and
+// refuses to blocklist them. The Registry has NO WithCentralBlock — proving the GROUP
+// check alone now protects the control plane (the genesis rows are the primary fix).
+//
+// FAIL-BEFORE: genesis never wrote an enrollments row, so protectControlPlane hit
+// not-found -> ALLOW, and Add(coreFP)/Add(lighthouseFP) succeeded (control plane
+// blocklistable). PASS-AFTER: both Adds return ErrControlPlaneProtected.
+func TestGenesisRecordsProtectedEnrollments(t *testing.T) {
+	caB, _ := signer.NewSoftwareBackend()
+	cfgB, _ := signer.NewSoftwareBackend()
+	s := newStore(t)
+	pool := netip.MustParsePrefix("10.44.0.0/16")
+	res, err := Run(context.Background(), s, caB, cfgB, Params{
+		OperatorA: "alice", OperatorB: "bob", CAName: "ca", Pool: pool,
+		LighthouseName: "lh1", LighthouseIP: netip.MustParseAddr("10.44.0.1"), LighthousePub: hostPub(t),
+		CoreName: "core1", CoreIP: netip.MustParseAddr("10.44.0.2"), CorePub: hostPub(t),
+		CALifetime: 24 * time.Hour, CertLifetime: 12 * time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("genesis: %v", err)
+	}
+
+	ctx := context.Background()
+	// No WithCentralBlock — the group check alone must protect both certs.
+	reg := revocation.New(s.DB, nil)
+	if _, err := reg.Add(ctx, res.LighthouseFingerprint, "x", "admin"); !errors.Is(err, revocation.ErrControlPlaneProtected) {
+		t.Fatalf("Add(lighthouseFP) err = %v, want ErrControlPlaneProtected", err)
+	}
+	if _, err := reg.Add(ctx, res.CoreFingerprint, "x", "admin"); !errors.Is(err, revocation.ErrControlPlaneProtected) {
+		t.Fatalf("Add(coreFP) err = %v, want ErrControlPlaneProtected", err)
+	}
+
+	// The two enrollment rows exist, issued, with the reserved groups.
+	type erow struct {
+		Fingerprint string `gorm:"column:fingerprint"`
+		Status      string `gorm:"column:status"`
+		Groups      string `gorm:"column:groups"`
+		Method      string `gorm:"column:method"`
+		OverlayIP   string `gorm:"column:overlay_ip"`
+	}
+	for _, want := range []struct{ fp, group, ip string }{
+		{res.LighthouseFingerprint, "lighthouse", "10.44.0.1"},
+		{res.CoreFingerprint, "control-plane", "10.44.0.2"},
+	} {
+		var got erow
+		if err := s.DB.Table("enrollments").
+			Where("fingerprint = ? AND status = ?", want.fp, "issued").First(&got).Error; err != nil {
+			t.Fatalf("issued enrollment for %s: %v", want.group, err)
+		}
+		if got.Method != "genesis" || got.OverlayIP != want.ip || got.Groups != `["`+want.group+`"]` {
+			t.Fatalf("%s enrollment = %+v, want method=genesis ip=%s groups=[%q]", want.group, got, want.ip, want.group)
+		}
+	}
+
+	// IDEMPOTENT: re-recording the SAME genesis fingerprint (a re-run / recovery) is a
+	// no-op, not a duplicate or an error. Exercise the record helper directly with the
+	// already-recorded lighthouse fingerprint.
+	if err := recordGenesisEnrollment(ctx, s.DB, "lh1", res.LighthouseFingerprint, hostPub(t), res.LighthouseCertPEM,
+		[]string{"lighthouse"}, "10.44.0.1", time.Now()); err != nil {
+		t.Fatalf("idempotent re-record: %v", err)
+	}
+	var n int64
+	s.DB.Table("enrollments").Where("fingerprint = ? AND status = ?", res.LighthouseFingerprint, "issued").Count(&n)
+	if n != 1 {
+		t.Fatalf("lighthouse issued rows = %d, want exactly 1 (idempotent re-record)", n)
 	}
 }
 
