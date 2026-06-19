@@ -658,9 +658,11 @@ rsh "$HB_ID" "set -e
     || { echo 'FATAL: gateway gw1 ($GW_COLLECT) not registered with harbor — the collector would pull nothing' >&2; exit 1; }
   sudo systemctl reset-failed ncp-collect ncp-core ncp-admin 2>/dev/null || true
   # Run AS ec2-user (owns ~/ncp; on the SQLite backend this keeps harbor.db writable by the CLI/console).
+  # -blocklist-db: bundles issued for NEW gateway enrollments carry the live pki.blocklist
+  # (7.1) — matches core-api's renew path so a revocation propagates on both enroll and renew.
   sudo systemd-run --uid=$SSH_USER --gid=$SSH_USER --unit ncp-collect --collect /usr/local/bin/harbor collect -pool '$POOL' \
     $HARBOR_DB_FLAGS -ca-cert \$G/ca.crt $SIGN_BACKEND \
-    -hmac-key ~/ncp/hmac.b64 -lighthouse '$LH' -cloudtrust-db -obs-addr $HARBOR_OVERLAY:$COLLECT_OBS_PORT \
+    -hmac-key ~/ncp/hmac.b64 -lighthouse '$LH' -cloudtrust-db -blocklist-db -obs-addr $HARBOR_OVERLAY:$COLLECT_OBS_PORT \
     -client-cert ~/ncp/harbor-collect.crt -client-key ~/ncp/harbor-collect.key $CORE_SSO_FLAGS >/dev/null
   echo registered"
 echo "    gateway registered + collector pulling (attestation enabled)"
@@ -780,9 +782,12 @@ rsh "$HB_ID" "set -e
   # it, so ncp-admin (the console + its IdP) crashed at boot. Mint it here, like hmac.b64.
   umask 077; [ -f ~/ncp/queue.b64 ] || openssl rand 32 | basenc --base64url | tr -d '=' > ~/ncp/queue.b64
   # core-api: renew + heartbeat over the mesh, verifying its own control-plane cert at boot.
+  # -blocklist-db: source pki.blocklist from the DB revocations registry (7.1) so revocations
+  # (manual + reaper) actually propagate into renewed host bundles. Without it the blocklist is
+  # recorded but never shipped — revocation is silently inert. ALWAYS on (revocation must work).
   sudo systemd-run --uid=$SSH_USER --gid=$SSH_USER --unit ncp-core --collect /usr/local/bin/harbor core-api \
     $HARBOR_DB_FLAGS -ca-cert \$G/ca.crt $SIGN_BACKEND \
-    -pool '$POOL' -lighthouse '$LH' -host-cert /etc/nebula/host.crt \
+    -pool '$POOL' -lighthouse '$LH' -host-cert /etc/nebula/host.crt -blocklist-db \
     -addr $HARBOR_OVERLAY:$CORE_PORT$DB_POOL_FLAGS${CORE_SSO_FLAGS:+ $CORE_SSO_FLAGS}${ACME_FLAGS:+ $ACME_FLAGS} >/dev/null
   # admin console: issuance mode (so it can approve enrollments) + SAML/mock IdP. $ADMIN_CAP grants
   # CAP_NET_BIND_SERVICE when the console is on a privileged port (default 443). $CORE_SSO_FLAGS
