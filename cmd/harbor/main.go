@@ -74,6 +74,8 @@ func main() {
 		cmdCAInit(os.Args[2:])
 	case "issue-cert":
 		cmdIssueCert(os.Args[2:])
+	case "backfill-cp-enrollment":
+		cmdBackfillCPEnrollment(os.Args[2:])
 	case "cloudtrust":
 		cmdCloudTrust(os.Args[2:])
 	case "usertrust":
@@ -137,6 +139,9 @@ usage:
   harbor genesis           -out DIR -operator-a A -operator-b B -lighthouse-pub PEM [... db flags]
   harbor ca-init           -ca-cert OUT [-backend software|pkcs11|kms] [-ca-key OUT] [... db flags]
   harbor issue-cert        -name DEVICE -in-pub HOST.pub -ca-cert CA [-groups a,b] [... db flags]
+  harbor backfill-cp-enrollment -cert HOST.crt -pool CIDR [-name N] [-groups a,b] [-overlay-ip IP] [db flags]
+                           break-glass: record the missing issued enrollment row for a
+                           pre-fix genesis control-plane/lighthouse cert (revocation guard + renewal)
   harbor version
 
 core flags (enroll worker/approve): -ca-cert, -ca-key/-config-key (software) or
