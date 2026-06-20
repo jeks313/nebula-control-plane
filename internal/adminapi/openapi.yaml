@@ -194,9 +194,52 @@ paths:
         "403": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
         "409": { $ref: "#/components/responses/Problem" }
+  /admin/v1/config/{kind}:
+    put:
+      summary: >-
+        Set the ENTIRE declarative config for a kind (ADR 0011 Phase 1). Validates
+        inline; a non-privileged change is written directly (200); a PRIVILEGED change
+        (reserved-group grant or auto_issue) routes through a distinct-second-approver
+        dual-control commit (202 + a Change approved via /approvals/{id}/approve).
+      operationId: setConfig
+      parameters:
+        - { name: kind, in: path, required: true, schema: { type: string, enum: [policy, cloudtrust, usertrust] } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ConfigBody" }
+      responses:
+        "200":
+          description: The stored config row (non-privileged single-operator write).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConfigRow" }
+        "202":
+          description: A dual-control change opened for a PRIVILEGED config (needs a distinct second approver).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Change" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
+    get:
+      summary: Read the stored declarative config for a kind (ADR 0011 Phase 1).
+      operationId: getConfig
+      parameters:
+        - { name: kind, in: path, required: true, schema: { type: string, enum: [policy, cloudtrust, usertrust] } }
+      responses:
+        "200":
+          description: The stored config row, or {set:false} when none has been written.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConfigRow" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/Problem" }
   /admin/v1/policy/active:
     get:
-      summary: The published fleet policy (latest committed policy.publish).
+      summary: The active fleet policy (ADR 0011 Phase 1 — from the config store).
       operationId: getActivePolicy
       responses:
         "200":
@@ -205,27 +248,9 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ActivePolicy" }
         "401": { $ref: "#/components/responses/Unauthorized" }
-  /admin/v1/policy/propose:
-    post:
-      summary: Validate + invariant-check a policy, then open a dual-control change.
-      operationId: proposePolicy
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: "#/components/schemas/ProposeRequest" }
-      responses:
-        "201":
-          description: The opened change (proposer = the authenticated principal).
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Change" }
-        "400": { $ref: "#/components/responses/Problem" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Problem" }
   /admin/v1/cloudtrust/active:
     get:
-      summary: The published cloud-attestation trust config (latest committed cloudtrust.publish).
+      summary: The active cloud-attestation trust config (ADR 0011 Phase 1 — from the config store).
       operationId: getActiveCloudTrust
       responses:
         "200":
@@ -234,27 +259,9 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/CloudTrustActive" }
         "401": { $ref: "#/components/responses/Unauthorized" }
-  /admin/v1/cloudtrust/propose:
-    post:
-      summary: Validate a cloud-trust config, then open a dual-control change.
-      operationId: proposeCloudTrust
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: "#/components/schemas/CloudTrustProposeRequest" }
-      responses:
-        "201":
-          description: The opened change (proposer = the authenticated principal).
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Change" }
-        "400": { $ref: "#/components/responses/Problem" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Problem" }
   /admin/v1/usertrust/active:
     get:
-      summary: The published SSO user-trust config (latest committed usertrust.publish, ADR 0004).
+      summary: The active SSO user-trust config (ADR 0004; ADR 0011 Phase 1 — from the config store).
       operationId: getActiveUserTrust
       responses:
         "200":
@@ -263,24 +270,6 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/UserTrustActive" }
         "401": { $ref: "#/components/responses/Unauthorized" }
-  /admin/v1/usertrust/propose:
-    post:
-      summary: Validate an SSO user-trust config, then open a dual-control change.
-      operationId: proposeUserTrust
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: "#/components/schemas/UserTrustProposeRequest" }
-      responses:
-        "201":
-          description: The opened change (proposer = the authenticated principal).
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Change" }
-        "400": { $ref: "#/components/responses/Problem" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { $ref: "#/components/responses/Problem" }
   /admin/v1/policy/compile:
     post:
       summary: Dry-run compile a draft policy for a host's groups (live analysis).
@@ -924,12 +913,22 @@ components:
       properties:
         change: { $ref: "#/components/schemas/Change" }
         signoffs: { type: array, items: { $ref: "#/components/schemas/Signoff" } }
-    ProposeRequest:
+    ConfigBody:
+      description: >-
+        The ENTIRE config for a kind (ADR 0011 Phase 1, PUT /admin/v1/config/{kind}).
+        Shape depends on {kind}: for policy the body is the firewall policy DSL as a
+        JSON string; for cloudtrust it is {default_groups, aws}; for usertrust it is
+        {default_groups, idp_entries}. The server validates the body against the kind.
+    ConfigRow:
       type: object
-      required: [policy]
+      required: [kind, set]
       properties:
-        policy: { type: string, description: "the firewall policy DSL" }
-        description: { type: string }
+        kind: { type: string, enum: [policy, cloudtrust, usertrust] }
+        set: { type: boolean, description: "false when no config of this kind has been written yet" }
+        version: { type: integer, format: int64, description: "monotonic, bumped on every write" }
+        payload: { type: string, description: "the stored canonical config bytes" }
+        updated_at: { type: string }
+        updated_by: { type: string }
     DenyRequest:
       type: object
       properties:
@@ -947,7 +946,7 @@ components:
       required: [published]
       properties:
         published: { type: boolean }
-        change_id: { type: integer, format: int64 }
+        version: { type: integer, format: int64 }
         hash: { type: string }
         text: { type: string }
         rules: { type: array, items: { $ref: "#/components/schemas/PolicyRule" } }
@@ -965,17 +964,10 @@ components:
       required: [published]
       properties:
         published: { type: boolean }
-        change_id: { type: integer, format: int64 }
+        version: { type: integer, format: int64 }
         hash: { type: string }
         default_groups: { type: array, items: { type: string }, description: "granted to every validly-attested host" }
         aws: { type: array, items: { $ref: "#/components/schemas/CloudTrustAccount" } }
-    CloudTrustProposeRequest:
-      type: object
-      required: [aws]
-      properties:
-        default_groups: { type: array, items: { type: string } }
-        aws: { type: array, items: { $ref: "#/components/schemas/CloudTrustAccount" } }
-        description: { type: string }
     IDPEntry:
       type: object
       required: [realm, directory_group]
@@ -990,17 +982,10 @@ components:
       required: [published]
       properties:
         published: { type: boolean }
-        change_id: { type: integer, format: int64 }
+        version: { type: integer, format: int64 }
         hash: { type: string }
         default_groups: { type: array, items: { type: string }, description: "granted to every validly SSO-enrolled host" }
         idp_entries: { type: array, items: { $ref: "#/components/schemas/IDPEntry" } }
-    UserTrustProposeRequest:
-      type: object
-      required: [idp_entries]
-      properties:
-        default_groups: { type: array, items: { type: string } }
-        idp_entries: { type: array, items: { $ref: "#/components/schemas/IDPEntry" } }
-        description: { type: string }
     CompileRequest:
       type: object
       required: [policy]
@@ -1133,7 +1118,7 @@ components:
           required: [published]
           properties:
             published: { type: boolean }
-            change_id: { type: integer, format: int64 }
+            version: { type: integer, format: int64 }
             hash: { type: string }
         added: { type: array, items: { $ref: "#/components/schemas/FlowDelta" } }
         removed: { type: array, items: { $ref: "#/components/schemas/FlowDelta" } }

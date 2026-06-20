@@ -226,3 +226,26 @@ func TestMatchNoMatch(t *testing.T) {
 		t.Fatalf("no-group match should DENY: groups=%v netblock=%q auto=%v ok=%v", groups, netblock, auto, ok)
 	}
 }
+
+// TestContainsPrivileged: the ADR-0011 P1.2 usertrust predicate flags auto_issue OR a
+// reserved-group grant; a plain config is false. (The auto_issue+reserved COMBO is
+// refused earlier by Validate; this predicate covers the still-valid privileged cases.)
+func TestContainsPrivileged(t *testing.T) {
+	plain := Config{IDPEntries: []IDPEntry{{Realm: "corp", DirectoryGroup: "eng", MeshGroups: []string{"eng"}}}}
+	if ContainsPrivileged(plain) {
+		t.Fatal("plain config must not be privileged")
+	}
+	auto := Config{IDPEntries: []IDPEntry{{Realm: "corp", DirectoryGroup: "eng", MeshGroups: []string{"eng"}, AutoIssue: true}}}
+	if !ContainsPrivileged(auto) {
+		t.Fatal("auto_issue must be privileged")
+	}
+	// A non-auto entry granting a reserved group (an admin approves it) is privileged.
+	reserved := Config{IDPEntries: []IDPEntry{{Realm: "corp", DirectoryGroup: "admins", MeshGroups: []string{"control-plane"}}}}
+	if !ContainsPrivileged(reserved) {
+		t.Fatal("reserved mesh group must be privileged")
+	}
+	reservedDefault := Config{DefaultGroups: []string{"lighthouse"}, IDPEntries: []IDPEntry{{Realm: "corp", DirectoryGroup: "eng", MeshGroups: []string{"eng"}}}}
+	if !ContainsPrivileged(reservedDefault) {
+		t.Fatal("reserved default group must be privileged")
+	}
+}

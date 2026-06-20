@@ -14,13 +14,11 @@ package usertrust
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
 
-	"github.com/jeks313/nebula-control-plane/internal/dualcontrol"
 	"github.com/jeks313/nebula-control-plane/internal/policy"
 )
 
@@ -32,18 +30,6 @@ import (
 
 // PublishKind is the dual-control change kind for a user-trust config publish.
 const PublishKind = "usertrust.publish"
-
-// RegisterCommitter installs the usertrust.publish commit-time validator on dc —
-// the single canonical definition shared by every wiring site (harbor CLI, admin
-// API, demo seeder), so the gate can't drift by call site. Re-parsing at commit is
-// defense in depth: the UI also blocks duplicates (S3) but the UI is bypassable, so
-// the published config must be self-consistent on its own.
-func RegisterCommitter(dc *dualcontrol.Controller) {
-	dc.Register(PublishKind, func(_ context.Context, ch dualcontrol.Change) error {
-		_, err := Parse(ch.Payload)
-		return err
-	})
-}
 
 // IDPEntry is one trusted directory-group entry (S2). A SAML/OIDC assertion whose
 // realm matches and whose group membership includes DirectoryGroup grants the host
@@ -153,6 +139,39 @@ func Validate(c Config) error {
 		}
 	}
 	return nil
+}
+
+// ContainsPrivileged reports whether the config contains ANY privileged grant — the
+// usertrust half of the ADR-0011 P1.2 PRIVILEGED predicate (resulting-config rule,
+// not a delta). Privileged means EITHER:
+//   - a reserved-group grant: any IDPEntry's MeshGroups ∪ the fleet-wide DefaultGroups
+//     contains a reserved/privileged group (control-plane/lighthouse), reusing
+//     policy.IsReservedGroup; OR
+//   - any auto_issue=true entry (issuing immediately, unattended, is privileged).
+//
+// The auto_issue+reserved COMBO is a separate, stricter case: Validate refuses it
+// outright (ErrAutoIssuePrivileged, S8) before this predicate is ever consulted — so
+// that combo 400s at the PUT, it never reaches the two-person route. This predicate
+// catches the still-VALID privileged configs: a non-auto reserved grant (an admin
+// approves it) and an auto_issue entry granting only non-reserved groups (both route
+// two-person).
+func ContainsPrivileged(c Config) bool {
+	for _, g := range c.DefaultGroups {
+		if policy.IsReservedGroup(g) {
+			return true
+		}
+	}
+	for _, e := range c.IDPEntries {
+		if e.AutoIssue {
+			return true
+		}
+		for _, g := range e.MeshGroups {
+			if policy.IsReservedGroup(g) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Match resolves an SSO identity (its realm + the directory groups the IdP asserted)
