@@ -37,7 +37,6 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/revocation"
 	"github.com/jeks313/nebula-control-plane/internal/rollout"
 	"github.com/jeks313/nebula-control-plane/internal/signer"
-	"github.com/jeks313/nebula-control-plane/internal/store"
 	"github.com/jeks313/nebula-control-plane/internal/wire"
 )
 
@@ -149,6 +148,12 @@ func cmdCoreAPI(args []string) {
 	s := openStore(*cf.driver, *cf.dsn)
 	defer s.Close()
 	audit := func(c context.Context, a, ac, t, d string) error { _, e := s.AppendAudit(c, a, ac, t, d); return e }
+	// ADR 0011 Phase 1 (C8): carry the live PoC's current committed config (policy /
+	// cloudtrust / usertrust) into the new config store the enforcement readers now use.
+	// Idempotent; a failure is recoverable next boot, so warn rather than abort.
+	seedConfigStore(context.Background(), s, func(kind string, err error) {
+		log.Warn("core-api: config-store boot-seed failed", "kind", kind, "err", err)
+	})
 	// Boot-seed central/default for an existing mesh upgraded onto the IPAM build: the
 	// migrations created an empty netblocks table but genesis-only seeding left the
 	// 'default' block (which the enroll consumer resolves unbound joins to) missing, so
@@ -307,25 +312,41 @@ func cmdAdminAPI(args []string) {
 	tlsOn := (*tlsCert != "" && *tlsKey != "") || acme.Enabled()
 	log := lf.setup()
 
+	// Open the store FIRST so the ADR-0011 Phase-1 boot-seed (C8) runs BEFORE the
+	// enrollment consumer is built below. The consumer snapshots policy / cloud-trust
+	// at build time (cf.cloudTrust(s) / cf.policy(s)); on the first boot after migration
+	// 000027 the config store is empty, so building the consumer before seeding would
+	// capture CloudTrust=nil / Policy=nil for the whole process lifetime — AWS
+	// attestation disabled (deny) and Pilot's local-default firewall — even though the
+	// live PoC's legacy committed config gets carried over moments later. core-api
+	// already seeds before its reads; this mirrors that ordering.
+	s := openStore(*cf.driver, *cf.dsn)
+	defer s.Close()
+	// ADR 0011 Phase 1 (C8): carry the live PoC's current committed config (policy /
+	// cloudtrust / usertrust) from the dual-control LatestCommitted ledger into the new
+	// config store the declarative API + enforcement readers (and the consumer's
+	// build-time snapshot) use. Idempotent (SeedIfEmpty); warn on failure (recoverable
+	// next boot).
+	seedConfigStore(context.Background(), s, func(kind string, err error) {
+		log.Warn("admin-api: config-store boot-seed failed", "kind", kind, "err", err)
+	})
+
 	// Issuance mode: when the CA/signing config is supplied, build the full
-	// enrollment consumer so the approval queue can issue certs. Otherwise run
-	// read-only (list + deny; approve returns 501).
+	// enrollment consumer so the approval queue can issue certs (over the
+	// already-seeded store). Otherwise run read-only (list + deny; approve returns 501).
 	var (
-		s        *store.Store
 		consumer *enrollment.Consumer
 		canIssue bool
 	)
 	if *cf.caCert != "" {
 		var q *queue.Durable
-		consumer, q, s = cf.build()
+		consumer, q, s = cf.buildWithStore(s)
 		defer q.Close()
 		canIssue = true
 		log.Info("admin-api issuance mode", "enroll_approve", "enabled")
 	} else {
-		s = openStore(*cf.driver, *cf.dsn)
 		log.Info("admin-api read-only mode", "enroll_approve", "disabled (pass -ca-cert/-config-key/-queue-* to enable)")
 	}
-	defer s.Close()
 	// Fail fast on an unmigrated/stale DB (a common footgun: pointing -dsn at a fresh
 	// file). The console's session auth needs the sessions table (migration 000009);
 	// without this, login fails later with a cryptic "no such table: sessions" 500.

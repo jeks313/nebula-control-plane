@@ -97,3 +97,24 @@ func TestMatchAWS(t *testing.T) {
 		t.Fatalf("untrusted account should not match: ok=%v netblock=%q", ok, nb)
 	}
 }
+
+// TestContainsPrivileged: the ADR-0011 P1.2 cloudtrust predicate flags auto_issue OR a
+// reserved-group grant (per-account groups OR default_groups); a plain config is false.
+func TestContainsPrivileged(t *testing.T) {
+	plain := Config{AWS: []AWSAccount{{Account: "111", Groups: []string{"web"}}}}
+	if ContainsPrivileged(plain) {
+		t.Fatal("plain config must not be privileged")
+	}
+	auto := Config{AWS: []AWSAccount{{Account: "111", Groups: []string{"web"}, AutoIssue: true}}}
+	if !ContainsPrivileged(auto) {
+		t.Fatal("auto_issue must be privileged")
+	}
+	reservedPerAccount := Config{AWS: []AWSAccount{{Account: "111", Groups: []string{"control-plane"}}}}
+	if !ContainsPrivileged(reservedPerAccount) {
+		t.Fatal("per-account reserved group must be privileged")
+	}
+	reservedDefault := Config{DefaultGroups: []string{"lighthouse"}, AWS: []AWSAccount{{Account: "111", Groups: []string{"web"}}}}
+	if !ContainsPrivileged(reservedDefault) {
+		t.Fatal("default reserved group must be privileged")
+	}
+}

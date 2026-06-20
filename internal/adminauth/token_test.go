@@ -125,10 +125,10 @@ func TestTokenCannotStepUp(t *testing.T) {
 		map[string]any{"overlay_ip": "10.44.0.1", "public_addrs": []string{"1.2.3.4:4242"}}); code != http.StatusCreated {
 		t.Fatalf("token lighthouse add = %d, want 201", code)
 	}
-	// Step-up-gated action (policy publish) → blocked, distinguishable code.
-	code, body := bearer("POST", "/admin/v1/policy/propose", map[string]any{"policy": "allow web -> db tcp 5432\n"})
+	// Step-up-gated action (the declarative config PUT) → blocked, distinguishable code.
+	code, body := bearer("PUT", "/admin/v1/config/policy", "allow web -> db tcp 5432\n")
 	if code != http.StatusForbidden || body["code"] != "step_up_required" {
-		t.Fatalf("token policy propose = %d code=%v, want 403 step_up_required", code, body["code"])
+		t.Fatalf("token config PUT = %d code=%v, want 403 step_up_required", code, body["code"])
 	}
 	// /me reflects no MFA.
 	_, me := bearer("GET", "/admin/v1/me", nil)

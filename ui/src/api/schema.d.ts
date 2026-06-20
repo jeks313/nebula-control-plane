@@ -181,16 +181,17 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/admin/v1/policy/active": {
+    "/admin/v1/config/{kind}": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** The published fleet policy (latest committed policy.publish). */
-        get: operations["getActivePolicy"];
-        put?: never;
+        /** Read the stored declarative config for a kind (ADR 0011 Phase 1). */
+        get: operations["getConfig"];
+        /** Set the ENTIRE declarative config for a kind (ADR 0011 Phase 1). Validates inline; a non-privileged change is written directly (200); a PRIVILEGED change (reserved-group grant or auto_issue) routes through a distinct-second-approver dual-control commit (202 + a Change approved via /approvals/{id}/approve). */
+        put: operations["setConfig"];
         post?: never;
         delete?: never;
         options?: never;
@@ -198,17 +199,17 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/admin/v1/policy/propose": {
+    "/admin/v1/policy/active": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /** The active fleet policy (ADR 0011 Phase 1 — from the config store). */
+        get: operations["getActivePolicy"];
         put?: never;
-        /** Validate + invariant-check a policy, then open a dual-control change. */
-        post: operations["proposePolicy"];
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -222,27 +223,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** The published cloud-attestation trust config (latest committed cloudtrust.publish). */
+        /** The active cloud-attestation trust config (ADR 0011 Phase 1 — from the config store). */
         get: operations["getActiveCloudTrust"];
         put?: never;
         post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/admin/v1/cloudtrust/propose": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Validate a cloud-trust config, then open a dual-control change. */
-        post: operations["proposeCloudTrust"];
         delete?: never;
         options?: never;
         head?: never;
@@ -256,27 +240,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** The published SSO user-trust config (latest committed usertrust.publish, ADR 0004). */
+        /** The active SSO user-trust config (ADR 0004; ADR 0011 Phase 1 — from the config store). */
         get: operations["getActiveUserTrust"];
         put?: never;
         post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/admin/v1/usertrust/propose": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Validate an SSO user-trust config, then open a dual-control change. */
-        post: operations["proposeUserTrust"];
         delete?: never;
         options?: never;
         head?: never;
@@ -830,10 +797,22 @@ export interface components {
             change: components["schemas"]["Change"];
             signoffs: components["schemas"]["Signoff"][];
         };
-        ProposeRequest: {
-            /** @description the firewall policy DSL */
-            policy: string;
-            description?: string;
+        /** @description The ENTIRE config for a kind (ADR 0011 Phase 1, PUT /admin/v1/config/{kind}). Shape depends on {kind}: for policy the body is the firewall policy DSL as a JSON string; for cloudtrust it is {default_groups, aws}; for usertrust it is {default_groups, idp_entries}. The server validates the body against the kind. */
+        ConfigBody: unknown;
+        ConfigRow: {
+            /** @enum {string} */
+            kind: "policy" | "cloudtrust" | "usertrust";
+            /** @description false when no config of this kind has been written yet */
+            set: boolean;
+            /**
+             * Format: int64
+             * @description monotonic, bumped on every write
+             */
+            version?: number;
+            /** @description the stored canonical config bytes */
+            payload?: string;
+            updated_at?: string;
+            updated_by?: string;
         };
         DenyRequest: {
             reason?: string;
@@ -847,7 +826,7 @@ export interface components {
         ActivePolicy: {
             published: boolean;
             /** Format: int64 */
-            change_id?: number;
+            version?: number;
             hash?: string;
             text?: string;
             rules?: components["schemas"]["PolicyRule"][];
@@ -867,16 +846,11 @@ export interface components {
         CloudTrustActive: {
             published: boolean;
             /** Format: int64 */
-            change_id?: number;
+            version?: number;
             hash?: string;
             /** @description granted to every validly-attested host */
             default_groups?: string[];
             aws?: components["schemas"]["CloudTrustAccount"][];
-        };
-        CloudTrustProposeRequest: {
-            default_groups?: string[];
-            aws: components["schemas"]["CloudTrustAccount"][];
-            description?: string;
         };
         IDPEntry: {
             /** @description IdP/tenant realm; matched EXACTLY against the assertion issuer (ADR 0004 S2) */
@@ -893,16 +867,11 @@ export interface components {
         UserTrustActive: {
             published: boolean;
             /** Format: int64 */
-            change_id?: number;
+            version?: number;
             hash?: string;
             /** @description granted to every validly SSO-enrolled host */
             default_groups?: string[];
             idp_entries?: components["schemas"]["IDPEntry"][];
-        };
-        UserTrustProposeRequest: {
-            default_groups?: string[];
-            idp_entries: components["schemas"]["IDPEntry"][];
-            description?: string;
         };
         CompileRequest: {
             policy: string;
@@ -1010,7 +979,7 @@ export interface components {
             active: {
                 published: boolean;
                 /** Format: int64 */
-                change_id?: number;
+                version?: number;
                 hash?: string;
             };
             added: components["schemas"]["FlowDelta"][];
@@ -1562,6 +1531,69 @@ export interface operations {
             409: components["responses"]["Problem"];
         };
     };
+    getConfig: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                kind: "policy" | "cloudtrust" | "usertrust";
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The stored config row, or {set:false} when none has been written. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConfigRow"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["Problem"];
+        };
+    };
+    setConfig: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                kind: "policy" | "cloudtrust" | "usertrust";
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConfigBody"];
+            };
+        };
+        responses: {
+            /** @description The stored config row (non-privileged single-operator write). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConfigRow"];
+                };
+            };
+            /** @description A dual-control change opened for a PRIVILEGED config (needs a distinct second approver). */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Change"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Problem"];
+            404: components["responses"]["Problem"];
+        };
+    };
     getActivePolicy: {
         parameters: {
             query?: never;
@@ -1581,33 +1613,6 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
-        };
-    };
-    proposePolicy: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ProposeRequest"];
-            };
-        };
-        responses: {
-            /** @description The opened change (proposer = the authenticated principal). */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Change"];
-                };
-            };
-            400: components["responses"]["Problem"];
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Problem"];
         };
     };
     getActiveCloudTrust: {
@@ -1631,33 +1636,6 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
         };
     };
-    proposeCloudTrust: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["CloudTrustProposeRequest"];
-            };
-        };
-        responses: {
-            /** @description The opened change (proposer = the authenticated principal). */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Change"];
-                };
-            };
-            400: components["responses"]["Problem"];
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Problem"];
-        };
-    };
     getActiveUserTrust: {
         parameters: {
             query?: never;
@@ -1677,33 +1655,6 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
-        };
-    };
-    proposeUserTrust: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["UserTrustProposeRequest"];
-            };
-        };
-        responses: {
-            /** @description The opened change (proposer = the authenticated principal). */
-            201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["Change"];
-                };
-            };
-            400: components["responses"]["Problem"];
-            401: components["responses"]["Unauthorized"];
-            403: components["responses"]["Problem"];
         };
     };
     compilePolicy: {

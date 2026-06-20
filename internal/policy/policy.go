@@ -7,12 +7,10 @@
 package policy
 
 import (
-	"context"
 	"fmt"
 	"strconv"
 	"strings"
 
-	"github.com/jeks313/nebula-control-plane/internal/dualcontrol"
 	"github.com/jeks313/nebula-control-plane/internal/nebulaconfig"
 )
 
@@ -41,25 +39,32 @@ func GrantsReservedGroup(groups []string) bool {
 	return false
 }
 
+// ContainsReservedRef reports whether ANY rule references a reserved/privileged
+// group (control-plane/lighthouse) on either side. This is the policy half of the
+// ADR-0011 P1.2 PRIVILEGED predicate: a config containing a reserved reference must
+// route through the two-person dual-control commit, not a single-operator write.
+//
+// NOTE on the cloudtrust/usertrust asymmetry: a VALID policy can never contain a
+// reserved reference — policy.CheckInvariants already rejects exactly that (a user
+// rule may not shape reserved-group reachability, 6.3). So on the PUT path, where
+// validation (Parse + CheckInvariants) runs first, this predicate is effectively
+// always false for policy (the privileged route is defensive/dead for this kind),
+// whereas cloudtrust/usertrust have legitimately privileged-but-valid configs
+// (reserved grants and auto_issue) that DO route two-person. The resulting-config
+// rule (not a delta) is deliberate: it cannot be gamed by multi-step deltas.
+func ContainsReservedRef(p Policy) bool {
+	for _, r := range p.Rules {
+		if IsReservedGroup(r.FromGroup) || IsReservedGroup(r.ToGroup) {
+			return true
+		}
+	}
+	return false
+}
+
 // PublishKind is the dual-control change kind for firewall-policy publish (6.5).
 // The active fleet policy is the latest committed change of this kind. Shared by
 // the CLI and the admin API so both write/read the same records.
 const PublishKind = "policy.publish"
-
-// RegisterCommitter installs the policy.publish commit-time validator on dc. This
-// is the single canonical definition every wiring site (harbor CLI, admin API,
-// demo seeder) uses, so a published policy is committed through the SAME
-// validation and the gate can't drift by call site. Re-validating at commit is
-// defense in depth — invariants are also checked at propose time.
-func RegisterCommitter(dc *dualcontrol.Controller) {
-	dc.Register(PublishKind, func(_ context.Context, ch dualcontrol.Change) error {
-		p, err := Parse(string(ch.Payload))
-		if err != nil {
-			return err
-		}
-		return CheckInvariants(p)
-	})
-}
 
 // Rule is one allow rule: members of FromGroup may reach members of ToGroup on
 // Proto/Port. "any" is allowed for FromGroup (any source) and Port.

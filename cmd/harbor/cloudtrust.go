@@ -84,9 +84,7 @@ func cloudTrustPublish(args []string) {
 // of `cloudtrust publish`, free of flag-parsing / os.Exit.)
 func publishCloudTrust(s *store.Store, cfg cloudtrust.Config, opA, opB, target string) (dualcontrol.Change, error) {
 	ctx := context.Background()
-	audit := func(c context.Context, a, ac, t, d string) error { _, e := s.AppendAudit(c, a, ac, t, d); return e }
-	dc := dualcontrol.New(dualcontrol.Config{DB: s.DB, Audit: audit})
-	cloudtrust.RegisterCommitter(dc)
+	dc := newPolicyController(s) // committer re-validates AND writes the config store (ADR 0011)
 	payload, _ := json.Marshal(cfg)
 	ch, err := dc.Propose(ctx, cloudtrust.PublishKind, target, payload, opA)
 	if err != nil {
