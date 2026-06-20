@@ -50,36 +50,36 @@ func req(t *testing.T, ts *httptest.Server, method, path, actor string, body any
 	return resp.StatusCode, m
 }
 
-// TestPolicyDualControlOverHTTP is the A0.3 showcase: propose → self-approve
-// blocked → second distinct approver commits → it becomes the active policy.
-func TestPolicyDualControlOverHTTP(t *testing.T) {
+// TestConfigSetPolicyNonPrivileged is the ADR-0011 Phase-1 single-operator showcase:
+// PUT a non-privileged policy → 200 (written straight to the config store, no
+// dual-control), the version bumps, and it becomes the active fleet policy.
+func TestConfigSetPolicyNonPrivileged(t *testing.T) {
 	ts := plainSrv(t, "admin")
 	defer ts.Close()
 	doc := loadSpec(t)
 
-	// Propose as alice.
-	code, ch := req(t, ts, "POST", "/admin/v1/policy/propose", "alice",
-		map[string]any{"policy": "allow web -> db tcp 5432\n"})
-	if code != http.StatusCreated {
-		t.Fatalf("propose status = %d, want 201 (%v)", code, ch)
+	// A plain (non-privileged) policy DSL — a single operator sets it directly.
+	code, row := req(t, ts, "PUT", "/admin/v1/config/policy", "alice", "allow web -> db tcp 5432\n")
+	if code != http.StatusOK {
+		t.Fatalf("PUT policy status = %d, want 200 (%v)", code, row)
 	}
-	conform(t, doc, "POST", "/admin/v1/policy/propose", 201, ch)
-	id := int64(ch["id"].(float64))
-	if ch["state"] != "pending" || ch["proposer"] != "alice" {
-		t.Fatalf("change = %v", ch)
+	conform(t, doc, "PUT", "/admin/v1/config/{kind}", 200, row)
+	if row["set"] != true || row["version"].(float64) != 1 {
+		t.Fatalf("row = %v, want set:true version:1", row)
 	}
 
-	// alice cannot approve her own change.
-	if code, _ := req(t, ts, "POST", fmt.Sprintf("/admin/v1/approvals/%d/approve", id), "alice", nil); code != http.StatusConflict {
-		t.Fatalf("self-approve status = %d, want 409", code)
+	// A second write bumps the version.
+	code, row2 := req(t, ts, "PUT", "/admin/v1/config/policy", "alice", "allow web -> db tcp 443\n")
+	if code != http.StatusOK || row2["version"].(float64) != 2 {
+		t.Fatalf("second PUT = %d %v, want 200 version:2", code, row2)
 	}
 
-	// bob (distinct) approves → committed.
-	code, out := req(t, ts, "POST", fmt.Sprintf("/admin/v1/approvals/%d/approve", id), "bob", nil)
-	if code != http.StatusOK || out["state"] != "committed" {
-		t.Fatalf("approve status=%d state=%v, want 200/committed", code, out["state"])
+	// GET /config/policy reads the store.
+	code, got := req(t, ts, "GET", "/admin/v1/config/policy", "alice", nil)
+	if code != http.StatusOK || got["set"] != true || got["version"].(float64) != 2 {
+		t.Fatalf("GET config = %d %v", code, got)
 	}
-	conform(t, doc, "POST", "/admin/v1/approvals/{id}/approve", 200, out)
+	conform(t, doc, "GET", "/admin/v1/config/{kind}", 200, got)
 
 	// It's now the active fleet policy.
 	code, act := req(t, ts, "GET", "/admin/v1/policy/active", "alice", nil)
@@ -87,40 +87,95 @@ func TestPolicyDualControlOverHTTP(t *testing.T) {
 		t.Fatalf("active = %v", act)
 	}
 	conform(t, doc, "GET", "/admin/v1/policy/active", 200, act)
-
-	// The approval detail carries the payload + both sign-offs.
-	code, det := req(t, ts, "GET", fmt.Sprintf("/admin/v1/approvals/%d", id), "alice", nil)
-	if code != http.StatusOK {
-		t.Fatalf("detail status = %d", code)
-	}
-	conform(t, doc, "GET", "/admin/v1/approvals/{id}", 200, det)
-	if sigs, _ := det["signoffs"].([]any); len(sigs) != 2 {
-		t.Fatalf("signoffs = %v, want 2 (alice propose + bob approve)", det["signoffs"])
-	}
 }
 
-// TestProposeRejectsBadPolicy: invalid DSL / invariant violation → 400, no change.
-func TestProposeRejectsBadPolicy(t *testing.T) {
+// TestConfigSetPrivilegedRoutesTwoPerson is the ADR-0011 Phase-1 privileged showcase:
+// a PUT introducing a privileged grant (cloudtrust auto_issue) does NOT write the
+// store directly — it returns 202 + a dual-control Change. Self-approve is blocked; a
+// distinct operator approves via /approvals/{id}/approve, and the committer writes the
+// store (the change then surfaces at /cloudtrust/active).
+func TestConfigSetPrivilegedRoutesTwoPerson(t *testing.T) {
 	ts := plainSrv(t, "admin")
 	defer ts.Close()
-	// References the reserved control-plane group → invariant violation.
-	if code, _ := req(t, ts, "POST", "/admin/v1/policy/propose", "alice",
-		map[string]any{"policy": "allow web -> control-plane tcp 443\n"}); code != http.StatusBadRequest {
-		t.Fatalf("invariant-violating propose status = %d, want 400", code)
+	doc := loadSpec(t)
+
+	// Before: store empty.
+	if code, none := req(t, ts, "GET", "/admin/v1/cloudtrust/active", "alice", nil); code != http.StatusOK || none["published"] != false {
+		t.Fatalf("active (pre) = %d %v, want published:false", code, none)
 	}
-	if code, _ := req(t, ts, "POST", "/admin/v1/policy/propose", "alice",
-		map[string]any{"policy": "this is not valid dsl\n"}); code != http.StatusBadRequest {
-		t.Fatalf("garbage propose status = %d, want 400", code)
+
+	// PUT a PRIVILEGED cloudtrust config (auto_issue=true) → 202 + a pending Change.
+	code, ch := req(t, ts, "PUT", "/admin/v1/config/cloudtrust", "alice", map[string]any{
+		"default_groups": []string{"fleet"},
+		"aws":            []map[string]any{{"account": "111122223333", "groups": []string{"web"}, "auto_issue": true}},
+	})
+	if code != http.StatusAccepted {
+		t.Fatalf("privileged PUT status = %d, want 202 (%v)", code, ch)
+	}
+	conform(t, doc, "PUT", "/admin/v1/config/{kind}", 202, ch)
+	id := int64(ch["id"].(float64))
+	if ch["state"] != "pending" || ch["proposer"] != "alice" || ch["kind"] != "cloudtrust.publish" {
+		t.Fatalf("change = %v", ch)
+	}
+
+	// The store was NOT written directly (still unpublished until the second approval).
+	if _, none := req(t, ts, "GET", "/admin/v1/cloudtrust/active", "alice", nil); none["published"] != false {
+		t.Fatalf("active after privileged PUT = %v, want still published:false (not direct-written)", none)
+	}
+
+	// alice cannot approve her own change.
+	if code, _ := req(t, ts, "POST", fmt.Sprintf("/admin/v1/approvals/%d/approve", id), "alice", nil); code != http.StatusConflict {
+		t.Fatalf("self-approve status = %d, want 409", code)
+	}
+
+	// bob (distinct) approves → committed → the committer writes the config store.
+	code, out := req(t, ts, "POST", fmt.Sprintf("/admin/v1/approvals/%d/approve", id), "bob", nil)
+	if code != http.StatusOK || out["state"] != "committed" {
+		t.Fatalf("approve status=%d state=%v, want 200/committed", code, out["state"])
+	}
+	conform(t, doc, "POST", "/admin/v1/approvals/{id}/approve", 200, out)
+
+	// It's now the active cloud-trust config (the committer landed it in the store).
+	code, act := req(t, ts, "GET", "/admin/v1/cloudtrust/active", "alice", nil)
+	if code != http.StatusOK || act["published"] != true {
+		t.Fatalf("active = %v", act)
+	}
+	conform(t, doc, "GET", "/admin/v1/cloudtrust/active", 200, act)
+}
+
+// TestConfigSetRejectsInvalid: invalid DSL / invariant violation / S8 combo → 400 with
+// the exact error, and nothing is written (the load-bearing inline-validation carry-over).
+func TestConfigSetRejectsInvalid(t *testing.T) {
+	ts := plainSrv(t, "admin")
+	defer ts.Close()
+	// Policy referencing the reserved control-plane group → invariant violation 400.
+	if code, _ := req(t, ts, "PUT", "/admin/v1/config/policy", "alice",
+		"allow web -> control-plane tcp 443\n"); code != http.StatusBadRequest {
+		t.Fatalf("invariant-violating policy PUT = %d, want 400", code)
+	}
+	// Garbage DSL → 400.
+	if code, _ := req(t, ts, "PUT", "/admin/v1/config/policy", "alice",
+		"this is not valid dsl\n"); code != http.StatusBadRequest {
+		t.Fatalf("garbage policy PUT = %d, want 400", code)
+	}
+	// usertrust auto_issue + reserved group → ErrAutoIssuePrivileged fires INLINE (400),
+	// never reaching the privileged two-person route.
+	if code, b := req(t, ts, "PUT", "/admin/v1/config/usertrust", "alice", map[string]any{
+		"idp_entries": []map[string]any{
+			{"realm": "corp", "directory_group": "admins", "mesh_groups": []string{"control-plane"}, "auto_issue": true},
+		},
+	}); code != http.StatusBadRequest {
+		t.Fatalf("auto_issue+reserved usertrust PUT = %d, want 400 (%v)", code, b)
 	}
 }
 
-// TestMutationsRequireAdminRole: a read-only (viewer) principal is 403 on mutate.
-func TestMutationsRequireAdminRole(t *testing.T) {
+// TestConfigSetRequiresManagePerm: a viewer (no :manage permission) is 403; reads work.
+func TestConfigSetRequiresManagePerm(t *testing.T) {
 	ts := plainSrv(t, "viewer")
 	defer ts.Close()
-	if code, _ := req(t, ts, "POST", "/admin/v1/policy/propose", "carol",
-		map[string]any{"policy": "allow web -> db tcp 5432\n"}); code != http.StatusForbidden {
-		t.Fatalf("viewer propose status = %d, want 403", code)
+	if code, _ := req(t, ts, "PUT", "/admin/v1/config/policy", "carol",
+		"allow web -> db tcp 5432\n"); code != http.StatusForbidden {
+		t.Fatalf("viewer config PUT status = %d, want 403", code)
 	}
 	// Reads still work for a viewer.
 	if code, _ := req(t, ts, "GET", "/admin/v1/approvals", "carol", nil); code != http.StatusOK {
@@ -149,12 +204,14 @@ func TestCompileLiveAnalysis(t *testing.T) {
 	}
 }
 
-// TestDenyVetoesOverHTTP: a deny moves the change to denied; approve then 409.
+// TestDenyVetoesOverHTTP: a deny moves a privileged-routed change to denied; approve
+// then 409. The change is opened via a PRIVILEGED cloudtrust PUT (202).
 func TestDenyVetoesOverHTTP(t *testing.T) {
 	ts := plainSrv(t, "admin")
 	defer ts.Close()
-	_, ch := req(t, ts, "POST", "/admin/v1/policy/propose", "alice",
-		map[string]any{"policy": "allow web -> db tcp 5432\n"})
+	_, ch := req(t, ts, "PUT", "/admin/v1/config/cloudtrust", "alice", map[string]any{
+		"aws": []map[string]any{{"account": "111122223333", "groups": []string{"web"}, "auto_issue": true}},
+	})
 	id := int64(ch["id"].(float64))
 
 	code, out := req(t, ts, "POST", fmt.Sprintf("/admin/v1/approvals/%d/deny", id), "bob",

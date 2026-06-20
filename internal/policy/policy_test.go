@@ -120,3 +120,17 @@ func TestParseRoundTripSpacing(t *testing.T) {
 		t.Fatalf("extra spaces should parse: %v", err)
 	}
 }
+
+// TestContainsReservedRef: the ADR-0011 P1.2 policy privileged predicate flags any
+// rule referencing a reserved group on either side; a plain policy is false.
+func TestContainsReservedRef(t *testing.T) {
+	if ContainsReservedRef(Policy{Rules: []Rule{{FromGroup: "web", ToGroup: "db", Proto: "tcp", Port: "5432"}}}) {
+		t.Fatal("plain policy must not be reserved-ref")
+	}
+	if !ContainsReservedRef(Policy{Rules: []Rule{{FromGroup: "control-plane", ToGroup: "db", Proto: "tcp", Port: "5432"}}}) {
+		t.Fatal("from control-plane must be reserved-ref")
+	}
+	if !ContainsReservedRef(Policy{Rules: []Rule{{FromGroup: "web", ToGroup: "lighthouse", Proto: "tcp", Port: "any"}}}) {
+		t.Fatal("to lighthouse must be reserved-ref")
+	}
+}

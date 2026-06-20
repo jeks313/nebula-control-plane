@@ -1,17 +1,18 @@
 import { useState, type ReactNode } from 'react'
-import { useCloudTrust, useProposeCloudTrust, useNetblocks, type CloudTrust as CloudTrustConfig, type Netblock } from '../api/hooks'
+import { useCloudTrust, usePutCloudTrust, useNetblocks, type CloudTrust as CloudTrustConfig, type Netblock } from '../api/hooks'
 import { usePermissions } from '../api/perms'
-import { isApiError, isCentrallyHandled } from '../api/errors'
+import { isApiError, isCentrallyHandled, isForbidden } from '../api/errors'
 import { useToast } from '../components/Toast'
 import { Card, Page, StateBlock, ErrorState, Button, Chip, cx } from '../components/ui'
 
-// Cloud Trust — the dual-control-published cloud-attestation config: which cloud
+// Cloud Trust — the declarative cloud-attestation config (ADR 0011 Phase 1): which cloud
 // principals (AWS accounts/roles today) may attest into the mesh, and the groups +
-// auto-issue posture each is granted. Editing republishes the WHOLE config as a new
-// version through dual-control (no per-account patch); it takes effect only on approval.
+// auto-issue posture each is granted. Saving republishes the WHOLE config as a new version
+// via PUT /config/cloudtrust (no per-account patch). A non-privileged change applies
+// directly; granting auto_issue is PRIVILEGED and routes to a distinct second approver.
 export function CloudTrust() {
   const { can } = usePermissions()
-  const mayPropose = can('cloudtrust:propose')
+  const mayManage = can('cloudtrust:manage')
   const q = useCloudTrust()
   const cfg = q.data
   const [editing, setEditing] = useState(false)
@@ -21,9 +22,9 @@ export function CloudTrust() {
       title="Cloud Trust"
       subtitle="Which cloud accounts may attest into the mesh — and the groups they're granted"
       actions={
-        mayPropose && cfg ? (
+        mayManage && cfg ? (
           <Button variant="primary" onClick={() => setEditing((v) => !v)}>
-            {editing ? 'Close editor' : cfg.published ? 'Propose change' : 'Add accounts'}
+            {editing ? 'Close editor' : cfg.published ? 'Edit config' : 'Add accounts'}
           </Button>
         ) : undefined
       }
@@ -31,7 +32,7 @@ export function CloudTrust() {
       {q.isPending && <StateBlock kind="loading" message="Loading cloud-trust config…" />}
       {q.isError && <ErrorState error={q.error} fallback="Couldn't load the cloud-trust config." />}
 
-      {mayPropose && editing && cfg && (
+      {mayManage && editing && cfg && (
         <div className="mb-5">
           <CloudTrustEditor cfg={cfg} onClose={() => setEditing(false)} />
         </div>
@@ -42,15 +43,15 @@ export function CloudTrust() {
           <StateBlock
             kind="empty"
             message={
-              mayPropose
-                ? 'No cloud-trust config published yet. Use “Add accounts” to propose the first version (dual-control).'
-                : 'No cloud-trust config published yet. Publishing is a dual-control change.'
+              mayManage
+                ? 'No cloud-trust config set yet. Use “Add accounts” to set the first version.'
+                : 'No cloud-trust config set yet.'
             }
           />
         ) : (
           <div className="flex flex-col gap-4">
             <Card className="px-4 py-3 text-[13px] text-ink-dim">
-              Published as change <span className="nums text-ink">#{cfg.change_id}</span>. Default groups granted to every
+              Active config v<span className="nums text-ink">{cfg.version}</span>. Default groups granted to every
               attested host:{' '}
               <span className="ml-1 inline-flex flex-wrap gap-1 align-middle">
                 {(cfg.default_groups ?? []).length === 0 ? (
@@ -112,7 +113,7 @@ type Row = { account: string; arnPatterns: string; groups: string; netblock: str
 
 function CloudTrustEditor({ cfg, onClose }: { cfg: CloudTrustConfig; onClose: () => void }) {
   const toast = useToast()
-  const propose = useProposeCloudTrust()
+  const put = usePutCloudTrust()
   // Seeded once from the active config (the editor mounts fresh each time it opens, so
   // the async-loaded config never clobbers in-progress edits).
   const [defaultGroups, setDefaultGroups] = useState((cfg.default_groups ?? []).join(', '))
@@ -127,13 +128,15 @@ function CloudTrustEditor({ cfg, onClose }: { cfg: CloudTrustConfig; onClose: ()
         }))
       : [{ account: '', arnPatterns: '', groups: '', netblock: '', autoIssue: false }],
   )
-  const [description, setDescription] = useState('')
+  // The exact server validation message for a refused save (the 400 branch), inline.
+  const [saveError, setSaveError] = useState<string | null>(null)
 
   const setRow = (i: number, patch: Partial<Row>) => setRows(rows.map((r, j) => (j === i ? { ...r, ...patch } : r)))
   const addRow = () => setRows([...rows, { account: '', arnPatterns: '', groups: '', netblock: '', autoIssue: false }])
   const removeRow = (i: number) => setRows(rows.filter((_, j) => j !== i))
 
   function submit() {
+    setSaveError(null)
     const aws = rows
       .filter((r) => r.account.trim())
       .map((r) => ({
@@ -144,24 +147,35 @@ function CloudTrustEditor({ cfg, onClose }: { cfg: CloudTrustConfig; onClose: ()
         auto_issue: r.autoIssue,
       }))
     if (aws.length === 0) {
-      toast.notify('Add at least one AWS account (a config with zero accounts is rejected).', 'error')
+      setSaveError('Add at least one AWS account (a config with zero accounts is rejected).')
       return
     }
     const ids = aws.map((a) => a.account)
     if (new Set(ids).size !== ids.length) {
-      toast.notify('Account ids must be unique.', 'error')
+      setSaveError('Account ids must be unique.')
       return
     }
-    propose.mutate(
-      { default_groups: splitList(defaultGroups), aws, description: description.trim() },
+    put.mutate(
+      { default_groups: splitList(defaultGroups), aws },
       {
-        onSuccess: (c) => {
-          toast.notify(`Opened change #${c.id} — review it in Approvals.`, 'success')
+        onSuccess: (r) => {
+          if (r.applied) {
+            toast.notify(`Cloud-trust config applied (v${r.row.version}).`, 'success')
+          } else {
+            toast.notify(
+              `This change grants privileged access and needs a second approver — submitted as change #${r.change.id}; approve it from Approvals.`,
+              'info',
+            )
+          }
           onClose()
         },
         onError: (err) => {
-          if (isCentrallyHandled(err)) return // step-up re-auth handled centrally
-          toast.notify(isApiError(err) ? err.detail || err.title : 'Propose failed.', 'error')
+          if (isCentrallyHandled(err)) return // 401 / step-up re-auth handled centrally
+          if (isForbidden(err)) {
+            setSaveError('You lack the cloudtrust:manage permission.')
+            return
+          }
+          setSaveError(isApiError(err) ? err.detail || err.title : 'Save failed.')
         },
       },
     )
@@ -170,15 +184,21 @@ function CloudTrustEditor({ cfg, onClose }: { cfg: CloudTrustConfig; onClose: ()
   return (
     <Card className="overflow-hidden">
       <div className="border-b border-edge px-4 py-2 text-[12px] font-medium text-ink">
-        {cfg.published ? 'Propose a new cloud-trust version' : 'Propose the first cloud-trust config'}
+        {cfg.published ? 'Edit the cloud-trust config' : 'Set the first cloud-trust config'}
       </div>
       <div className="flex flex-col gap-4 px-4 py-3">
         <div className="rounded-[6px] border border-warn/40 bg-warn/10 px-3 py-2 text-[12px] text-warn">
-          This controls <strong>who may attest into the mesh</strong>. It is a two-person dual-control change — proposing
-          opens an approval and it takes effect only after a different admin approves. Widening scope (accounts / ARN
-          patterns) or admission (auto-issue) admits more hosts, so review carefully. Editing republishes the whole config:
-          keep every account you want to retain.
+          This controls <strong>who may attest into the mesh</strong>. Saving applies the change directly. Widening scope
+          (accounts / ARN patterns) admits more hosts, so review carefully — and enabling <strong>auto-issue</strong> is a
+          privileged change that routes to a distinct second approver before it takes effect. Saving republishes the whole
+          config: keep every account you want to retain.
         </div>
+
+        {saveError && (
+          <div className="rounded-[6px] border border-danger/40 bg-danger/10 px-3 py-2 text-[12px] text-danger">
+            {saveError}
+          </div>
+        )}
 
         <Labeled label="Default groups (granted to every attested host, comma-separated)">
           <input value={defaultGroups} onChange={(e) => setDefaultGroups(e.target.value)} placeholder="fleet" className={FIELD} />
@@ -194,14 +214,10 @@ function CloudTrustEditor({ cfg, onClose }: { cfg: CloudTrustConfig; onClose: ()
           </div>
         </div>
 
-        <Labeled label="Description (optional)">
-          <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="why this change" className={FIELD} />
-        </Labeled>
-
         <div className="flex gap-2 border-t border-edge pt-3">
           <Button onClick={onClose}>Cancel</Button>
-          <Button variant="primary" onClick={submit} disabled={propose.isPending}>
-            {propose.isPending ? 'Proposing…' : 'Propose change'}
+          <Button variant="primary" onClick={submit} disabled={put.isPending}>
+            {put.isPending ? 'Saving…' : 'Save / Apply config'}
           </Button>
         </div>
       </div>

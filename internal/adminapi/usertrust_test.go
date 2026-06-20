@@ -1,7 +1,6 @@
 package adminapi_test
 
 import (
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -12,48 +11,36 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/store/migrate"
 )
 
-// TestUserTrustDualControlOverHTTP is the ADR-0004 admin-API showcase, mirroring the
-// cloud-trust flow: propose an SSO user-trust config → self-approve blocked → a second
-// distinct approver commits → GET /usertrust/active returns it (so SSO can reach issuance,
-// closing B2). Both the propose 201 and the active 200 bodies are conformance-checked
-// against the OpenAPI schema (the anti-drift guard for the new schemas).
-func TestUserTrustDualControlOverHTTP(t *testing.T) {
+// TestUserTrustConfigSetOverHTTP is the ADR-0004 + ADR-0011 Phase-1 admin-API
+// showcase: a non-privileged SSO user-trust config (auto_issue:false, non-reserved
+// mesh groups) is set by a single operator via PUT → 200 (no dual-control) → GET
+// /usertrust/active returns it (so SSO can reach issuance, closing B2). Both the PUT
+// 200 and the active 200 bodies are conformance-checked against the OpenAPI schema.
+func TestUserTrustConfigSetOverHTTP(t *testing.T) {
 	ts := plainSrv(t, "admin")
 	defer ts.Close()
 	doc := loadSpec(t)
 
-	// Active is {published:false} before anything is published.
+	// Active is {published:false} before anything is set.
 	code, none := req(t, ts, "GET", "/admin/v1/usertrust/active", "alice", nil)
 	if code != http.StatusOK || none["published"] != false {
 		t.Fatalf("active (pre-publish) = %d %v, want 200 published:false", code, none)
 	}
 	conform(t, doc, "GET", "/admin/v1/usertrust/active", 200, none)
 
-	// Propose as alice.
-	code, ch := req(t, ts, "POST", "/admin/v1/usertrust/propose", "alice", map[string]any{
+	// Single-operator PUT of a non-privileged config → 200 (written straight to store).
+	code, row := req(t, ts, "PUT", "/admin/v1/config/usertrust", "alice", map[string]any{
 		"default_groups": []string{"fleet"},
 		"idp_entries": []map[string]any{
 			{"realm": "corp", "directory_group": "corp-eng", "mesh_groups": []string{"eng"}, "auto_issue": false},
 		},
 	})
-	if code != http.StatusCreated {
-		t.Fatalf("propose status = %d, want 201 (%v)", code, ch)
+	if code != http.StatusOK {
+		t.Fatalf("PUT status = %d, want 200 (%v)", code, row)
 	}
-	conform(t, doc, "POST", "/admin/v1/usertrust/propose", 201, ch)
-	id := int64(ch["id"].(float64))
-	if ch["state"] != "pending" || ch["proposer"] != "alice" || ch["kind"] != "usertrust.publish" {
-		t.Fatalf("change = %v", ch)
-	}
-
-	// alice cannot approve her own change.
-	if code, _ := req(t, ts, "POST", fmt.Sprintf("/admin/v1/approvals/%d/approve", id), "alice", nil); code != http.StatusConflict {
-		t.Fatalf("self-approve status = %d, want 409", code)
-	}
-
-	// bob (distinct) approves → committed.
-	code, out := req(t, ts, "POST", fmt.Sprintf("/admin/v1/approvals/%d/approve", id), "bob", nil)
-	if code != http.StatusOK || out["state"] != "committed" {
-		t.Fatalf("approve status=%d state=%v, want 200/committed", code, out["state"])
+	conform(t, doc, "PUT", "/admin/v1/config/{kind}", 200, row)
+	if row["set"] != true {
+		t.Fatalf("row = %v, want set:true", row)
 	}
 
 	// It's now the active user-trust config (the seam SSO issuance reads).
@@ -68,14 +55,14 @@ func TestUserTrustDualControlOverHTTP(t *testing.T) {
 	}
 }
 
-// TestUserTrustProposeRejectsDuplicateGroup: a config with a duplicate (realm,
-// directory_group) — the S3 AD-group uniqueness violation the committer's Validate
-// enforces — is rejected at propose with a 400, and no change is opened.
-func TestUserTrustProposeRejectsDuplicateGroup(t *testing.T) {
+// TestUserTrustConfigSetRejectsDuplicateGroup: a config with a duplicate (realm,
+// directory_group) — the S3 AD-group uniqueness violation Validate enforces — is
+// rejected INLINE at the PUT with a 400, and nothing is written.
+func TestUserTrustConfigSetRejectsDuplicateGroup(t *testing.T) {
 	ts := plainSrv(t, "admin")
 	defer ts.Close()
 
-	code, _ := req(t, ts, "POST", "/admin/v1/usertrust/propose", "alice", map[string]any{
+	code, _ := req(t, ts, "PUT", "/admin/v1/config/usertrust", "alice", map[string]any{
 		"default_groups": []string{"fleet"},
 		"idp_entries": []map[string]any{
 			{"realm": "corp", "directory_group": "corp-eng", "mesh_groups": []string{"eng"}},
@@ -83,47 +70,47 @@ func TestUserTrustProposeRejectsDuplicateGroup(t *testing.T) {
 		},
 	})
 	if code != http.StatusBadRequest {
-		t.Fatalf("duplicate-group propose status = %d, want 400", code)
+		t.Fatalf("duplicate-group PUT status = %d, want 400", code)
 	}
 
 	// An entry that grants nothing (no mesh_groups + no default_groups) is also rejected.
-	code, _ = req(t, ts, "POST", "/admin/v1/usertrust/propose", "alice", map[string]any{
+	code, _ = req(t, ts, "PUT", "/admin/v1/config/usertrust", "alice", map[string]any{
 		"idp_entries": []map[string]any{
 			{"realm": "corp", "directory_group": "corp-eng"},
 		},
 	})
 	if code != http.StatusBadRequest {
-		t.Fatalf("grants-nothing propose status = %d, want 400", code)
+		t.Fatalf("grants-nothing PUT status = %d, want 400", code)
 	}
 
 	// Empty config (no entries) is rejected too.
-	code, _ = req(t, ts, "POST", "/admin/v1/usertrust/propose", "alice", map[string]any{})
+	code, _ = req(t, ts, "PUT", "/admin/v1/config/usertrust", "alice", map[string]any{})
 	if code != http.StatusBadRequest {
-		t.Fatalf("empty propose status = %d, want 400", code)
+		t.Fatalf("empty PUT status = %d, want 400", code)
 	}
 }
 
-// TestUserTrustProposeRequiresPerm: a viewer (no usertrust:propose permission) is 403;
-// reads (active) still work. Mirrors the cloud-trust / policy RBAC gate.
-func TestUserTrustProposeRequiresPerm(t *testing.T) {
+// TestUserTrustConfigSetRequiresPerm: a viewer (no usertrust:manage permission) is 403;
+// an operator (which ADR 0011 Phase 1 GRANTS usertrust:manage) succeeds; reads work.
+func TestUserTrustConfigSetRequiresPerm(t *testing.T) {
 	ts := plainSrv(t, "viewer")
 	defer ts.Close()
-	if code, _ := req(t, ts, "POST", "/admin/v1/usertrust/propose", "carol", map[string]any{
+	if code, _ := req(t, ts, "PUT", "/admin/v1/config/usertrust", "carol", map[string]any{
 		"idp_entries": []map[string]any{
 			{"realm": "corp", "directory_group": "corp-eng", "mesh_groups": []string{"eng"}},
 		},
 	}); code != http.StatusForbidden {
-		t.Fatalf("viewer propose status = %d, want 403", code)
+		t.Fatalf("viewer PUT status = %d, want 403", code)
 	}
-	// An operator also lacks usertrust:propose (admin-only, like cloudtrust/policy).
+	// An operator HOLDS usertrust:manage (ADR 0011 Phase 1) — a non-privileged write succeeds.
 	op := plainSrv(t, "operator")
 	defer op.Close()
-	if code, _ := req(t, op, "POST", "/admin/v1/usertrust/propose", "dave", map[string]any{
+	if code, _ := req(t, op, "PUT", "/admin/v1/config/usertrust", "dave", map[string]any{
 		"idp_entries": []map[string]any{
 			{"realm": "corp", "directory_group": "corp-eng", "mesh_groups": []string{"eng"}},
 		},
-	}); code != http.StatusForbidden {
-		t.Fatalf("operator propose status = %d, want 403 (usertrust:propose is admin-only)", code)
+	}); code != http.StatusOK {
+		t.Fatalf("operator PUT status = %d, want 200 (usertrust:manage)", code)
 	}
 	// Reads still work for a viewer.
 	if code, _ := req(t, ts, "GET", "/admin/v1/usertrust/active", "carol", nil); code != http.StatusOK {
@@ -131,9 +118,9 @@ func TestUserTrustProposeRequiresPerm(t *testing.T) {
 	}
 }
 
-// TestUserTrustProposeStepUp: with MFAFreshness enabled, propose (authority-granting)
-// requires recent MFA — no/stale MFA → 403 step_up_required; fresh MFA → 201.
-func TestUserTrustProposeStepUp(t *testing.T) {
+// TestUserTrustConfigSetStepUp: with MFAFreshness enabled, the config PUT requires
+// recent MFA — no/stale MFA → 403 step_up_required; fresh MFA → 200.
+func TestUserTrustConfigSetStepUp(t *testing.T) {
 	s, err := store.Open(store.Config{Driver: "sqlite", DSN: store.DefaultSQLiteDSN(t.TempDir() + "/ut-mfa.db")})
 	if err != nil {
 		t.Fatal(err)
@@ -160,16 +147,16 @@ func TestUserTrustProposeStepUp(t *testing.T) {
 
 	// No MFA → step-up required.
 	mfa["alice"] = nil
-	code, b := req(t, ts, "POST", "/admin/v1/usertrust/propose", "alice", body)
+	code, b := req(t, ts, "PUT", "/admin/v1/config/usertrust", "alice", body)
 	if code != http.StatusForbidden || b["code"] != "step_up_required" {
-		t.Fatalf("propose (no MFA) = %d code=%v, want 403 step_up_required", code, b["code"])
+		t.Fatalf("PUT (no MFA) = %d code=%v, want 403 step_up_required", code, b["code"])
 	}
 
-	// Fresh MFA → 201.
+	// Fresh MFA → 200.
 	fresh := now.Add(-time.Minute)
 	mfa["alice"] = &fresh
-	code, ch := req(t, ts, "POST", "/admin/v1/usertrust/propose", "alice", body)
-	if code != http.StatusCreated {
-		t.Fatalf("propose (fresh MFA) = %d, want 201 (%v)", code, ch)
+	code, ch := req(t, ts, "PUT", "/admin/v1/config/usertrust", "alice", body)
+	if code != http.StatusOK {
+		t.Fatalf("PUT (fresh MFA) = %d, want 200 (%v)", code, ch)
 	}
 }

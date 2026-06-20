@@ -15,6 +15,7 @@ package adminapi
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -28,6 +29,7 @@ import (
 	"time"
 
 	"github.com/jeks313/nebula-control-plane/internal/cloudtrust"
+	"github.com/jeks313/nebula-control-plane/internal/config"
 	"github.com/jeks313/nebula-control-plane/internal/dualcontrol"
 	"github.com/jeks313/nebula-control-plane/internal/enrollment"
 	"github.com/jeks313/nebula-control-plane/internal/fleet"
@@ -137,8 +139,9 @@ type Config struct {
 
 // Server is the admin API.
 type Server struct {
-	cfg Config
-	dc  *dualcontrol.Controller // dual-control workflow (approvals + policy publish)
+	cfg         Config
+	dc          *dualcontrol.Controller // dual-control workflow (approvals + privileged config commits + bulk-revoke)
+	configStore *config.Store           // ADR 0011 Phase 1: the declarative config store (single source of truth)
 }
 
 // New builds a Server, filling sensible defaults.
@@ -165,6 +168,7 @@ func New(cfg Config) *Server {
 			return e
 		}
 		s.dc = dualcontrol.New(dualcontrol.Config{DB: cfg.Store.DB, Audit: audit})
+		s.configStore = config.New(cfg.Store.DB, audit)
 		// Default the fleet engines from the store so the mutation handlers always
 		// have them (no 501 "not configured" path); a caller may still inject its own.
 		if s.cfg.Rollout == nil {
@@ -204,15 +208,43 @@ func New(cfg Config) *Server {
 				}
 			}
 		}
-		// Commit-time validation for the dual-control publish kinds (defense in
-		// depth; the active config is the latest committed change of each kind). The
-		// committers live in the domain packages so the CLI, this API, and the demo
-		// seeder all commit through the same validation.
-		policy.RegisterCommitter(s.dc)
-		cloudtrust.RegisterCommitter(s.dc)
-		usertrust.RegisterCommitter(s.dc)
+		// ADR 0011 Phase 1 (C5): the dual-control committers for the three config
+		// kinds now WRITE THE CONFIG STORE on commit. A privileged change (routed
+		// through the two-person flow by the PUT) re-validates AND lands in the SAME
+		// store the single-operator PUT writes — both paths converge on the store, so
+		// it is the single source of truth. Re-validating at commit is defense in
+		// depth (the PUT already validated inline before proposing).
+		registerConfigCommitter(s.dc, s.configStore, policy.PublishKind, func(b []byte) error {
+			p, err := policy.Parse(string(b))
+			if err != nil {
+				return err
+			}
+			return policy.CheckInvariants(p)
+		})
+		registerConfigCommitter(s.dc, s.configStore, cloudtrust.PublishKind, func(b []byte) error {
+			_, err := cloudtrust.Parse(b)
+			return err
+		})
+		registerConfigCommitter(s.dc, s.configStore, usertrust.PublishKind, func(b []byte) error {
+			_, err := usertrust.Parse(b)
+			return err
+		})
 	}
 	return s
+}
+
+// registerConfigCommitter wires a dual-control committer for a config kind: on
+// quorum it re-validates the change payload (defense in depth) and then writes it to
+// the config store attributed to the proposer (ADR 0011 C5). Both the single-operator
+// PUT and this two-person commit therefore converge on configStore.Set.
+func registerConfigCommitter(dc *dualcontrol.Controller, cs *config.Store, kind string, validate func([]byte) error) {
+	dc.Register(kind, func(ctx context.Context, ch dualcontrol.Change) error {
+		if err := validate(ch.Payload); err != nil {
+			return err
+		}
+		_, err := cs.Set(ctx, kind, ch.Payload, ch.Proposer)
+		return err
+	})
 }
 
 // fail logs the real error server-side and returns a stable, generic detail to
@@ -250,19 +282,22 @@ func (s *Server) routeTable() []route {
 		{"GET", "/admin/v1/approvals/{id}", s.handleApproval},
 		{"POST", "/admin/v1/approvals/{id}/approve", s.handleApprove},
 		{"POST", "/admin/v1/approvals/{id}/deny", s.handleDeny},
+		// ADR 0011 Phase 1: the declarative set/get config primitive. PUT sets the
+		// ENTIRE config for a kind (validates inline, then routes privileged changes
+		// two-person or writes the store directly); GET reads the store. The
+		// per-kind /active GETs are the rich console views (also store-backed now).
+		{"PUT", "/admin/v1/config/{kind}", s.handleConfigSet},
+		{"GET", "/admin/v1/config/{kind}", s.handleConfigGet},
 		{"GET", "/admin/v1/policy/active", s.handlePolicyActive},
-		{"POST", "/admin/v1/policy/propose", s.handlePolicyPropose},
 		{"POST", "/admin/v1/policy/compile", s.handlePolicyCompile},
 		{"POST", "/admin/v1/policy/reachability", s.handlePolicyReachability},
 		{"POST", "/admin/v1/policy/matrix", s.handlePolicyMatrix},
 		{"POST", "/admin/v1/policy/tests", s.handlePolicyTests},
 		{"POST", "/admin/v1/policy/diff", s.handlePolicyDiff},
-		// Cloud-attestation trust config (dual-control; approved via /approvals).
+		// Cloud-attestation trust config (store-backed; privileged changes routed two-person via /approvals).
 		{"GET", "/admin/v1/cloudtrust/active", s.handleCloudTrustActive},
-		{"POST", "/admin/v1/cloudtrust/propose", s.handleCloudTrustPropose},
-		// SSO user-trust config (ADR 0004; dual-control; approved via /approvals).
+		// SSO user-trust config (ADR 0004; store-backed; privileged changes routed two-person via /approvals).
 		{"GET", "/admin/v1/usertrust/active", s.handleUserTrustActive},
-		{"POST", "/admin/v1/usertrust/propose", s.handleUserTrustPropose},
 		// A0.4 fleet-management mutations (pure-DB).
 		{"POST", "/admin/v1/lighthouses", s.handleLighthouseAdd},
 		{"PUT", "/admin/v1/lighthouses/{ip}", s.handleLighthouseReplace},
@@ -836,18 +871,190 @@ func (s *Server) handleDeny(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, changeView(ch, true))
 }
 
-// GET /admin/v1/policy/active — the published fleet policy (latest committed).
+// configKinds maps the {kind} path segment to the dual-control change kind, the
+// :manage permission gating it, and the inline validate+marshal+privileged-detect
+// logic the PUT runs. This is the single table the declarative API dispatches on.
+type configKind struct {
+	publishKind string
+	perm        Permission
+	// prepare validates the request body INLINE (ADR 0011 P1.1 — the load-bearing
+	// carry-over: every validator that used to fire from the dualcontrol commit path
+	// now fires here on EVERY write), returns the canonical payload bytes, and reports
+	// whether the resulting config is PRIVILEGED (P1.2). A non-nil error is the 400.
+	prepare func(body []byte) (payload []byte, privileged bool, err error)
+}
+
+func (s *Server) configKinds() map[string]configKind {
+	return map[string]configKind{
+		"policy": {
+			publishKind: policy.PublishKind,
+			perm:        PermPolicyManage,
+			prepare: func(body []byte) ([]byte, bool, error) {
+				// The policy body is the firewall-policy DSL carried as a JSON string
+				// (the OpenAPI ConfigBody contract). Unwrap the JSON string to the raw
+				// DSL; a body that is not a JSON string is treated as raw DSL directly so
+				// CLI/curl callers can PUT a bare policy file too.
+				dsl := string(body)
+				var asString string
+				if json.Unmarshal(body, &asString) == nil {
+					dsl = asString
+				}
+				p, err := policy.Parse(dsl) // Parse runs Validate
+				if err != nil {
+					return nil, false, err
+				}
+				if err := policy.CheckInvariants(p); err != nil {
+					return nil, false, err
+				}
+				// Store the canonical DSL bytes (the reader re-parses them).
+				// ContainsReservedRef is always false here (a valid policy can't reference
+				// a reserved group — CheckInvariants rejected it), so policy never routes
+				// two-person; kept for the uniform rule.
+				return []byte(dsl), policy.ContainsReservedRef(p), nil
+			},
+		},
+		"cloudtrust": {
+			publishKind: cloudtrust.PublishKind,
+			perm:        PermCloudTrustManage,
+			prepare: func(body []byte) ([]byte, bool, error) {
+				cfg, err := cloudtrust.Parse(body) // Parse runs Validate
+				if err != nil {
+					return nil, false, err
+				}
+				payload, merr := json.Marshal(cfg) // store the canonical, validated form
+				if merr != nil {
+					return nil, false, merr
+				}
+				return payload, cloudtrust.ContainsPrivileged(cfg), nil
+			},
+		},
+		"usertrust": {
+			publishKind: usertrust.PublishKind,
+			perm:        PermUserTrustManage,
+			prepare: func(body []byte) ([]byte, bool, error) {
+				// Parse runs Validate, which includes ErrAutoIssuePrivileged (S8): the
+				// auto_issue+reserved combo 400s HERE and never reaches the privileged route.
+				cfg, err := usertrust.Parse(body)
+				if err != nil {
+					return nil, false, err
+				}
+				payload, merr := json.Marshal(cfg)
+				if merr != nil {
+					return nil, false, merr
+				}
+				return payload, usertrust.ContainsPrivileged(cfg), nil
+			},
+		},
+	}
+}
+
+// PUT /admin/v1/config/{kind} — the ADR-0011 Phase-1 declarative set primitive.
+// kind ∈ policy|cloudtrust|usertrust. Gated on the per-kind :manage permission +
+// step-up MFA (human console writes keep their MFA gate, C9). The body is the ENTIRE
+// config for that kind. The handler validates INLINE (the load-bearing carry-over —
+// every commit-time validator now fires here, P1.1), then ROUTES:
+//   - PRIVILEGED resulting config (P1.2): does NOT write the store directly; opens a
+//     dual-control change (distinct second approver via /approvals/{id}/approve) and
+//     returns 202 + the Change. The registered committer writes the store on commit.
+//   - non-privileged: writes the store directly (single operator) and returns 200.
+func (s *Server) handleConfigSet(w http.ResponseWriter, r *http.Request) {
+	id := identityFrom(r.Context())
+	kindName := r.PathValue("kind")
+	ck, ok := s.configKinds()[kindName]
+	if !ok {
+		writeProblem(w, http.StatusNotFound, "unknown config kind", "kind must be one of: policy, cloudtrust, usertrust")
+		return
+	}
+	if !s.requirePerm(w, id, ck.perm) {
+		return
+	}
+	if !s.requireStepUp(w, id) { // human console writes keep MFA (C9)
+		return
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err != nil {
+		writeProblem(w, http.StatusBadRequest, "bad request", "could not read body")
+		return
+	}
+	if len(body) == 0 {
+		writeProblem(w, http.StatusBadRequest, "config required", "the request body is empty")
+		return
+	}
+	payload, privileged, perr := ck.prepare(body)
+	if perr != nil {
+		// THE load-bearing 400: ErrAutoIssuePrivileged, policy invariant violations,
+		// cloudtrust/usertrust structural errors etc. all surface here with their exact text.
+		writeProblem(w, http.StatusBadRequest, "invalid config", perr.Error())
+		return
+	}
+	if privileged {
+		// Route the privileged change through a distinct-second-approver dual-control
+		// commit (P1.2). The PUT proposer is the first sign-off; a different operator
+		// commits it via /approvals/{id}/approve, and the committer writes the store.
+		ch, derr := s.dc.Propose(r.Context(), ck.publishKind,
+			fmt.Sprintf("%s config (privileged — needs a distinct second approver)", kindName), payload, id.Principal)
+		if derr != nil {
+			s.fail(w, r, "propose privileged config failed", derr)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, changeView(ch, true))
+		return
+	}
+	// Non-privileged: single-operator write straight to the store.
+	row, serr := s.configStore.Set(r.Context(), ck.publishKind, payload, id.Principal)
+	if serr != nil {
+		s.fail(w, r, "write config failed", serr)
+		return
+	}
+	writeJSON(w, http.StatusOK, configRowView(kindName, row))
+}
+
+// GET /admin/v1/config/{kind} — reads the config store (ADR 0011 Phase 1). Returns
+// {set:false} when no config of that kind has been written yet.
+func (s *Server) handleConfigGet(w http.ResponseWriter, r *http.Request) {
+	kindName := r.PathValue("kind")
+	ck, ok := s.configKinds()[kindName]
+	if !ok {
+		writeProblem(w, http.StatusNotFound, "unknown config kind", "kind must be one of: policy, cloudtrust, usertrust")
+		return
+	}
+	row, err := s.configStore.Get(r.Context(), ck.publishKind)
+	if err != nil {
+		s.fail(w, r, "read config failed", err)
+		return
+	}
+	if row == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"kind": kindName, "set": false})
+		return
+	}
+	writeJSON(w, http.StatusOK, configRowView(kindName, row))
+}
+
+// configRowView is the API view of a stored config row.
+func configRowView(kindName string, row *config.Row) map[string]any {
+	return map[string]any{
+		"kind":       kindName,
+		"set":        true,
+		"version":    row.Version,
+		"payload":    string(row.Payload),
+		"updated_at": rfc3339(row.UpdatedAt),
+		"updated_by": row.UpdatedBy,
+	}
+}
+
+// GET /admin/v1/policy/active — the active fleet policy (ADR 0011 Phase 1: read from
+// the config store, the single source of truth). {published:false} when none is set.
 func (s *Server) handlePolicyActive(w http.ResponseWriter, r *http.Request) {
-	ch, ok, err := s.dc.LatestCommitted(r.Context(), policy.PublishKind)
+	row, err := s.configStore.Get(r.Context(), policy.PublishKind)
 	if err != nil {
 		s.fail(w, r, "read active policy failed", err)
 		return
 	}
-	if !ok {
+	if row == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"published": false})
 		return
 	}
-	p, perr := policy.Parse(string(ch.Payload))
+	p, perr := policy.Parse(string(row.Payload))
 	if perr != nil {
 		s.fail(w, r, "active policy is unparseable", perr)
 		return
@@ -857,66 +1064,24 @@ func (s *Server) handlePolicyActive(w http.ResponseWriter, r *http.Request) {
 		rules = []policy.Rule{} // contract: rules is always a JSON array
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"published": true, "change_id": ch.ID, "hash": hex.EncodeToString(ch.PayloadHash),
-		"text": string(ch.Payload), "rules": rules,
+		"published": true, "version": row.Version, "hash": hex.EncodeToString(payloadHash(row.Payload)),
+		"text": string(row.Payload), "rules": rules,
 	})
 }
 
-// POST /admin/v1/policy/propose — validate + invariant-check, then open a
-// dual-control change. Proposer = the authenticated principal.
-func (s *Server) handlePolicyPropose(w http.ResponseWriter, r *http.Request) {
-	id := identityFrom(r.Context())
-	if !s.requirePerm(w, id, PermPolicyPropose) {
-		return
-	}
-	if !s.requireStepUp(w, id) { // publishing policy is privileged → require fresh MFA
-		return
-	}
-	var body struct {
-		Policy      string `json:"policy"`
-		Description string `json:"description"`
-	}
-	if !readJSON(w, r, &body) {
-		return
-	}
-	if body.Policy == "" {
-		writeProblem(w, http.StatusBadRequest, "policy required", "the 'policy' field is empty")
-		return
-	}
-	p, err := policy.Parse(body.Policy)
-	if err != nil {
-		writeProblem(w, http.StatusBadRequest, "invalid policy", err.Error())
-		return
-	}
-	if err := policy.CheckInvariants(p); err != nil {
-		writeProblem(w, http.StatusBadRequest, "policy invariant violation", err.Error())
-		return
-	}
-	target := body.Description
-	if target == "" {
-		target = fmt.Sprintf("firewall policy (%d rules)", len(p.Rules))
-	}
-	ch, err := s.dc.Propose(r.Context(), policy.PublishKind, target, []byte(body.Policy), id.Principal)
-	if err != nil {
-		s.fail(w, r, "propose failed", err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, changeView(ch, true))
-}
-
-// GET /admin/v1/cloudtrust/active — the published cloud-attestation trust config
-// (latest committed). {published:false} when none has been published.
+// GET /admin/v1/cloudtrust/active — the active cloud-attestation trust config (ADR
+// 0011 Phase 1: read from the config store). {published:false} when none is set.
 func (s *Server) handleCloudTrustActive(w http.ResponseWriter, r *http.Request) {
-	ch, ok, err := s.dc.LatestCommitted(r.Context(), cloudtrust.PublishKind)
+	row, err := s.configStore.Get(r.Context(), cloudtrust.PublishKind)
 	if err != nil {
 		s.fail(w, r, "read active cloud-trust failed", err)
 		return
 	}
-	if !ok {
+	if row == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"published": false})
 		return
 	}
-	cfg, perr := cloudtrust.Parse(ch.Payload)
+	cfg, perr := cloudtrust.Parse(row.Payload)
 	if perr != nil {
 		s.fail(w, r, "active cloud-trust is unparseable", perr)
 		return
@@ -926,69 +1091,25 @@ func (s *Server) handleCloudTrustActive(w http.ResponseWriter, r *http.Request) 
 		dg = []string{} // contract: always a JSON array
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"published": true, "change_id": ch.ID, "hash": hex.EncodeToString(ch.PayloadHash),
+		"published": true, "version": row.Version, "hash": hex.EncodeToString(payloadHash(row.Payload)),
 		"default_groups": dg, "aws": cfg.AWS,
 	})
 }
 
-// POST /admin/v1/cloudtrust/propose — validate, then open a dual-control change.
-// Changing who may attest into the mesh is authority-granting, so it requires the
-// propose permission AND fresh MFA, and is approved through the generic /approvals flow.
-func (s *Server) handleCloudTrustPropose(w http.ResponseWriter, r *http.Request) {
-	id := identityFrom(r.Context())
-	if !s.requirePerm(w, id, PermCloudTrustPropose) {
-		return
-	}
-	if !s.requireStepUp(w, id) {
-		return
-	}
-	var body struct {
-		DefaultGroups []string                `json:"default_groups"`
-		AWS           []cloudtrust.AWSAccount `json:"aws"`
-		Description   string                  `json:"description"`
-	}
-	if !readJSON(w, r, &body) {
-		return
-	}
-	cfg := cloudtrust.Config{DefaultGroups: body.DefaultGroups, AWS: body.AWS}
-	if err := cloudtrust.Validate(cfg); err != nil {
-		writeProblem(w, http.StatusBadRequest, "invalid cloud-trust config", err.Error())
-		return
-	}
-	payload, err := json.Marshal(cfg) // store the canonical, validated form
-	if err != nil {
-		s.fail(w, r, "marshal cloud-trust failed", err)
-		return
-	}
-	target := body.Description
-	if target == "" {
-		target = fmt.Sprintf("cloud-trust config (%d AWS accounts)", len(cfg.AWS))
-	}
-	ch, err := s.dc.Propose(r.Context(), cloudtrust.PublishKind, target, payload, id.Principal)
-	if err != nil {
-		s.fail(w, r, "propose failed", err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, changeView(ch, true))
-}
-
-// GET /admin/v1/usertrust/active — the published SSO user-trust config (ADR 0004,
-// latest committed usertrust.publish). {published:false} when none has been published.
-// Peer to GET /cloudtrust/active: the active user-trust config is the latest committed
-// usertrust.publish dual-control change, read the same way. Once published, this — and
-// the enrollment consumer's live -usertrust-db getter — surface the config, so SSO can
-// reach issuance (closing the Phase-1 B2 publish-path gap).
+// GET /admin/v1/usertrust/active — the active SSO user-trust config (ADR 0004; ADR
+// 0011 Phase 1: read from the config store, the seam SSO issuance reads).
+// {published:false} when none is set.
 func (s *Server) handleUserTrustActive(w http.ResponseWriter, r *http.Request) {
-	ch, ok, err := s.dc.LatestCommitted(r.Context(), usertrust.PublishKind)
+	row, err := s.configStore.Get(r.Context(), usertrust.PublishKind)
 	if err != nil {
 		s.fail(w, r, "read active user-trust failed", err)
 		return
 	}
-	if !ok {
+	if row == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"published": false})
 		return
 	}
-	cfg, perr := usertrust.Parse(ch.Payload)
+	cfg, perr := usertrust.Parse(row.Payload)
 	if perr != nil {
 		s.fail(w, r, "active user-trust is unparseable", perr)
 		return
@@ -1002,53 +1123,9 @@ func (s *Server) handleUserTrustActive(w http.ResponseWriter, r *http.Request) {
 		entries = []usertrust.IDPEntry{} // contract: always a JSON array
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"published": true, "change_id": ch.ID, "hash": hex.EncodeToString(ch.PayloadHash),
+		"published": true, "version": row.Version, "hash": hex.EncodeToString(payloadHash(row.Payload)),
 		"default_groups": dg, "idp_entries": entries,
 	})
-}
-
-// POST /admin/v1/usertrust/propose — validate, then open a dual-control change
-// (ADR 0004). Changing which SSO directory groups may enroll into the mesh is
-// authority-granting, so it requires the propose permission AND fresh MFA, and is
-// approved through the generic /approvals flow. The payload is re-validated by the
-// registered usertrust.publish committer at commit (defense in depth: usertrust.Validate
-// enforces AD-group uniqueness S3 + grants-nothing). Mirrors handleCloudTrustPropose.
-func (s *Server) handleUserTrustPropose(w http.ResponseWriter, r *http.Request) {
-	id := identityFrom(r.Context())
-	if !s.requirePerm(w, id, PermUserTrustPropose) {
-		return
-	}
-	if !s.requireStepUp(w, id) {
-		return
-	}
-	var body struct {
-		DefaultGroups []string             `json:"default_groups"`
-		IDPEntries    []usertrust.IDPEntry `json:"idp_entries"`
-		Description   string               `json:"description"`
-	}
-	if !readJSON(w, r, &body) {
-		return
-	}
-	cfg := usertrust.Config{DefaultGroups: body.DefaultGroups, IDPEntries: body.IDPEntries}
-	if err := usertrust.Validate(cfg); err != nil {
-		writeProblem(w, http.StatusBadRequest, "invalid user-trust config", err.Error())
-		return
-	}
-	payload, err := json.Marshal(cfg) // store the canonical, validated form
-	if err != nil {
-		s.fail(w, r, "marshal user-trust failed", err)
-		return
-	}
-	target := body.Description
-	if target == "" {
-		target = fmt.Sprintf("user-trust config (%d IdP entries)", len(cfg.IDPEntries))
-	}
-	ch, err := s.dc.Propose(r.Context(), usertrust.PublishKind, target, payload, id.Principal)
-	if err != nil {
-		s.fail(w, r, "propose failed", err)
-		return
-	}
-	writeJSON(w, http.StatusCreated, changeView(ch, true))
 }
 
 // CompileResult is the analysis-rail response: validity, invariants, and the
@@ -1226,20 +1303,21 @@ func (s *Server) handlePolicyDiff(w http.ResponseWriter, r *http.Request) {
 	if cerr := policy.CheckInvariants(draft); cerr != nil {
 		warning = cerr.Error()
 	}
-	// Active side = the latest committed publish. Absent => empty policy (everything in
-	// the draft is "added"). A committed policy that fails to parse is a 500, not a 400:
-	// the draft is the caller's input, the active policy is our own committed state.
+	// Active side = the config store (ADR 0011 Phase 1, the single source of truth).
+	// Absent => empty policy (everything in the draft is "added"). A stored policy that
+	// fails to parse is a 500, not a 400: the draft is the caller's input, the active
+	// policy is our own stored state.
 	active := policy.Policy{}
 	activeInfo := map[string]any{"published": false}
-	if ch, ok, lerr := s.dc.LatestCommitted(r.Context(), policy.PublishKind); lerr != nil {
+	if row, lerr := s.configStore.Get(r.Context(), policy.PublishKind); lerr != nil {
 		s.fail(w, r, "read active policy failed", lerr)
 		return
-	} else if ok {
-		if active, err = policy.Parse(string(ch.Payload)); err != nil {
+	} else if row != nil {
+		if active, err = policy.Parse(string(row.Payload)); err != nil {
 			s.fail(w, r, "active policy is unparseable", err)
 			return
 		}
-		activeInfo = map[string]any{"published": true, "change_id": ch.ID, "hash": hex.EncodeToString(ch.PayloadHash)}
+		activeInfo = map[string]any{"published": true, "version": row.Version, "hash": hex.EncodeToString(payloadHash(row.Payload))}
 	}
 
 	diff := policy.FlowDiff(active, draft)
@@ -1338,6 +1416,14 @@ func writeProblem(w http.ResponseWriter, status int, title, detail string) {
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]any{"title": title, "status": status, "detail": detail})
+}
+
+// payloadHash is the content hash surfaced by the /active reads. The config store
+// (Phase 1) does not persist a hash column (deferred to Phase 2), so it is computed
+// from the stored payload — matching how dualcontrol hashes a change payload.
+func payloadHash(payload []byte) []byte {
+	sum := sha256.Sum256(payload)
+	return sum[:]
 }
 
 func rfc3339(unixNano int64) string {

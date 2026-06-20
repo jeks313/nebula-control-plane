@@ -20,17 +20,13 @@ func hasFlowDelta(arr any, from, to, proto, port string) bool {
 	return false
 }
 
-// setActivePolicy commits a policy via the real dual-control path (propose + a
-// distinct approver), so /policy/diff has a real active baseline.
+// setActivePolicy sets a (non-privileged) policy via the ADR-0011 Phase-1 declarative
+// PUT, so /policy/diff has a real active baseline.
 func setActivePolicy(t *testing.T, ts *httptest.Server, dsl string) {
 	t.Helper()
-	code, ch := req(t, ts, "POST", "/admin/v1/policy/propose", "alice", map[string]any{"policy": dsl})
-	if code != http.StatusCreated {
-		t.Fatalf("propose status = %d (%v)", code, ch)
-	}
-	id := int64(ch["id"].(float64))
-	if code, out := req(t, ts, "POST", fmt.Sprintf("/admin/v1/approvals/%d/approve", id), "bob", nil); code != http.StatusOK || out["state"] != "committed" {
-		t.Fatalf("approve status=%d state=%v", code, out["state"])
+	code, out := req(t, ts, "PUT", "/admin/v1/config/policy", "alice", dsl)
+	if code != http.StatusOK {
+		t.Fatalf("PUT policy status = %d (%v)", code, out)
 	}
 }
 

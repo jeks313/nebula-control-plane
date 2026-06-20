@@ -2,7 +2,7 @@ import { useState } from 'react'
 import {
   useActivePolicy,
   useCompilePolicy,
-  useProposePolicy,
+  usePutPolicy,
   useReachability,
   usePolicyMatrix,
   useRunPolicyTests,
@@ -13,21 +13,21 @@ import {
   type PolicyDiff,
 } from '../api/hooks'
 import { usePermissions } from '../api/perms'
-import { isApiError, isCentrallyHandled } from '../api/errors'
+import { isApiError, isCentrallyHandled, isForbidden } from '../api/errors'
 import { useToast } from '../components/Toast'
 import { Card, Page, StateBlock, ErrorState, Button, Chip, cx } from '../components/ui'
 
 export function Policy() {
   const { can } = usePermissions()
-  const mayPropose = can('policy:propose')
-  // The draft DSL is shared by the editor (compile/propose) and the A1 analysis rail.
+  const mayManage = can('policy:manage')
+  // The draft DSL is shared by the editor (compile/save) and the A1 analysis rail.
   const [draft, setDraft] = useState('allow group:laptops -> group:servers tcp 22\n')
 
   return (
-    <Page title="Policy" subtitle="The published firewall policy, with draft preview, analysis + dual-control publish">
+    <Page title="Policy" subtitle="The active firewall policy, with draft preview + analysis. Save applies directly.">
       <div className="flex flex-col gap-5">
         <ActivePolicyCard />
-        <DraftEditor draft={draft} setDraft={setDraft} mayPropose={mayPropose} />
+        <DraftEditor draft={draft} setDraft={setDraft} mayManage={mayManage} />
         <AnalysisRail draft={draft} />
       </div>
     </Page>
@@ -43,7 +43,7 @@ function ActivePolicyCard() {
         <span className="text-[12px] font-medium text-ink">Active policy</span>
         {p?.published && (
           <span className="text-[11px] text-ink-faint">
-            change <span className="nums">#{p.change_id}</span> · {(p.hash ?? '').slice(0, 12)}…
+            v<span className="nums">{p.version}</span> · {(p.hash ?? '').slice(0, 12)}…
           </span>
         )}
       </div>
@@ -52,7 +52,7 @@ function ActivePolicyCard() {
         {q.isError && <ErrorState error={q.error} fallback="Couldn't load the active policy." />}
         {p &&
           (!p.published ? (
-            <StateBlock kind="empty" message="No policy published yet — default-deny. Draft one below and propose it." />
+            <StateBlock kind="empty" message="No policy published yet — default-deny. Draft one below and save it." />
           ) : (p.rules ?? []).length === 0 ? (
             <div className="text-[13px] text-ink-dim">Published, but it defines no explicit rules (baseline only).</div>
           ) : (
@@ -89,12 +89,14 @@ function RuleTable({ rules }: { rules: { from: string; to: string; proto: string
 
 const FIELD = 'w-full rounded-[6px] border border-edge bg-mesh-2 px-2 py-1.5 text-[13px] text-ink placeholder:text-ink-faint'
 
-function DraftEditor({ draft, setDraft, mayPropose }: { draft: string; setDraft: (s: string) => void; mayPropose: boolean }) {
+function DraftEditor({ draft, setDraft, mayManage }: { draft: string; setDraft: (s: string) => void; mayManage: boolean }) {
   const toast = useToast()
   const compile = useCompilePolicy()
-  const propose = useProposePolicy()
+  const put = usePutPolicy()
   const [groups, setGroups] = useState('servers')
-  const [description, setDescription] = useState('')
+  // The exact server validation message for a refused save, rendered inline (the 400
+  // branch). Cleared on a successful save or a fresh attempt.
+  const [saveError, setSaveError] = useState<string | null>(null)
   const result = compile.data
 
   function onCompile() {
@@ -104,21 +106,37 @@ function DraftEditor({ draft, setDraft, mayPropose }: { draft: string; setDraft:
     )
   }
 
-  function onPropose() {
+  // Save applies the policy directly via PUT /config/policy (it's now CRUD, not a
+  // proposal). A valid policy is never privileged, so this lands as 200 → applied; the
+  // 202 branch is kept for the uniform PUT contract. A 400 carries the exact validator
+  // message (surfaced inline); a 403 is the missing policy:manage permission.
+  function onSave() {
+    setSaveError(null)
     if (!draft.trim()) {
-      toast.notify('Draft a policy first.', 'error')
+      setSaveError('Draft a policy first.')
       return
     }
-    propose.mutate(
-      { policy: draft, description: description.trim() },
-      {
-        onSuccess: (c) => toast.notify(`Opened change #${c.id} — review it in Approvals.`, 'success'),
-        onError: (err) => {
-          if (isCentrallyHandled(err)) return // step-up re-auth handled centrally
-          toast.notify(isApiError(err) ? err.detail || err.title : 'Propose failed.', 'error')
-        },
+    put.mutate(draft, {
+      onSuccess: (r) => {
+        if (r.applied) {
+          toast.notify(`Policy applied (v${r.row.version}).`, 'success')
+        } else {
+          toast.notify(
+            `This change grants privileged access and needs a second approver — submitted as change #${r.change.id}; approve it from Approvals.`,
+            'info',
+          )
+        }
       },
-    )
+      onError: (err) => {
+        if (isCentrallyHandled(err)) return // 401 / step-up re-auth handled centrally
+        if (isForbidden(err)) {
+          setSaveError('You lack the policy:manage permission.')
+          return
+        }
+        // 400 (and any other) — surface the exact server message inline.
+        setSaveError(isApiError(err) ? err.detail || err.title : 'Save failed.')
+      },
+    })
   }
 
   return (
@@ -149,15 +167,21 @@ function DraftEditor({ draft, setDraft, mayPropose }: { draft: string; setDraft:
 
         {result && <CompileView result={result} />}
 
-        {mayPropose && (
-          <div className="mt-1 flex items-end gap-2 border-t border-edge pt-3">
-            <label className="flex-1">
-              <span className="mb-1 block text-[11px] uppercase tracking-wide text-ink-faint">Description (optional)</span>
-              <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="why this change" className={FIELD} />
-            </label>
-            <Button variant="primary" onClick={onPropose} disabled={propose.isPending}>
-              {propose.isPending ? 'Proposing…' : 'Propose for approval'}
-            </Button>
+        {mayManage && (
+          <div className="mt-1 flex flex-col gap-2 border-t border-edge pt-3">
+            {saveError && (
+              <div className="rounded-[6px] border border-danger/40 bg-danger/10 px-3 py-2 text-[12px] text-danger">
+                {saveError}
+              </div>
+            )}
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] text-ink-faint">
+                Save applies the policy directly. (A change granting privileged access would route to a second approver.)
+              </span>
+              <Button variant="primary" onClick={onSave} disabled={put.isPending}>
+                {put.isPending ? 'Saving…' : 'Save / Apply config'}
+              </Button>
+            </div>
           </div>
         )}
       </div>

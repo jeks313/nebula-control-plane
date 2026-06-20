@@ -9,20 +9,34 @@ export const PERMISSIONS = [
   'rollout:control',
   'joinkey:manage',
   'enroll:decide',
-  'policy:propose',
   'approval:decide',
-  'cloudtrust:propose',
-  'usertrust:propose',
   'ipam:manage',
+  // ADR 0011 Phase 1: the declarative config-manage perms gating PUT /config/{kind}.
+  // They REPLACE the old policy/cloudtrust/usertrust :propose perms (the in-app
+  // propose/approve flow is gone). The operator now holds these (single-operator CRUD);
+  // a PRIVILEGED change still routes to a distinct second approver (approval:decide).
+  'policy:manage',
+  'cloudtrust:manage',
+  'usertrust:manage',
 ] as const
 
 export type Permission = (typeof PERMISSIONS)[number]
 
-// admin is a superuser; operator carries the ops perms; viewer is read-only;
-// break-glass carries no standalone permission (it's only a second sign-off).
+// admin is a superuser; operator carries the ops perms AND (ADR 0011 Phase 1) writes
+// declarative config directly via the PUT; viewer is read-only; break-glass carries no
+// standalone permission (it's only a second sign-off).
 const ROLE_PERMS: Record<string, readonly Permission[] | '*'> = {
   admin: '*',
-  operator: ['lighthouse:manage', 'rollout:control', 'joinkey:manage', 'enroll:decide', 'ipam:manage'],
+  operator: [
+    'lighthouse:manage',
+    'rollout:control',
+    'joinkey:manage',
+    'enroll:decide',
+    'ipam:manage',
+    'policy:manage',
+    'cloudtrust:manage',
+    'usertrust:manage',
+  ],
   viewer: [],
   'break-glass': [],
 }

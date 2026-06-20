@@ -1,6 +1,7 @@
 import { useQuery, useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import type { components } from './schema'
 import { api, unwrap } from './client'
+import { ApiError, parseProblem } from './errors'
 
 export type FleetHealth = components['schemas']['FleetHealth']
 export type Identity = components['schemas']['Identity']
@@ -11,8 +12,6 @@ export type JoinKey = components['schemas']['JoinKey']
 export type JoinKeyCreate = components['schemas']['JoinKeyCreate']
 export type JoinKeyCreated = components['schemas']['JoinKeyCreated']
 export type JoinKeyUpdate = components['schemas']['JoinKeyUpdate']
-export type CloudTrustProposeRequest = components['schemas']['CloudTrustProposeRequest']
-export type UserTrustProposeRequest = components['schemas']['UserTrustProposeRequest']
 export type IDPEntry = components['schemas']['IDPEntry']
 export type Lighthouse = components['schemas']['Lighthouse']
 export type RolloutStatus = components['schemas']['RolloutStatus']
@@ -249,34 +248,83 @@ export function useDenyChange() {
   })
 }
 
-export function useProposePolicy() {
+// --- ADR 0011 Phase 1: declarative config (PUT /admin/v1/config/{kind}) ---
+// The propose/approve flow for policy/cloudtrust/usertrust is replaced by a single
+// declarative PUT. A non-privileged write is applied directly (200 + the stored row);
+// a PRIVILEGED change (grants a reserved group, or any auto_issue=true) is instead
+// routed to a distinct-second-approver dual-control commit (202 + the pending Change),
+// which then shows up in the existing /approvals inbox. A 400 carries the exact
+// validator message (e.g. usertrust auto_issue+reserved, a bad policy DSL); a 403 is
+// the missing {kind}:manage permission.
+
+export type ConfigRow = components['schemas']['ConfigRow']
+export type ConfigKind = 'policy' | 'cloudtrust' | 'usertrust'
+
+// PutConfigResult discriminates the two success outcomes the editors must show very
+// differently: an immediate apply (200) vs a privileged change routed to a second
+// approver (202). The HTTP status is the ONLY signal — both bodies are 2xx JSON — so
+// we read it off the raw Response rather than going through unwrap (which drops it).
+export type PutConfigResult =
+  | { applied: true; routed: false; row: ConfigRow }
+  | { applied: false; routed: true; change: Change }
+
+// putConfig calls PUT /admin/v1/config/{kind} and maps the status. It throws the same
+// typed ApiError as unwrap on a non-2xx (so the central MutationCache 401/step-up
+// handling in main.tsx still fires, and a 400/403 surfaces as ApiError.detail/title).
+async function putConfig(kind: ConfigKind, body: unknown): Promise<PutConfigResult> {
+  // ConfigBody is `unknown` in the contract (shape varies by kind); openapi-fetch's
+  // typed PUT can't model a per-kind body, so cast the body at this single seam.
+  const { data, response } = await api.PUT('/admin/v1/config/{kind}', {
+    params: { path: { kind } },
+    body: body as never,
+  })
+  if (!response.ok) throw await parseProblem(response)
+  if (data === undefined) throw new ApiError(response.status, 'empty response')
+  if (response.status === 202) return { applied: false, routed: true, change: data as Change }
+  return { applied: true, routed: false, row: data as ConfigRow }
+}
+
+// usePutPolicy — set the firewall policy. The body is the DSL carried as a JSON string
+// (the ConfigBody contract). A valid policy is never privileged, so this always applies
+// directly (200); the 202 branch is kept for the uniform shape. onSettled refetches the
+// active policy + the approvals inbox (a 202 lands a pending change there).
+export function usePutPolicy() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (body: { policy: string; description?: string }) =>
-      unwrap(api.POST('/admin/v1/policy/propose', { body })),
-    onSettled: () => qc.invalidateQueries({ queryKey: ['approvals'] }),
+    mutationFn: (dsl: string) => putConfig('policy', dsl),
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: ['policy-active'] })
+      void qc.invalidateQueries({ queryKey: ['approvals'] })
+    },
   })
 }
 
-// Cloud-trust is republished as a whole new version (no per-account patch): the form
-// proposes a full {default_groups, aws} config through dual-control, reviewed in
-// /approvals. The active config changes only on COMMIT (useApproveChange invalidates it).
-export function useProposeCloudTrust() {
+// usePutCloudTrust — set the WHOLE cloud-trust config ({default_groups, aws}). Granting
+// any auto_issue scope is privileged and routes to a second approver (202); otherwise it
+// applies directly (200). onSettled refetches the active config + the approvals inbox.
+export function usePutCloudTrust() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (body: CloudTrustProposeRequest) => unwrap(api.POST('/admin/v1/cloudtrust/propose', { body })),
-    onSettled: () => qc.invalidateQueries({ queryKey: ['approvals'] }),
+    mutationFn: (body: { default_groups: string[]; aws: CloudTrustAccount[] }) => putConfig('cloudtrust', body),
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: ['cloudtrust'] })
+      void qc.invalidateQueries({ queryKey: ['approvals'] })
+    },
   })
 }
 
-// User-trust mirrors cloud-trust: the editor proposes a full {default_groups, idp_entries}
-// config (ordered — first-match-wins, S4) through dual-control, reviewed in /approvals.
-// The active config changes only on COMMIT (useApproveChange invalidates ['usertrust']).
-export function useProposeUserTrust() {
+// usePutUserTrust — set the WHOLE user-trust config ({default_groups, idp_entries},
+// ordered first-match-wins). Granting auto_issue is privileged (202); auto_issue on a
+// reserved group is refused outright (400, the exact server message). onSettled refetches
+// the active config + the approvals inbox.
+export function usePutUserTrust() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (body: UserTrustProposeRequest) => unwrap(api.POST('/admin/v1/usertrust/propose', { body })),
-    onSettled: () => qc.invalidateQueries({ queryKey: ['approvals'] }),
+    mutationFn: (body: { default_groups: string[]; idp_entries: IDPEntry[] }) => putConfig('usertrust', body),
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: ['usertrust'] })
+      void qc.invalidateQueries({ queryKey: ['approvals'] })
+    },
   })
 }
 
