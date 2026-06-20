@@ -1,16 +1,19 @@
 ---
 title: "ADR 0011 — Phased Declarative / GitOps Mesh Configuration (console CRUD → config-as-code → optional Terraform provider)"
 created: 2026-06-19
-status: proposed
+status: accepted (phase 1 shipped)
 tags: [nebula, adr, terraform, gitops, dual-control, policy, cloudtrust, usertrust, ipam]
 ---
 
 # ADR 0011 — Phased Declarative / GitOps Mesh Configuration (console CRUD → config-as-code → optional Terraform provider)
 
-**Status (2026-06-19):** PROPOSED — design only, nothing built. Replaces the in-app dual-control
-(propose/approve) UI for trust & policy with a **phased path**: (P1) single-operator RBAC + MFA CRUD
-over a declarative config API, deleting the propose/approve UI; (P2) config-as-code via
-export/import + optional GitOps-as-control; (future, not committed) a Terraform provider. Amends
+**Status (2026-06-20):** ACCEPTED, phased. **Phase 1 — SHIPPED & DEPLOYED** (commit `5106646`,
+merged to main; deployed to the poc 2026-06-20; adversarial review verdict SAFE): single-operator
+RBAC + MFA CRUD over a declarative config store/API (`internal/config`, migration `000027`,
+`PUT/GET /admin/v1/config/{kind}`), the propose/approve UI removed, and the **privileged subset** (any
+reserved-group or `auto_issue=true` grant) kept on a two-person `dualcontrol` commit. **Phase 2**
+(config-as-code via export/import + optional GitOps-as-control) is PLANNED; the **Terraform provider**
+(future) is not committed. Amends
 [[ADR 0004 - SSO-Driven User Enrollment]] (usertrust publish) and the dual-control decisions in the
 cloudtrust/policy paths; relates to [[ADR 0009 - Control-Plane Trust-Zone Separation]] and
 [[ADR 0010 - IPAM]].
@@ -96,7 +99,13 @@ Every phase shares **one declarative set/get config primitive** (`PUT/GET /admin
 That is deliberate: Phase 1 builds it, Phase 2 layers config-as-code on it, and the future provider
 wraps the *same* API. Phase 1 is the foundation, not a throwaway.
 
-### Phase 1 (COMMITTED near-term step) — Console CRUD + a declarative config API; delete the propose/approve UI
+### Phase 1 (✅ SHIPPED 2026-06-20, commit `5106646`) — Console CRUD + a declarative config API; delete the propose/approve UI
+
+> **Shipped 2026-06-20** (`5106646`): built, adversarially reviewed (verdict SAFE — 0 blockers on
+> validate-on-every-write / privileged-two-person / reader-writer-convergence), merged, and deployed to
+> the poc. Adds `internal/config` store + migration `000027`; boot-seeds the live config from the legacy
+> dual-control ledger. On the poc only cloudtrust is store-backed-enforced (collect `-cloudtrust-db`);
+> the non-privileged single-operator regression noted below is moot there (single operator).
 
 Delete the in-app propose/approve UI + handlers for policy/cloudtrust/usertrust (the complex,
 under-tested surface — the actual trigger). Replace them with **single-operator RBAC + MFA CRUD** over
