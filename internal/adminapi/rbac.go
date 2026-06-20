@@ -15,22 +15,30 @@ const mfaClockSkew = 2 * time.Minute
 // set can grow without touching handlers. Roles arrive on the authenticated Identity
 // (mapped from IdP groups by internal/adminauth); the client gets no say — every
 // check is here, server-side (P-UI-1). admin is a superuser; operator does day-2
-// fleet ops but never policy / CA / dual-control; viewer is read-only (the default);
+// fleet ops AND (ADR 0011 Phase 1) writes declarative config via the PUT, but never
+// signs off privileged dual-control changes (approval:decide stays admin-only);
+// viewer is read-only (the default);
 // break-glass is a dual-control capability (a valid second sign-off when the IdP/mesh
 // is down), handled in the approval flow, and grants no standalone permission.
 type Permission string
 
 // Permission constants — the capabilities the admin API authorizes against.
 const (
-	PermLighthouseManage  Permission = "lighthouse:manage"  // add/replace/remove lighthouses
-	PermRolloutControl    Permission = "rollout:control"    // start/step/abort rollouts
-	PermJoinKeyManage     Permission = "joinkey:manage"     // create/revoke join keys
-	PermEnrollDecide      Permission = "enroll:decide"      // approve/deny enrollments
-	PermPolicyPropose     Permission = "policy:propose"     // open a policy-publish change
-	PermApprovalDecide    Permission = "approval:decide"    // approve/deny a dual-control change
-	PermCloudTrustPropose Permission = "cloudtrust:propose" // open a cloud-trust-publish change
-	PermUserTrustPropose  Permission = "usertrust:propose"  // open a user-trust-publish change (SSO, ADR 0004)
-	PermIPAMManage        Permission = "ipam:manage"        // carve/edit/remove netblocks (ADR 0010)
+	PermLighthouseManage Permission = "lighthouse:manage" // add/replace/remove lighthouses
+	PermRolloutControl   Permission = "rollout:control"   // start/step/abort rollouts
+	PermJoinKeyManage    Permission = "joinkey:manage"    // create/revoke join keys
+	PermEnrollDecide     Permission = "enroll:decide"     // approve/deny enrollments
+	PermApprovalDecide   Permission = "approval:decide"   // approve/deny a dual-control change
+	PermIPAMManage       Permission = "ipam:manage"       // carve/edit/remove netblocks (ADR 0010)
+	// ADR 0011 Phase 1 config-manage permissions: authorize the declarative
+	// PUT /admin/v1/config/{kind}. They REPLACE the old policy/cloudtrust/usertrust
+	// :propose permissions (the in-app propose/approve flow these gated is deleted in
+	// Phase 1). A change introducing a PRIVILEGED grant still routes through a
+	// distinct-second-approver dual-control commit (approval:decide), so the manage
+	// perm authorizes the WRITE but not the privileged sign-off.
+	PermPolicyManage     Permission = "policy:manage"     // set the firewall policy via the declarative API
+	PermCloudTrustManage Permission = "cloudtrust:manage" // set the cloud-trust config via the declarative API
+	PermUserTrustManage  Permission = "usertrust:manage"  // set the user-trust config via the declarative API (SSO, ADR 0004)
 )
 
 // RoleAdmin, RoleOperator, RoleViewer, RoleBreakGlass are the named roles. They
@@ -53,6 +61,12 @@ var rolePerms = map[string]map[Permission]bool{
 		PermJoinKeyManage:    true,
 		PermEnrollDecide:     true,
 		PermIPAMManage:       true,
+		// ADR 0011 Phase 1: the operator writes declarative config directly via the
+		// PUT (single-operator CRUD). A privileged change still requires a distinct
+		// second sign-off (approval:decide, which the operator does NOT hold).
+		PermPolicyManage:     true,
+		PermCloudTrustManage: true,
+		PermUserTrustManage:  true,
 	},
 }
 

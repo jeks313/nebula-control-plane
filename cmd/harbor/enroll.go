@@ -300,10 +300,18 @@ func (cf *coreFlags) buildConsumer(s *store.Store, results enrollment.ResultSink
 }
 
 func (cf *coreFlags) build() (*enrollment.Consumer, *queue.Durable, *store.Store) {
+	return cf.buildWithStore(openStore(*cf.driver, *cf.dsn))
+}
+
+// buildWithStore is build() over a CALLER-OPENED store, so a caller that must run
+// a step against the store BEFORE the consumer is assembled (e.g. admin-api's
+// boot-seed, which the consumer's build-time policy/cloud-trust snapshot depends
+// on — fail-closed bug, ADR 0011 Phase 1 C8) can do so on the same handle. The
+// consumer then reads the freshly-seeded config rather than an empty store.
+func (cf *coreFlags) buildWithStore(s *store.Store) (*enrollment.Consumer, *queue.Durable, *store.Store) {
 	if *cf.queueDSN == "" || *cf.queueKey == "" {
 		fatalf("enroll: -queue-dsn and -queue-key are required")
 	}
-	s := openStore(*cf.driver, *cf.dsn)
 	q, err := queue.OpenDurable(queue.DurableConfig{DSN: *cf.queueDSN, Key: readB64Key(*cf.queueKey)})
 	if err != nil {
 		fatalf("enroll: queue: %v", err)

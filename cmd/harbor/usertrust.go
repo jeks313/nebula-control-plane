@@ -85,9 +85,7 @@ func userTrustPublish(args []string) {
 // free of flag-parsing / os.Exit.) Mirrors publishCloudTrust.
 func publishUserTrust(s *store.Store, cfg usertrust.Config, opA, opB, target string) (dualcontrol.Change, error) {
 	ctx := context.Background()
-	audit := func(c context.Context, a, ac, t, d string) error { _, e := s.AppendAudit(c, a, ac, t, d); return e }
-	dc := dualcontrol.New(dualcontrol.Config{DB: s.DB, Audit: audit})
-	usertrust.RegisterCommitter(dc)
+	dc := newPolicyController(s) // committer re-validates AND writes the config store (ADR 0011)
 	payload, _ := json.Marshal(cfg)
 	ch, err := dc.Propose(ctx, usertrust.PublishKind, target, payload, opA)
 	if err != nil {

@@ -3,16 +3,20 @@ import { rolesHavePerm } from './perms'
 
 describe('rolesHavePerm (mirror of internal/adminapi/rbac.go)', () => {
   it('admin is a superuser', () => {
-    expect(rolesHavePerm(['admin'], 'policy:propose')).toBe(true)
+    expect(rolesHavePerm(['admin'], 'policy:manage')).toBe(true)
     expect(rolesHavePerm(['admin'], 'joinkey:manage')).toBe(true)
     expect(rolesHavePerm(['admin'], 'approval:decide')).toBe(true)
   })
 
-  it('operator has the ops perms but not policy/approval authority', () => {
+  it('operator has the ops perms + declarative config-manage, but not approval authority', () => {
     expect(rolesHavePerm(['operator'], 'joinkey:manage')).toBe(true)
     expect(rolesHavePerm(['operator'], 'enroll:decide')).toBe(true)
     expect(rolesHavePerm(['operator'], 'rollout:control')).toBe(true)
-    expect(rolesHavePerm(['operator'], 'policy:propose')).toBe(false)
+    // ADR 0011 Phase 1: the operator writes declarative config directly via the PUT.
+    expect(rolesHavePerm(['operator'], 'policy:manage')).toBe(true)
+    expect(rolesHavePerm(['operator'], 'cloudtrust:manage')).toBe(true)
+    expect(rolesHavePerm(['operator'], 'usertrust:manage')).toBe(true)
+    // A privileged change still needs a distinct second approver (approval:decide).
     expect(rolesHavePerm(['operator'], 'approval:decide')).toBe(false)
   })
 

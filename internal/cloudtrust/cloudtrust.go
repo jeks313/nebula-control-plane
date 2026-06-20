@@ -12,29 +12,17 @@ package cloudtrust
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
 
 	"github.com/jeks313/nebula-control-plane/internal/awsattest"
-	"github.com/jeks313/nebula-control-plane/internal/dualcontrol"
+	"github.com/jeks313/nebula-control-plane/internal/policy"
 )
 
 // PublishKind is the dual-control change kind for a cloud-trust config publish.
 const PublishKind = "cloudtrust.publish"
-
-// RegisterCommitter installs the cloudtrust.publish commit-time validator on dc —
-// the single canonical definition shared by every wiring site (harbor CLI, admin
-// API, demo seeder), so the gate can't drift by call site. Re-parsing at commit is
-// defense in depth.
-func RegisterCommitter(dc *dualcontrol.Controller) {
-	dc.Register(PublishKind, func(_ context.Context, ch dualcontrol.Change) error {
-		_, err := Parse(ch.Payload)
-		return err
-	})
-}
 
 // ProviderAWS identifies AWS as the attestation provider — stored as attestation
 // evidence + a discriminator for future provider sections.
@@ -103,6 +91,35 @@ func Validate(c Config) error {
 		seen[a.Account] = true
 	}
 	return nil
+}
+
+// ContainsPrivileged reports whether the config contains ANY privileged grant — the
+// cloudtrust half of the ADR-0011 P1.2 PRIVILEGED predicate (resulting-config rule,
+// not a delta, so it cannot be gamed by multi-step changes). Privileged means EITHER:
+//   - a reserved-group grant: any AWS account's Groups ∪ the fleet-wide DefaultGroups
+//     contains a reserved/privileged group (control-plane/lighthouse), reusing
+//     policy.IsReservedGroup so the reserved set can't drift across packages; OR
+//   - any auto_issue=true account (issuing immediately, unattended, is privileged).
+//
+// Unlike usertrust, cloudtrust has NO Validate gate refusing auto_issue+reserved
+// (there is no cloudtrust S8): such a config is VALID and simply routes two-person.
+func ContainsPrivileged(c Config) bool {
+	for _, g := range c.DefaultGroups {
+		if policy.IsReservedGroup(g) {
+			return true
+		}
+	}
+	for _, a := range c.AWS {
+		if a.AutoIssue {
+			return true
+		}
+		for _, g := range a.Groups {
+			if policy.IsReservedGroup(g) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // MatchAWS resolves a STS-verified AWS identity against the trusted accounts, reusing

@@ -10,7 +10,6 @@ import (
 
 	"github.com/jeks313/nebula-control-plane/internal/cloudtrust"
 	"github.com/jeks313/nebula-control-plane/internal/coreapi"
-	"github.com/jeks313/nebula-control-plane/internal/dualcontrol"
 	"github.com/jeks313/nebula-control-plane/internal/enrollment"
 	"github.com/jeks313/nebula-control-plane/internal/genesis"
 	"github.com/jeks313/nebula-control-plane/internal/ipam"
@@ -202,8 +201,10 @@ func cmdSeedDemo(args []string) {
 		},
 	}
 	payload, _ := json.Marshal(ctCfg)
-	dc := dualcontrol.New(dualcontrol.Config{DB: s.DB, Audit: audit})
-	cloudtrust.RegisterCommitter(dc)
+	// ADR 0011 Phase 1: the committers write the config store on commit (the single
+	// source of truth the /active endpoints + enforcement readers now read), so a
+	// committed demo config is immediately ACTIVE; a pending change stays in the inbox.
+	dc := newPolicyController(s)
 	ch, err := dc.Propose(ctx, cloudtrust.PublishKind, "AWS production accounts", payload, "chris@hyde.ca")
 	if err != nil {
 		fatalf("seed cloud-trust propose: %v", err)
@@ -216,7 +217,6 @@ func cmdSeedDemo(args []string) {
 	// the Policy page and the Approvals inbox demo the dual-control publish loop. The
 	// pending change is proposed by chris, leaving a distinct admin (e.g. the mock-IdP
 	// Ada Admin) able to approve it in the demo.
-	policy.RegisterCommitter(dc)
 	active := "allow group:laptops -> group:servers tcp 22\nallow any -> group:web tcp 443\n"
 	pch, err := dc.Propose(ctx, policy.PublishKind, "baseline access", []byte(active), "chris@hyde.ca")
 	if err != nil {
@@ -335,7 +335,6 @@ func cmdSeedDemo(args []string) {
 	// becomes the ACTIVE config the User Trust page renders). Ordered IDPEntries with
 	// first-match precedence; AD-group uniqueness holds (distinct directory_group per
 	// realm). auto_issue=false on both so the SSO enroll path queues for approval (S8).
-	usertrust.RegisterCommitter(dc)
 	utCfg := usertrust.Config{
 		DefaultGroups: []string{"users"},
 		IDPEntries: []usertrust.IDPEntry{

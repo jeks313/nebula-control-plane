@@ -42,7 +42,7 @@ describe('classifyProblem', () => {
 
 describe('error classifiers', () => {
   const stepUp = classifyProblem(403, { title: 'step-up required', code: 'step_up_required' })
-  const rbac = classifyProblem(403, { title: 'forbidden', detail: 'requires permission: policy:propose' })
+  const rbac = classifyProblem(403, { title: 'forbidden', detail: 'requires permission: policy:manage' })
   const unauth = classifyProblem(401, { title: 'unauthenticated' })
   const csrf = classifyProblem(403, { title: 'csrf' })
 

@@ -23,9 +23,9 @@ func (p mfaProvider) Identify(r *http.Request) (adminapi.Identity, bool) {
 	return adminapi.Identity{Principal: actor, Roles: []string{adminapi.RoleAdmin}, MFAAt: p.mfa[actor]}, true
 }
 
-// TestStepUpMFA: with MFAFreshness enabled, the authority-GRANTING dual-control
-// actions (policy propose, approve) require recent MFA, while deny (the safe veto)
-// does not.
+// TestStepUpMFA: with MFAFreshness enabled, the authority-GRANTING actions (the
+// privileged config PUT — which routes through dual-control — and approve) require
+// recent MFA, while deny (the safe veto) does not.
 func TestStepUpMFA(t *testing.T) {
 	s, err := store.Open(store.Config{Driver: "sqlite", DSN: store.DefaultSQLiteDSN(t.TempDir() + "/mfa.db")})
 	if err != nil {
@@ -46,11 +46,14 @@ func TestStepUpMFA(t *testing.T) {
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
-	// Propose is gated: alice (fresh MFA) succeeds.
-	code, ch := req(t, ts, "POST", "/admin/v1/policy/propose", "alice",
-		map[string]any{"policy": "allow web -> db tcp 5432\n"})
-	if code != http.StatusCreated {
-		t.Fatalf("propose (fresh MFA) = %d, want 201 (%v)", code, ch)
+	// The privileged config PUT is gated: alice (fresh MFA) succeeds → 202 (routed
+	// two-person). A cloudtrust auto_issue config is privileged.
+	privileged := map[string]any{
+		"aws": []map[string]any{{"account": "111122223333", "groups": []string{"web"}, "auto_issue": true}},
+	}
+	code, ch := req(t, ts, "PUT", "/admin/v1/config/cloudtrust", "alice", privileged)
+	if code != http.StatusAccepted {
+		t.Fatalf("privileged PUT (fresh MFA) = %d, want 202 (%v)", code, ch)
 	}
 	id := int64(ch["id"].(float64))
 	approve := fmt.Sprintf("/admin/v1/approvals/%d/approve", id)
@@ -87,10 +90,11 @@ func TestStepUpMFA(t *testing.T) {
 		t.Fatalf("approve (fresh MFA) = %d state=%v, want 200/committed", code, out["state"])
 	}
 
-	// Deny is NOT gated: a second change can be vetoed without any MFA (so a bad
-	// change can always be stopped even when MFA is stale).
-	_, ch2 := req(t, ts, "POST", "/admin/v1/policy/propose", "alice",
-		map[string]any{"policy": "allow web -> db tcp 443\n"})
+	// Deny is NOT gated: a second privileged change can be vetoed without any MFA (so a
+	// bad change can always be stopped even when MFA is stale).
+	_, ch2 := req(t, ts, "PUT", "/admin/v1/config/cloudtrust", "alice", map[string]any{
+		"aws": []map[string]any{{"account": "444455556666", "groups": []string{"db"}, "auto_issue": true}},
+	})
 	id2 := int64(ch2["id"].(float64))
 	mfa["carol"] = nil // no MFA at all
 	code, _ = req(t, ts, "POST", fmt.Sprintf("/admin/v1/approvals/%d/deny", id2), "carol",
@@ -100,15 +104,16 @@ func TestStepUpMFA(t *testing.T) {
 	}
 }
 
-// TestStepUpDisabled: with MFAFreshness == 0, step-up is off and approvals work
-// with no MFA at all (preserves dev / no-IdP behavior).
+// TestStepUpDisabled: with MFAFreshness == 0, step-up is off and the privileged config
+// PUT + approvals work with no MFA at all (preserves dev / no-IdP behavior).
 func TestStepUpDisabled(t *testing.T) {
 	ts := plainSrv(t, "admin") // builds adminapi.New with MFAFreshness unset (0)
 	defer ts.Close()
-	code, ch := req(t, ts, "POST", "/admin/v1/policy/propose", "alice",
-		map[string]any{"policy": "allow web -> db tcp 5432\n"})
-	if code != http.StatusCreated {
-		t.Fatalf("propose (step-up off) = %d, want 201", code)
+	code, ch := req(t, ts, "PUT", "/admin/v1/config/cloudtrust", "alice", map[string]any{
+		"aws": []map[string]any{{"account": "111122223333", "groups": []string{"web"}, "auto_issue": true}},
+	})
+	if code != http.StatusAccepted {
+		t.Fatalf("privileged PUT (step-up off) = %d, want 202", code)
 	}
 	id := int64(ch["id"].(float64))
 	if code, out := req(t, ts, "POST", fmt.Sprintf("/admin/v1/approvals/%d/approve", id), "bob", nil); code != http.StatusOK || out["state"] != "committed" {

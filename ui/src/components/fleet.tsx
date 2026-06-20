@@ -57,7 +57,7 @@ export function Masthead() {
   const statusWord =
     h.status === 'healthy' ? 'all healthy' : h.status === 'degraded' ? 'running degraded' : 'in a critical state'
   const audit = h.audit_ok ? 'audit chain verified' : 'audit chain needs attention'
-  const pol = policy.data?.published ? `policy published (#${policy.data.change_id})` : 'no policy published yet'
+  const pol = policy.data?.published ? `policy published (v${policy.data.version})` : 'no policy published yet'
   return (
     <p className="mb-5 text-[15px] text-ink-dim">
       <span className="nums font-semibold text-ink">{total}</span> {total === 1 ? 'host' : 'hosts'} in the mesh — {statusWord},{' '}
