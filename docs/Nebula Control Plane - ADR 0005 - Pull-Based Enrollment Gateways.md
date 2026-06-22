@@ -182,7 +182,7 @@ which is exactly what the pull/off-mesh model grants it.
   INTERNAL NLB (in-VPC enroll + the Harbor-only collect `:9443` + a `/metrics` scrape port for
   Prometheus). The ADR-0005 posture holds: collect is reachable ONLY from Harbor's SG; the task
   egresses only ECR/Secrets/DNS + Loki logs — it initiates nothing into the mesh. The image is
-  **distroless** (ADR 0006), enroll TLS is the gateway's own Let's Encrypt cert via ACME DNS-01
+  **distroless** ([[Nebula Control Plane - ADR 0006 - Distroless Fargate Container Images|ADR 0006]]), enroll TLS is the gateway's own Let's Encrypt cert via ACME DNS-01
   (`poc-gateway.mesh.failsafe.net`), config (nonce key + mTLS material + the optional SSO portal
   fields) is injected from Secrets Manager, and logs ship to Loki via a FireLens sidecar. The
   legacy `deploy/terraform` EC2 gateway node above is retained behind `gateway_runtime = "ec2"`.
