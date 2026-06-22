@@ -212,3 +212,13 @@ output "artifacts_nebula_url" {
   description = "Registry URL template for the linux/amd64 nebula binary (RAW, extracted from the GitHub tarball) — `harbor nebula add -url <this>` (harbor substitutes {version})."
   value       = local.artifacts == 1 ? "https://${var.artifacts_bucket_name}.s3.${var.region}.amazonaws.com/nebula/{version}/nebula-linux-amd64" : ""
 }
+
+output "windows_instance_id" {
+  description = "Instance ID of the optional Windows client (empty unless enable_windows_client). It has NO public IP — reach it via SSM by this id."
+  value       = one(aws_instance.windows[*].id)
+}
+
+output "windows_ssm_ssh" {
+  description = "SSH-over-SSM command for the Windows client (run with valid AWS creds + the session-manager-plugin; add `-i <your-ssh-key>`)."
+  value       = var.enable_windows_client ? "ssh -o ProxyCommand='aws ssm start-session --target %h --document-name AWS-StartSSHSession --parameters portNumber=%p --region ${var.region}' Administrator@${one(aws_instance.windows[*].id)}" : "(set enable_windows_client = true)"
+}
