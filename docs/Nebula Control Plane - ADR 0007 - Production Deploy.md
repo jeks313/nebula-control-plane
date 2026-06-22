@@ -328,9 +328,11 @@ Ordered so each phase de-risks the next; KMS + Aurora are the foundation.
 
 - **ADR 0006 (Distroless images)** — Phase 6; the prod images are distroless.
 - **ADR 0005 (Pull-based gateways)** — the off-mesh gateway + collect mTLS carried forward.
-- **ADR 0004 (SSO-driven user enrollment)** — *reuses* this ADR's IdP (adminauth); it's a
-  feature built on the same SAML/OIDC, not a prod-readiness blocker for the
-  console+machine-enrollment scope.
+- **ADR 0004 (SSO-driven user enrollment)** — reuses this ADR's `adminauth` SAML/OIDC *code*, but
+  the enrollment portal is a **separate** public surface needing its **own** Entra SAML app
+  (distinct ACS + SP entity ID from the console's, per ADR 0009 — `bootstrap-genesis.sh` aborts
+  otherwise); it's a feature on top, not a prod-readiness blocker for the console+machine-enrollment
+  scope.
 - **ADR 0003 (self-update/distribution)** — the KMS/PKI fork here mirrors 0003/0004.
 - **Implementation Plan M9 / M9.5** — already names the HA targets (shared nonce/audit,
   Aurora, SQS); this ADR is their deploy-shaped expression.
