@@ -4,23 +4,36 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/jeks313/nebula-control-plane/internal/nebulaboot"
 )
 
-func TestMaterializeWintunBesideNebula(t *testing.T) {
+// wintunArch mirrors nebulaboot.MaterializeWintun / nebula's tun_windows.go arch remap.
+func wintunArch() string {
+	if runtime.GOARCH == "386" {
+		return "x86"
+	}
+	return runtime.GOARCH
+}
+
+func TestMaterializeWintunIntoDistTree(t *testing.T) {
 	dir := t.TempDir()
-	nebula := filepath.Join(dir, "sub", "nebula.exe") // a missing parent dir too
+	nebula := filepath.Join(dir, "sub", "nebula.exe") // missing parent dirs too
 	dll := bytes.Repeat([]byte("W"), 2048)
 
 	wrote, err := nebulaboot.MaterializeWintun(nebula, dll, nil)
 	if err != nil || !wrote {
 		t.Fatalf("materialize wintun: wrote=%v err=%v", wrote, err)
 	}
-	got, err := os.ReadFile(filepath.Join(dir, "sub", "wintun.dll"))
+	// nebula's checkWinTunExists loads <exedir>/dist/windows/wintun/bin/<arch>/wintun.dll
+	// (slackhq/nebula overlay/tun_windows.go) — the dll MUST land at that exact path, not
+	// flat beside nebula.exe.
+	want := filepath.Join(dir, "sub", "dist", "windows", "wintun", "bin", wintunArch(), "wintun.dll")
+	got, err := os.ReadFile(want)
 	if err != nil || !bytes.Equal(got, dll) {
-		t.Fatalf("wintun.dll must be written beside nebula.exe: err=%v", err)
+		t.Fatalf("wintun.dll must land at %s: err=%v", want, err)
 	}
 }
 
@@ -38,15 +51,19 @@ func TestMaterializeWintunNilIsNoOp(t *testing.T) {
 
 func TestMaterializeWintunNoClobber(t *testing.T) {
 	dir := t.TempDir()
+	dest := filepath.Join(dir, "dist", "windows", "wintun", "bin", wintunArch(), "wintun.dll")
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	existing := []byte("operator's pinned wintun.dll")
-	if err := os.WriteFile(filepath.Join(dir, "wintun.dll"), existing, 0o644); err != nil {
+	if err := os.WriteFile(dest, existing, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	wrote, err := nebulaboot.MaterializeWintun(filepath.Join(dir, "nebula.exe"), bytes.Repeat([]byte("X"), 2048), nil)
 	if err != nil || wrote {
 		t.Fatalf("must not clobber an existing wintun.dll: wrote=%v err=%v", wrote, err)
 	}
-	if got, _ := os.ReadFile(filepath.Join(dir, "wintun.dll")); !bytes.Equal(got, existing) {
+	if got, _ := os.ReadFile(dest); !bytes.Equal(got, existing) {
 		t.Fatal("existing wintun.dll must be left untouched")
 	}
 }

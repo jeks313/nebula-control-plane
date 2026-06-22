@@ -11,10 +11,11 @@ import (
 
 // wintunGz is the gzipped Wintun driver (nebula's Windows TUN device), fetched by
 // `make embed-nebula` into assets/wintun.gz from the same slackhq release zip as the
-// embedded nebula.exe. nebula loads wintun.dll via the standard Windows DLL search
-// order (the loading executable's directory first), so MaterializeEmbedded writes it
-// beside nebula.exe — letting a self-contained pilot.exe bring up the overlay on a
-// fresh host with no pre-installed driver and no network (offline first-boot).
+// embedded nebula.exe. nebula's TUN init LoadDLLs it from an EXPLICIT path under the
+// nebula executable's directory (dist\windows\wintun\bin\<arch>\wintun.dll — see
+// MaterializeWintun), so MaterializeEmbedded writes it into that exact subtree — letting
+// a self-contained pilot.exe bring up the overlay on a fresh host with no pre-installed
+// driver and no network (offline first-boot).
 //
 //go:embed assets/wintun.gz
 var wintunGz []byte
