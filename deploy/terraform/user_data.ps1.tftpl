@@ -42,6 +42,12 @@ try {
   #    %ProgramData%\NebulaControlPlane\pilot).
   New-Item -ItemType Directory -Path "C:\ProgramData\NebulaControlPlane\pilot" -Force | Out-Null
 
+  # NOTE: nebula.exe + wintun.dll are NOT fetched here. The operator drops the EMBEDDED
+  # pilot.exe (built with `make pilot-embedded NEBULA_OS=windows NEBULA_ARCH=amd64`, or the
+  # windows artifact published by release-pilot.sh) and runs `pilot install`; on first
+  # `supervise` the pilot materializes nebula.exe + wintun.dll into C:\Program Files\Nebula\
+  # (nebulaboot, ADR 0003 Phase 2), so the data plane comes up with no driver pre-install.
+
   "ncp-windows-ready $(Get-Date -Format o)" | Out-File "C:\Windows\Temp\ncp-ready.txt" -Encoding ascii
 }
 catch {
