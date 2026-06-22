@@ -3,7 +3,9 @@
 In-repo copies of the Nebula Control Plane planning docs, so the repo is self-contained
 (no vault required for a cold start).
 
-**Status (2026-06-18):** The original planning docs (below) have been joined by an **ADR series (0001–0010)**, three build **decision logs** (IPAM / SSO / reaper), and several **runbooks** as the design landed in code. Most of the original milestone scope is SHIPPED & LIVE on the `poc` stack (which *is* the prod control plane today). See each doc's own `Status (2026-06-18)` / `status:` line for current state.
+**Status (2026-06-18):** The original planning docs (below) have been joined by an **ADR series (0001–0011)**, four build **decision logs** (IPAM / SSO / reaper / revocation guards), and several **runbooks** as the design landed in code. Most of the original milestone scope is SHIPPED & LIVE on the `poc` stack (which *is* the prod control plane today). See each doc's own `Status (2026-06-18)` / `status:` line for current state.
+
+**Backlog:** `Nebula Control Plane - Outstanding TODOs.md` is the single prioritized, deduped backlog (P0/P1/P2) aggregating every open TODO across these docs.
 
 ## Original planning docs
 
@@ -19,7 +21,7 @@ In-repo copies of the Nebula Control Plane planning docs, so the repo is self-co
 | `Nebula Control Plane - UI Implementation Plan.md` | The React admin console build plan. **SHIPPED & LIVE** (`-tags ui`, served on :443). |
 | `Nebula Control Plane - Security Posture - Public Enroll Endpoint.md` | Threat model + hardening for the public enrollment endpoint (the pull-based gateway). |
 
-## Architecture decision records (ADRs 0001–0010)
+## Architecture decision records (ADRs 0001–0011)
 
 Each ADR captures one decision and its rationale. Status reflects the live `poc` stack.
 
@@ -35,6 +37,7 @@ Each ADR captures one decision and its rationale. Status reflects the live `poc`
 | 0008 — Client Install & Bootstrap | `pilot install`; Linux / macOS(launchd) / Windows(SCM) backends. | SHIPPED & LIVE (live-validated) |
 | 0009 — Control-Plane Trust-Zone Separation | Trust-zone split that backs SSO enrollment. | CODE-COMPLETE, OFF BY DEFAULT |
 | 0010 — IPAM: Named Netblocks & Per-Join-Method Allocation | DB-driven netblock resolver, per-method binding, auto-grow. | SHIPPED & LIVE |
+| 0011 — Terraform-Managed Mesh Configuration | Phased declarative/GitOps config for trust & policy (console CRUD → config-as-code → optional Terraform provider); supersedes in-app dual-control. | accepted (Phase 1 shipped) |
 
 ## Decision logs (build records)
 
@@ -43,6 +46,7 @@ Each ADR captures one decision and its rationale. Status reflects the live `poc`
 | `IPAM-DECISIONS.md` | IPAM build decisions D1–D23 (ADR 0010). |
 | `SSO-DECISIONS.md` | SSO enrollment build decisions (ADR 0004 / 0009). |
 | `REAPER-DECISIONS.md` | Device reaper build decisions R1–R20 (cert-lapse IP reclaim — SHIPPED & LIVE). |
+| `REVOCATION-GUARDS-DECISIONS.md` | Revocation-as-DoS guards (M7 §7.2): control-plane blocklist protection + bulk dual-control/rate-limit (SHIPPED & LIVE). |
 
 ## Runbooks & operational notes
 
@@ -50,7 +54,7 @@ Each ADR captures one decision and its rationale. Status reflects the live `poc`
 |-----|---------|
 | `Nebula Control Plane - Runbook - Publishing pilot and nebula releases.md` | How to cut + publish pilot/nebula releases (release registry + canary). |
 | `Nebula Control Plane - Runbook - Entra ID SAML SSO for the Console.md` | Wiring the Harbor **console** login to Entra ID (SAML) — a separate prod item from mesh SSO enrollment. |
-| `Nebula Control Plane - Onboarding the poc mesh into AD (Entra ID) SSO.md` | Operator steps to turn on ADR 0004 mesh SSO enrollment (AD app + usertrust publish + `sso_acs_url`). |
+| `Nebula Control Plane - Onboarding the poc mesh into AD (Entra ID) SSO.md` | Onboarding **both** Entra SAML apps the mesh needs — the admin **console** login (App 1) and the ADR 0004 enrollment **portal** (App 2) — with the poc's actual values, why they must be distinct apps, and the SSM-based live-flip steps. |
 | `Nebula Control Plane - Code Review First Pass.md` | First-pass code review notes. |
 
 ## Provenance & sync
