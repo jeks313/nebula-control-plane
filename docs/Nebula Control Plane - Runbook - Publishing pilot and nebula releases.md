@@ -35,9 +35,15 @@ deploy/prod/artifacts/release-pilot.sh 0.1.0
 ```
 
 To **bump**: edit `VERSION` (e.g. `0.1.0` → `0.1.1`), `git commit` + `git tag v0.1.1`, then run
-`release-pilot.sh`. The arch list (default `linux/amd64` + `darwin/arm64`) is at the top of the
-script — extend it as the fleet grows. nebula is slackhq's prebuilt binary, published separately
-(`publish.sh nebula <slackhq-version>`) on its own cadence.
+`release-pilot.sh`. The arch list is at the top of the script: the SAFE lanes (`linux/amd64` +
+`darwin/arm64`, plain cgo-free builds) publish fatally, then `windows/amd64` publishes LAST and
+NON-FATALLY — it is built **embedded** (`-tags embed_nebula`, so the `pilot.exe` carries nebula +
+the Wintun driver and self-stages the data plane on first `supervise`), which needs `make` + `curl`
++ `unzip` + network on the publishing host; a Windows hiccup warns + exits non-zero but never strands
+the safe lanes or the synced `install.sh`. Extend the lists as the fleet grows. nebula is slackhq's
+prebuilt binary, published separately (`publish.sh nebula <slackhq-version>`) on its own cadence —
+the Windows nebula ships as a `.zip` (nebula.exe + Wintun), and `publish.sh nebula` (GOOS=windows)
+also uploads the `wintun/<ver>/wintun-windows-<arch>.dll` companion artifact.
 
 Steps 1–3 below are the underlying manual flow; `release-pilot.sh` automates step 1 across arches.
 

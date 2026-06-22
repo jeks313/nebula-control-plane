@@ -21,8 +21,9 @@
 # <gen>` stages the whole generation — Core serves each host the artifact matching its reported
 # arch. (This script prints the exact add/add-artifact commands below.)
 #
-# Requires: aws, terraform; go (pilot); curl, tar, sha256sum|shasum (nebula). The printed
-# `harbor …` commands run where Harbor + its DB are reachable (the control-plane host), NOT here.
+# Requires: aws, terraform; go (pilot); curl, tar, sha256sum|shasum (nebula); and for the WINDOWS
+# pilot lane additionally make + unzip (it embeds nebula + Wintun via `make embed-nebula`). The
+# printed `harbor …` commands run where Harbor + its DB are reachable (the control-plane host), NOT here.
 set -euo pipefail
 
 usage() { echo "usage: $0 pilot <version> | nebula <version> | both <pilot-ver> <nebula-ver>" >&2; exit 1; }

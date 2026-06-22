@@ -32,13 +32,16 @@ base="https://github.com/slackhq/nebula/releases/download/v${ver}"
 case "$goos" in
   windows)
     command -v unzip >/dev/null || { echo "fetch-nebula: need unzip (windows asset is a .zip)" >&2; exit 1; }
-    echo "==> fetching nebula ${ver} windows/${goarch} (zip: nebula.exe + Wintun)" >&2
+    # Wintun bundles the 32-bit driver under bin/x86 (not bin/386); match nebula's own
+    # GOARCH->arch remap (overlay/tun_windows.go). amd64/arm64/arm pass through.
+    zarch="$goarch"; [[ "$goarch" == "386" ]] && zarch="x86"
+    echo "==> fetching nebula ${ver} windows/${goarch} (zip: nebula.exe + Wintun bin/${zarch})" >&2
     curl -fsSL -o "$tmp/n.zip" "${base}/nebula-windows-${goarch}.zip"
     # -j junks the in-zip paths so each lands flat in $tmp.
     unzip -o -j "$tmp/n.zip" "nebula.exe" -d "$tmp" >/dev/null
-    unzip -o -j "$tmp/n.zip" "dist/windows/wintun/bin/${goarch}/wintun.dll" -d "$tmp" >/dev/null
+    unzip -o -j "$tmp/n.zip" "dist/windows/wintun/bin/${zarch}/wintun.dll" -d "$tmp" >/dev/null
     [[ -f "$tmp/nebula.exe" && -f "$tmp/wintun.dll" ]] || {
-      echo "fetch-nebula: windows zip missing nebula.exe or wintun.dll (dist/windows/wintun/bin/${goarch}/)" >&2; exit 1; }
+      echo "fetch-nebula: windows zip missing nebula.exe or wintun.dll (dist/windows/wintun/bin/${zarch}/)" >&2; exit 1; }
     install -m0755 "$tmp/nebula.exe" "$out/nebula"
     install -m0644 "$tmp/wintun.dll" "$out/wintun.dll"
     ;;
