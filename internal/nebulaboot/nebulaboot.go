@@ -27,8 +27,39 @@ import (
 
 // MaterializeEmbedded writes the build-embedded nebula (if any) to path when no binary
 // exists there yet (ADR 0003 Phase 2). It is the pilot entry point; see Materialize.
+//
+// On Windows it ALSO materializes the embedded Wintun driver (wintun.dll) beside the
+// nebula binary, since nebula loads it from its own directory at startup to create the
+// TUN adapter — so a self-contained pilot.exe brings up the overlay with no pre-installed
+// driver. embeddedWintun() is nil on every non-Windows / non-embed build, making the
+// Wintun step a clean no-op there. The returned bool reflects only the nebula write (the
+// data-plane binary); a Wintun-write failure is surfaced as an error.
 func MaterializeEmbedded(path string, logger *slog.Logger) (bool, error) {
-	return Materialize(path, embedded(), logger)
+	wrote, err := Materialize(path, embedded(), logger)
+	if err != nil {
+		return wrote, err
+	}
+	if _, werr := MaterializeWintun(path, embeddedWintun(), logger); werr != nil {
+		return wrote, werr
+	}
+	return wrote, nil
+}
+
+// MaterializeWintun writes Wintun (data) as wintun.dll into the directory of nebulaPath
+// when data is non-empty and no wintun.dll is there yet — placing the driver where the
+// Windows DLL search order finds it (beside the nebula executable). data is empty on
+// every non-Windows / non-embed build, so this is a clean no-op there. Split out (data
+// passed in, not read from the embed) so the logic is testable without the real driver.
+func MaterializeWintun(nebulaPath string, data []byte, logger *slog.Logger) (bool, error) {
+	if len(data) == 0 {
+		return false, nil
+	}
+	wintunPath := filepath.Join(filepath.Dir(nebulaPath), "wintun.dll")
+	wrote, err := Materialize(wintunPath, data, logger)
+	if err != nil {
+		return wrote, fmt.Errorf("nebulaboot: materialize wintun: %w", err)
+	}
+	return wrote, nil
 }
 
 // Materialize writes data to path atomically (mode 0o755) when there is no binary at

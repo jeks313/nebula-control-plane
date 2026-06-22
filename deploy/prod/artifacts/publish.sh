@@ -60,8 +60,20 @@ publish_pilot() {
   command -v go >/dev/null || { echo "missing tool: go" >&2; exit 1; }
   key="pilot/${ver}/pilot-${PLAT}"
   bin="$TMP/pilot"
-  echo "==> building pilot ${ver} (${PLAT}, cgo-free)"
-  (cd "$ROOT" && GOOS="$GOOS" GOARCH="$GOARCH" CGO_ENABLED=0 go build -trimpath -ldflags "-X main.version=${ver}" -o "$bin" ./cmd/pilot)
+  if [[ "$GOOS" == "windows" ]]; then
+    # A bucket/installed Windows pilot must be SELF-CONTAINED: install.sh is POSIX-only
+    # and self-update no-ops on Windows, so the published pilot.exe embeds nebula + the
+    # Wintun driver (ADR 0003 Phase 2) and materializes them on first `supervise`. Build
+    # with -tags embed_nebula after fetching the assets (needs make + curl + unzip).
+    command -v make >/dev/null || { echo "missing tool: make (windows pilot embeds nebula)" >&2; exit 1; }
+    local nver="${NEBULA_VERSION:-1.10.3}"
+    echo "==> building pilot ${ver} (${PLAT}, cgo-free, EMBEDDED nebula ${nver} + Wintun)"
+    (cd "$ROOT" && make embed-nebula NEBULA_OS=windows NEBULA_ARCH="$GOARCH" NEBULA_VERSION="$nver" >&2)
+    (cd "$ROOT" && GOOS=windows GOARCH="$GOARCH" CGO_ENABLED=0 go build -trimpath -tags embed_nebula -ldflags "-X main.version=${ver}" -o "$bin" ./cmd/pilot)
+  else
+    echo "==> building pilot ${ver} (${PLAT}, cgo-free)"
+    (cd "$ROOT" && GOOS="$GOOS" GOARCH="$GOARCH" CGO_ENABLED=0 go build -trimpath -ldflags "-X main.version=${ver}" -o "$bin" ./cmd/pilot)
+  fi
   sha="$(sha256_of "$bin")"
   upload "$bin" "$key"
   printf '%s\n' "$sha" | aws s3 cp - "s3://$BUCKET/$key.sha256" --region "$REGION" --content-type text/plain --only-show-errors # sidecar for install.sh
@@ -76,27 +88,17 @@ publish_pilot() {
 }
 
 publish_nebula() {
-  local ver="$1" asset archive key bin sha
+  local ver="$1" key bin sha out
   [[ -n "$ver" ]] || { echo "nebula: version required" >&2; usage; }
-  command -v curl >/dev/null || { echo "missing tool: curl" >&2; exit 1; }
-  # slackhq/nebula ships a UNIVERSAL darwin ZIP (no arch suffix) and arch-suffixed linux tarballs.
-  if [[ "$GOOS" == "darwin" ]]; then
-    asset="nebula-darwin.zip"; archive="$TMP/nebula.zip"
-    command -v unzip >/dev/null || { echo "missing tool: unzip (needed to extract the darwin asset)" >&2; exit 1; }
-  else
-    asset="nebula-${GOOS}-${GOARCH}.tar.gz"; archive="$TMP/nebula.tgz"
-    command -v tar >/dev/null || { echo "missing tool: tar" >&2; exit 1; }
-  fi
+  # fetch-nebula.sh knows slackhq's per-OS archive shapes (linux tarball / darwin zip /
+  # windows zip) and, for windows, extracts the bundled Wintun driver too. It writes the
+  # RAW binary to <out>/nebula (and <out>/wintun.dll on windows); the registry sha is of
+  # the raw binary, not the archive.
+  out="$TMP/nb"
+  echo "==> fetching nebula ${ver} (${PLAT}) via fetch-nebula.sh"
+  "$ROOT/deploy/prod/artifacts/fetch-nebula.sh" "$ver" "$GOOS" "$GOARCH" "$out"
+  bin="$out/nebula"
   key="nebula/${ver}/nebula-${PLAT}"
-  echo "==> fetching nebula ${ver} (${asset}) from GitHub"
-  curl -fsSL -o "$archive" "https://github.com/slackhq/nebula/releases/download/v${ver}/${asset}"
-  if [[ -n "${NEBULA_ARCHIVE_SHA256:-}" ]]; then
-    echo "${NEBULA_ARCHIVE_SHA256}  $archive" | sha256_check # verify the download (optional supply-chain pin)
-  fi
-  # Extract the RAW nebula binary (the registry sha is of THIS, not the archive). The darwin zip
-  # is a universal binary; the linux tarball is per-arch. Both carry a top-level `nebula` entry.
-  if [[ "$GOOS" == "darwin" ]]; then unzip -o -d "$TMP" "$archive" nebula >/dev/null; else tar -xzf "$archive" -C "$TMP" nebula; fi
-  bin="$TMP/nebula"
   sha="$(sha256_of "$bin")"
   upload "$bin" "$key"
   printf '%s\n' "$sha" | aws s3 cp - "s3://$BUCKET/$key.sha256" --region "$REGION" --content-type text/plain --only-show-errors # sidecar for install.sh
@@ -108,11 +110,19 @@ publish_nebula() {
   echo "  harbor nebula add-artifact -gen <gen>      -os ${GOOS} -arch ${GOARCH} -sha256 ${sha} -url ${BASE_URL}/${key}"
   echo "  # once every arch is registered: harbor nebula release -gen <gen>   (stages the whole gen as a canary)"
   echo
-}
-
-sha256_check() { # verify "<sha>  <file>" on stdin, portably
-  if command -v sha256sum >/dev/null; then sha256sum -c -
-  else local line; read -r line; local want="${line%% *}" f="${line##* }"; [[ "$(sha256_of "$f")" == "$want" ]] || { echo "nebula tarball sha mismatch" >&2; exit 1; }; fi
+  # Windows: nebula loads wintun.dll at runtime to create its TUN adapter. Publish it as a
+  # companion artifact so a NON-embedded/fetch install can stage it beside nebula.exe. (The
+  # embedded pilot.exe carries its own copy via -tags embed_nebula, so it does not need this.)
+  if [[ "$GOOS" == "windows" ]]; then
+    local wkey wsha
+    wkey="wintun/${ver}/wintun-${PLAT}.dll"
+    wsha="$(sha256_of "$out/wintun.dll")"
+    upload "$out/wintun.dll" "$wkey"
+    printf '%s\n' "$wsha" | aws s3 cp - "s3://$BUCKET/$wkey.sha256" --region "$REGION" --content-type text/plain --only-show-errors
+    echo "  # Wintun driver (windows-${GOARCH}) published at ${BASE_URL}/${wkey} (sha ${wsha})"
+    echo "  # place it beside nebula.exe on the host; the embedded pilot.exe already carries its own."
+    echo
+  fi
 }
 
 case "$COMPONENT" in

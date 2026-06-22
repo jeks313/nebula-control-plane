@@ -9,6 +9,48 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/nebulaboot"
 )
 
+func TestMaterializeWintunBesideNebula(t *testing.T) {
+	dir := t.TempDir()
+	nebula := filepath.Join(dir, "sub", "nebula.exe") // a missing parent dir too
+	dll := bytes.Repeat([]byte("W"), 2048)
+
+	wrote, err := nebulaboot.MaterializeWintun(nebula, dll, nil)
+	if err != nil || !wrote {
+		t.Fatalf("materialize wintun: wrote=%v err=%v", wrote, err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "sub", "wintun.dll"))
+	if err != nil || !bytes.Equal(got, dll) {
+		t.Fatalf("wintun.dll must be written beside nebula.exe: err=%v", err)
+	}
+}
+
+func TestMaterializeWintunNilIsNoOp(t *testing.T) {
+	dir := t.TempDir()
+	// Empty data models a non-Windows / non-embed build (embeddedWintun() == nil).
+	wrote, err := nebulaboot.MaterializeWintun(filepath.Join(dir, "nebula"), nil, nil)
+	if err != nil || wrote {
+		t.Fatalf("nil wintun must be a clean no-op: wrote=%v err=%v", wrote, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "wintun.dll")); !os.IsNotExist(err) {
+		t.Fatal("no-op must not create wintun.dll")
+	}
+}
+
+func TestMaterializeWintunNoClobber(t *testing.T) {
+	dir := t.TempDir()
+	existing := []byte("operator's pinned wintun.dll")
+	if err := os.WriteFile(filepath.Join(dir, "wintun.dll"), existing, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wrote, err := nebulaboot.MaterializeWintun(filepath.Join(dir, "nebula.exe"), bytes.Repeat([]byte("X"), 2048), nil)
+	if err != nil || wrote {
+		t.Fatalf("must not clobber an existing wintun.dll: wrote=%v err=%v", wrote, err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, "wintun.dll")); !bytes.Equal(got, existing) {
+		t.Fatal("existing wintun.dll must be left untouched")
+	}
+}
+
 func TestMaterializeWritesWhenMissing(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sub", "nebula") // a missing parent dir too

@@ -20,7 +20,10 @@ VER="${1:-$(cat "$ROOT/VERSION" 2>/dev/null || true)}"
 
 # Fleet platforms. The FIRST is registered as the generation's DEFAULT artifact (harbor pilot add);
 # each remaining one is an add-artifact. Extend this list as the fleet grows (e.g. linux/arm64).
-PLATFORMS=("linux/amd64" "darwin/arm64")
+# windows/amd64 is published EMBEDDED (publish.sh builds it with -tags embed_nebula so the
+# pilot.exe carries nebula + Wintun and self-stages the data plane — install.sh is POSIX-only and
+# Windows self-update no-ops, so a non-embedded Windows pilot would be useless on a fresh host).
+PLATFORMS=("linux/amd64" "darwin/arm64" "windows/amd64")
 
 echo "==> releasing pilot $VER for: ${PLATFORMS[*]}"
 for plat in "${PLATFORMS[@]}"; do
