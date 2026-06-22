@@ -61,9 +61,15 @@ rollout's observe-window auto-rollback). So register every platform for a genera
 it skipped and how to add their arch.
 
 `publish.sh` defaults to **linux/amd64** (the cloud fleet the rollout drives). Publish another
-platform with `GOOS=… GOARCH=… publish.sh …` (the iMac is `GOOS=darwin GOARCH=arm64`; nebula's
-darwin asset is the **universal `nebula-darwin.zip`** — a zip, not a tarball — which `publish.sh`
-unzips to the raw `nebula` binary, so `unzip` is required for the darwin lane).
+platform with `GOOS=… GOARCH=… publish.sh …` (the iMac is `GOOS=darwin GOARCH=arm64`). Per-OS
+archive shapes are handled by `fetch-nebula.sh`: linux is a `.tar.gz`, darwin is the **universal
+`nebula-darwin.zip`**, and windows is `nebula-windows-<arch>.zip` (carrying `nebula.exe` + the
+bundled Wintun driver) — so `unzip` is required for the darwin/windows lanes. For **windows**,
+`publish.sh nebula` also uploads the Wintun driver as a companion artifact
+(`wintun/<ver>/wintun-windows-<arch>.dll`), and `publish.sh pilot` builds the Windows pilot
+**embedded** (`-tags embed_nebula`, needs `make`): the `pilot.exe` carries nebula + Wintun and
+materializes them into `C:\Program Files\Nebula\…` on first `supervise`, so a fresh Windows host
+needs no driver pre-install (install.sh is POSIX-only and Windows self-update no-ops).
 
 Register the platforms of one version against a **single generation**: the first `add` creates the
 generation (it is the *default* artifact, defaulting to linux/amd64); each other platform attaches
