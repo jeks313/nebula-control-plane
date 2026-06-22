@@ -46,7 +46,7 @@ signature); the KMS / SAML / TLS / HA decisions are in **ADR 0007**.
 - **Genesis ceremony:** the one-time act of creating those two trust roots and issuing the first certificates. Done under **two operators** (below).
 - **KMS (AWS Key Management Service):** a service that holds private keys **non-exportably** — the key never leaves AWS, you can only ask it to *sign*, and every signature is logged. We use it for the two trust roots by default, so the private keys never touch a disk.
 - **ACME / Let's Encrypt / DNS-01:** the standard way to get a real HTTPS certificate automatically. "DNS-01" proves you own the domain by writing a DNS record (we use Cloudflare). Harbor uses this to serve real HTTPS for the console + Core.
-- **SAML / Entra:** how the console does "log in with your Microsoft work account" (see the companion SAML runbook). Optional — there's a dev fallback (`mock-idp`).
+- **SAML / Entra:** how the console does "log in with your Microsoft work account" (see the companion SAML runbook). Optional — there's a dev fallback (`mock-idp`). *(This is the **console** SSO app, used by operators. A separate **enrollment-portal** SSO app — for end users self-enrolling a device, ADR 0004 — is a different Entra app; see "Wire real SSO".)*
 - **Cloud-trust:** a rule that says "any host running under *this* AWS account + IAM role is allowed to auto-enroll." Lets cloud VMs join keyless (they prove identity with their AWS role).
 - **Two-operator ceremony (`alice` / `bob`):** genesis records two operator names — one "signs" the CA, the other the config-signing key — into a tamper-evident audit log. It's *process discipline + an audit trail*, **not** cryptographically enforced dual-control (the names are just strings; one person can run it). It exists so the most security-critical act is deliberate and recorded.
 
@@ -97,9 +97,10 @@ build + push the image).
 **6. An SSH key** that can reach the nodes (`SSH_KEY` → your public key path; the private half in
 your agent). Nodes log in as `ec2-user` by default.
 
-**7. (Optional, for real SSO)** the Entra SAML env vars + SP keypair — see *Wire real SSO* below and
-the companion **Entra SAML runbook**. If you skip these, the console comes up with the **dev
-mock-IdP** so you can still get in.
+**7. (Optional, for real SSO)** the **console** Entra SAML env vars + SP keypair — see *Wire real
+SSO* below and the companion **Entra SAML runbook**. If you skip these, the console comes up with
+the **dev mock-IdP** so you can still get in. *(To also enable the separate **enrollment portal**
+(ADR 0004), set the `SSO_*` family too — off by default; see "Wire real SSO".)*
 
 ---
 
@@ -152,7 +153,8 @@ Useful environment variables (all optional; sensible defaults shown):
 | `CORE_PORT` / `ADMIN_PORT` | `8444` / `443` | Core API / admin console ports (both mesh-only) |
 | `--skip-build` (arg) | off | skip rebuilding the Go binaries (reuse what's there) |
 | `CONTAINER_ENGINE` | `podman`→`docker` | image build engine (only for Fargate) |
-| `SAML_*` | unset → mock-IdP | real Entra SSO inputs (see *Wire real SSO*) |
+| `SAML_*` | unset → mock-IdP | real **console** Entra SSO inputs (see *Wire real SSO*) |
+| `SSO_*` | unset → portal OFF | **enrollment-portal** SSO inputs (ADR 0004); `SSO_ACS_URL` is the enable trigger, `SSO_ENTITY_ID` must differ from the console's |
 
 It builds for `linux/amd64`. The console defaults to **443** (clean `https://<host>` URLs); core-api
 stays on **8444**.
@@ -183,7 +185,7 @@ The script prints a summary. Key things in it:
   - **cloud client** — keyless via `aws-sigv4` (it proves identity with its AWS role; cloud-trust auto-issues);
   - **off-cloud host (the iMac)** — uses the **join key** and needs **manual approval** in the console (or via `harbor enroll approve`).
 
-## Wire real SSO (Entra SAML)
+## Wire real SSO — the console (Entra SAML)
 
 By default the console comes up with the **dev mock-IdP** so you can log in immediately. For real
 Microsoft Entra SSO, set the `SAML_*` env vars (`SAML_METADATA_URL`, `SAML_SP_KEY_FILE`,
@@ -191,6 +193,20 @@ Microsoft Entra SSO, set the `SAML_*` env vars (`SAML_METADATA_URL`, `SAML_SP_KE
 in production mode and prints the exact Entity-ID / ACS URLs to register in Entra. This **requires
 HTTPS** (so `mesh_name` + `mesh_domain` must be set). Full step-by-step (the Entra app registration
 and the SP keypair) is in the companion **Entra ID SAML SSO for the Console** runbook.
+
+### The second surface — the enrollment portal (ADR 0004)
+
+The mesh has **two** independent SSO surfaces, and this same bootstrap can wire both. The block
+above is the **admin console** (operators signing in to manage the mesh). The second is the
+**user-enrollment portal**: a *separate*, public SSO surface on the off-mesh gateway where end users
+self-enroll a device. It is a **second, separate Entra SAML app** with its own ACS on the public
+gateway (`https://<mesh_name>-gateway.<mesh_domain>:8443/v1/sso/acs`) and an Entity ID that **must
+differ from the console's** — the bootstrap aborts otherwise, because the differing SP audiences are
+what stop a console-login assertion being replayed at the portal (ADR 0009). It's wired by the
+`SSO_*` env family (`SSO_ACS_URL` is the enable trigger; plus `SSO_ENTITY_ID`, `SSO_ISSUER`, the
+portal app's IdP metadata) and also needs a published user-trust config. It is **OFF by default**
+(empty `SSO_ACS_URL` ⇒ fail-closed-disabled) and is currently off on the poc. Full setup: **ADR 0004
+→ "Operator setup (live rollout)"** and the *Onboarding the poc mesh into AD (Entra ID) SSO* doc.
 
 ## Follow-on (separate scripts, run after genesis)
 

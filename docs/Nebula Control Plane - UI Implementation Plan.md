@@ -931,7 +931,11 @@ The v1 UI-0…UI-6 pretended the backend was done. Reframe as a **backend track*
     in-process mock SAML IdP** (`internal/adminauth/samlmock`, test-only) that signs
     real assertions, plus replay/forgery rejection. Wired into `harbor admin-api`
     (`-saml-idp-metadata-url/-file`, `-saml-sp-cert/-key`, `-saml-groups-attr`);
-    `-mock-idp` is fail-closed mutually exclusive with it. Adversarially reviewed
+    `-mock-idp` is fail-closed mutually exclusive with it. (This is the **console's** SAML
+    app — mesh-only ACS `/admin/v1/auth/saml/acs`, its own SP entity id. The end-user
+    **enrollment portal** is a SECOND, separate SAML app on the off-mesh gateway with its
+    own ACS/entity-id + `-sso-*` config — see the User Trust page (UI-3) and ADR 0004/0009.)
+    Adversarially reviewed
     (9-agent; 1 confirmed + fixed): the login-state cookie was forgeable — an empty
     `InResponseTo` would have admitted unsolicited/IdP-initiated assertions, and a
     chosen one enabled replay — so login-state cookies (SAML **and** OIDC) are now
