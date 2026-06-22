@@ -60,15 +60,17 @@ NEBULA_ARCH    ?= $(shell go env GOARCH)
 .PHONY: embed-nebula
 embed-nebula:
 	@mkdir -p internal/nebulaboot/assets
-	@tmp=$$(mktemp -d); \
+	@set -euo pipefail; \
+	  tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; \
 	  bash deploy/prod/artifacts/fetch-nebula.sh "$(NEBULA_VERSION)" "$(NEBULA_OS)" "$(NEBULA_ARCH)" "$$tmp"; \
 	  gzip -9 -c "$$tmp/nebula" > internal/nebulaboot/assets/nebula.gz; \
+	  [ -s internal/nebulaboot/assets/nebula.gz ]; \
 	  if [ "$(NEBULA_OS)" = "windows" ]; then \
 	    gzip -9 -c "$$tmp/wintun.dll" > internal/nebulaboot/assets/wintun.gz; \
+	    [ -s internal/nebulaboot/assets/wintun.gz ]; \
 	  else \
 	    rm -f internal/nebulaboot/assets/wintun.gz; \
-	  fi; \
-	  rm -rf "$$tmp"
+	  fi
 	@ls -lh internal/nebulaboot/assets/
 
 .PHONY: pilot-embedded

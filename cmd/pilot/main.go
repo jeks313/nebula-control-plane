@@ -508,7 +508,10 @@ func cmdSupervise(args []string) {
 		// one embedded in this pilot (offline first-boot). No-op once a binary exists
 		// (Phase 1 owns updates from then on) or in a build that embedded nothing.
 		if wrote, err := nebulaboot.MaterializeEmbedded(*nebulaPath, log); err != nil {
-			log.Warn("nebula bootstrap: could not materialize embedded binary", "err", err)
+			// err wraps which step failed ("materialize wintun" vs the nebula write); on
+			// Windows a wintun failure means the overlay won't come up even though nebula
+			// itself may have been written.
+			log.Warn("nebula bootstrap: could not materialize embedded nebula/wintun", "err", err)
 		} else if wrote {
 			log.Info("nebula bootstrap: wrote embedded binary for offline first-boot", "path", *nebulaPath)
 		}
