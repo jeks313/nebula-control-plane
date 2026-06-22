@@ -266,7 +266,12 @@ privileged connectivity — which the off-mesh pull model already denies it.
 ## Relationship to other work
 
 - **ADR 0004 (SSO-driven user enrollment)** — this ADR *places* it: the SSO portal is the
-  off-mesh gateway's SSO method, not a new public tier; `processSSO` is the Core seam.
+  off-mesh gateway's SSO method, not a new public tier; `processSSO` is the Core seam. Trust-zone
+  separation also operates at the **IdP/SAML layer**: the console and the enrollment portal register
+  as **two separate SAML SPs with distinct entity IDs**, so the SAML audience check stops a
+  console-login assertion being replayed at the portal (or vice-versa). `bootstrap-genesis.sh`
+  enforces this — it aborts if the portal's entity ID isn't distinct from the console's. See ADR
+  0004 "Operator setup" for the configured values.
 - **ADR 0005 (pull-based gateways)** — the load-bearing precedent. SSO enrollment reuses
   the off-mesh gateway, the registry, and `internal/collect`'s leaf-pinned mTLS pull
   verbatim. This ADR answers ADR 0005's own "align the SSO portal to the pull posture."
