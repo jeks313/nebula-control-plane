@@ -311,3 +311,15 @@ variable "db_backup_retention_days" {
   type        = number
   default     = 14
 }
+
+variable "enable_windows_client" {
+  description = "Opt-in: add a PRIVATE, SSM-only Windows Server 2022 client (no public IP) that joins the mesh — exercises the pilot Windows SCM backend + embedded nebula/Wintun on a real host (windows.tf). Reached via SSM (SSH-over-SSM by instance id), like the other private nodes."
+  type        = bool
+  default     = false
+}
+
+variable "windows_instance_type" {
+  description = "Instance type for the optional Windows client (the Windows Server base image wants more RAM/disk than the Linux nodes)."
+  type        = string
+  default     = "t3.large"
+}
