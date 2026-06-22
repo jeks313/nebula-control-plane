@@ -16,6 +16,14 @@ This guide switches the Harbor admin console from its built-in **fake login** (t
 fine for a demo) to **"sign in with your Microsoft work account."** It assumes **no prior SAML
 knowledge** — every term is explained, and every value you need is spelled out.
 
+> **Scope — this is one of two SAML apps.** This runbook sets up the **admin console** app only
+> (operators signing in to manage the mesh). The mesh has a second, separate SSO surface — the
+> **enrollment portal** where end users self-enroll a device (ADR 0004), on the public off-mesh
+> gateway. It needs its **own** Entra app with a **distinct** Entity ID and ACS (`/v1/sso/acs` on
+> :8443); the bootstrap aborts if its Entity ID isn't distinct from the console's (SAML audience
+> separation, ADR 0009). It's currently **off** on the poc. See ADR 0004 and the *Onboarding the
+> poc mesh into AD (Entra ID) SSO* doc for both apps.
+
 You do **not** write any code. Harbor already speaks SAML; you (1) tell Microsoft about Harbor,
 (2) tell Harbor about Microsoft, and (3) re-run the genesis bootstrap with a few environment
 variables set. That's it.
@@ -28,7 +36,7 @@ variables set. That's it.
 - **IdP (Identity Provider):** the system that knows who your people are and which groups they're in. Here that's **Microsoft Entra ID** (the new name for Azure AD).
 - **SP (Service Provider):** the app that trusts the IdP to vouch for you. Here that's the **Harbor admin console**.
 - **SAML:** the standard "language" the IdP and SP use to pass a signed *"yes, this is Alice, and she's in the Admins group"* message.
-- **Entity ID (a.k.a. "Identifier"):** a unique name for the SP, written as a URL. Both sides must use the *exact same string* or they won't recognize each other.
+- **Entity ID (a.k.a. "Identifier"):** a unique name for the SP, written as a URL. Both sides must use the *exact same string* or they won't recognize each other. *(This mesh has two SPs — the console and the enrollment portal — so each is a separate Entra app and the two Entity IDs must **differ** from each other; "same string" means matching the console's two sides, not reusing the console's app for the portal.)*
 - **ACS (Assertion Consumer Service) URL, a.k.a. "Reply URL":** the console address where Entra sends your browser back to (carrying the signed login message) after you authenticate. Must match on both sides.
 - **SP metadata:** a little XML file Harbor publishes that describes itself (its Entity ID, its ACS, its signing certificate). Optional convenience — you can import it into Entra instead of typing values.
 - **Federation metadata (URL or XML):** the *IdP's* equivalent — Entra publishes it so Harbor can learn Entra's sign-in address and signing certificate. You give this URL to Harbor.

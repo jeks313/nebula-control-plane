@@ -5,7 +5,9 @@ Phases 0+1+2 (S11 scope) are built, merged, and the deploy plumbing is wired (B2
 genesis-minted assertion keypair, the SAML SP keypair, and the IdP/ACS knobs all thread
 through `deploy/prod/bootstrap-genesis.sh` + the two terraform secrets, with `SSO_ACS_URL`
 empty as the default fail-closed-disabled trigger. SSO stays disabled (a strict no-op) until
-an operator (1) registers a SECOND SAML app in the IdP, (2) sets `SSO_ACS_URL` + the knobs,
+an operator (1) registers a SECOND SAML app in the IdP (distinct from the admin-console SAML app —
+that FIRST app is configured via `-saml-*`/`SAML_*` and still runs the dev mock-IdP on the poc; see
+the console SAML runbook), (2) sets `SSO_ACS_URL` + the knobs,
 (3) publishes a user-trust config (`harbor usertrust publish` or the console User Trust page),
 and (4) redeploys. No live SAML IdP has been set up and no live SSO end-to-end ceremony has
 been run. The off-mesh gateway that hosts the portal now runs on **Fargate by default**
@@ -563,7 +565,11 @@ build are **B#** (appended as phases land). Review at the end.
   is published yet, Core still denies every SSO enrollment with the existing terminal
   `ErrSSONotConfigured` (fail closed) — so "deployable" never means "live" by accident.
   **Remains OPERATOR-ONLY (not automatable here):** (1) register the SECOND SAML app in the IdP
-  (distinct Entity ID + Reply URL = the public ACS — ADR 0004 "Operator setup"); (2) set the
+  (distinct from the admin-console app; distinct Entity ID + Reply URL = the public ACS — ADR 0004
+  "Operator setup"). The Entity ID MUST differ from the console's `-saml-entity-id` so the SAML
+  audience check (B13) blocks a console-login assertion being replayed at the portal, or vice-versa
+  (trust-zone separation, ADR 0009); `bootstrap-genesis.sh` aborts if SSO is enabled without one.
+  (2) set the
   trigger + knobs (`SSO_ACS_URL` + `SSO_ENTITY_ID` + `SSO_ISSUER` + the IdP metadata); (3)
   publish a user-trust config (`harbor usertrust publish` or the console User Trust page) mapping
   AD groups → mesh groups + CIDR; (4) redeploy/re-bootstrap. The live SSO end-to-end test waits
