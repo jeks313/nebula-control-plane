@@ -222,3 +222,15 @@ output "windows_ssm_ssh" {
   description = "SSH-over-SSM command for the Windows client (run with valid AWS creds + the session-manager-plugin; add `-i <your-ssh-key>`)."
   value       = var.enable_windows_client ? "ssh -o ProxyCommand='aws ssm start-session --target %h --document-name AWS-StartSSHSession --parameters portNumber=%p --region ${var.region}' Administrator@${one(aws_instance.windows[*].id)}" : "(set enable_windows_client = true)"
 }
+
+# Enrollment-portal SSO (ADR 0004) static config, passed through for bootstrap-genesis.sh to read via
+# `terraform output -json` (env still takes precedence). The 3 PEMs are NOT here (genesis-generated).
+output "sso_acs_url" { value = var.sso_acs_url }
+
+output "sso_entity_id" { value = var.sso_entity_id }
+
+output "sso_issuer" { value = var.sso_issuer }
+
+output "sso_groups_attr" { value = var.sso_groups_attr }
+
+output "sso_idp_metadata_file" { value = var.sso_idp_metadata_file }
