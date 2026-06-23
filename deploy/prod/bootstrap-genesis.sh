@@ -668,13 +668,25 @@ rsh "$HB_ID" "set -e
   fi
   harbor gateway list $HARBOR_DB_FLAGS 2>/dev/null | grep -Fq '$GW_COLLECT' \
     || { echo 'FATAL: gateway gw1 ($GW_COLLECT) not registered with harbor — the collector would pull nothing' >&2; exit 1; }
+  # Register the lighthouse in the DB registry (idempotent) so the -lighthouse-db services below read
+  # it as the AUTHORITATIVE source (like the gateway list) and 'harbor lighthouse list' shows it; the
+  # static -lighthouse flag stays as the read-error fallback. VERIFY it landed BEFORE starting any
+  # -lighthouse-db service — an EMPTY registry under -lighthouse-db yields bundles with NO lighthouse
+  # (the static fallback only triggers on a DB read ERROR, not on an empty result).
+  if ! harbor lighthouse list $HARBOR_DB_FLAGS 2>/dev/null | grep -Fq '$LH_OVERLAY'; then
+    harbor lighthouse add $HARBOR_DB_FLAGS -ip '$LH_OVERLAY' -addrs '$LH_ADDR' -name lighthouse-1 -actor alice
+  fi
+  harbor lighthouse list $HARBOR_DB_FLAGS 2>/dev/null | grep -Fq '$LH_OVERLAY' \
+    || { echo 'FATAL: lighthouse $LH_OVERLAY not registered — bundles under -lighthouse-db would carry no lighthouse' >&2; exit 1; }
   sudo systemctl reset-failed ncp-collect ncp-core ncp-admin 2>/dev/null || true
   # Run AS ec2-user (owns ~/ncp; on the SQLite backend this keeps harbor.db writable by the CLI/console).
   # -blocklist-db: bundles issued for NEW gateway enrollments carry the live pki.blocklist
   # (7.1) — matches core-api's renew path so a revocation propagates on both enroll and renew.
+  # -lighthouse-db: bundles read the DB lighthouse registry (above) as the source of truth; the
+  # static -lighthouse flag is kept as the fallback if that registry read ever errors.
   sudo systemd-run --uid=$SSH_USER --gid=$SSH_USER --unit ncp-collect --collect /usr/local/bin/harbor collect -pool '$POOL' \
     $HARBOR_DB_FLAGS -ca-cert \$G/ca.crt $SIGN_BACKEND \
-    -hmac-key ~/ncp/hmac.b64 -lighthouse '$LH' -cloudtrust-db -blocklist-db -obs-addr $HARBOR_OVERLAY:$COLLECT_OBS_PORT \
+    -hmac-key ~/ncp/hmac.b64 -lighthouse '$LH' -lighthouse-db -cloudtrust-db -blocklist-db -obs-addr $HARBOR_OVERLAY:$COLLECT_OBS_PORT \
     -client-cert ~/ncp/harbor-collect.crt -client-key ~/ncp/harbor-collect.key $CORE_SSO_FLAGS >/dev/null
   echo registered"
 echo "    gateway registered + collector pulling (attestation enabled)"
@@ -857,7 +869,7 @@ rsh "$HB_ID" "set -e
   # recorded but never shipped — revocation is silently inert. ALWAYS on (revocation must work).
   sudo systemd-run --uid=$SSH_USER --gid=$SSH_USER --unit ncp-core --collect /usr/local/bin/harbor core-api \
     $HARBOR_DB_FLAGS -ca-cert \$G/ca.crt $SIGN_BACKEND \
-    -pool '$POOL' -lighthouse '$LH' -host-cert /etc/nebula/host.crt -blocklist-db \
+    -pool '$POOL' -lighthouse '$LH' -lighthouse-db -host-cert /etc/nebula/host.crt -blocklist-db \
     -addr $HARBOR_OVERLAY:$CORE_PORT$DB_POOL_FLAGS${CORE_SSO_FLAGS:+ $CORE_SSO_FLAGS}${ACME_FLAGS:+ $ACME_FLAGS} >/dev/null
   # admin console: issuance mode (so it can approve enrollments) + SAML/mock IdP. $ADMIN_CAP grants
   # CAP_NET_BIND_SERVICE when the console is on a privileged port (default 443). $CORE_SSO_FLAGS
