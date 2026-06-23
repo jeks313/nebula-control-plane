@@ -51,6 +51,20 @@ func TestRenderNonLighthouse(t *testing.T) {
 		t.Errorf("lighthouse.hosts = %v, want [100.64.0.1]", hosts)
 	}
 
+	// Relay: a non-lighthouse host routes through the lighthouse as its relay (ADR 0006), so the
+	// relay list mirrors the lighthouses.
+	rel := m["relay"].(map[string]any)
+	if rel["am_relay"] != false {
+		t.Errorf("relay.am_relay = %v, want false", rel["am_relay"])
+	}
+	if rel["use_relays"] != true {
+		t.Errorf("relay.use_relays = %v, want true", rel["use_relays"])
+	}
+	relays := rel["relays"].([]any)
+	if len(relays) != 1 || relays[0] != "100.64.0.1" {
+		t.Errorf("relay.relays = %v, want [100.64.0.1]", relays)
+	}
+
 	shm := m["static_host_map"].(map[string]any)
 	if _, ok := shm["100.64.0.1"]; !ok {
 		t.Errorf("static_host_map missing lighthouse: %v", shm)
@@ -87,6 +101,23 @@ func TestRenderLighthouseEmitsEmptyHosts(t *testing.T) {
 	}
 	if len(hosts) != 0 {
 		t.Errorf("lighthouse.hosts = %v, want []", hosts)
+	}
+
+	// A lighthouse IS the relay: am_relay true, use_relays false, and relays must be an empty list
+	// (not null — nebula rejects null), mirroring the hosts invariant.
+	rel := m["relay"].(map[string]any)
+	if rel["am_relay"] != true {
+		t.Errorf("relay.am_relay = %v, want true", rel["am_relay"])
+	}
+	if rel["use_relays"] != false {
+		t.Errorf("relay.use_relays = %v, want false", rel["use_relays"])
+	}
+	relays, ok := rel["relays"].([]any)
+	if !ok {
+		t.Fatalf("relay.relays is %T, want empty list", rel["relays"])
+	}
+	if len(relays) != 0 {
+		t.Errorf("relay.relays = %v, want []", relays)
 	}
 }
 
