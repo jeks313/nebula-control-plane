@@ -10,7 +10,9 @@
 #                  control-plane cert, so Harbor is a real mesh node — ADR/baseline:
 #                  the firewall routes every host to group:control-plane)
 #   4. lighthouse: install ca + lighthouse cert; start nebula
-#   5. harbor:     install ca + control-plane cert; start nebula (Harbor joins the mesh)
+#   5. harbor:     install ca + control-plane cert; start nebula UNDER PILOT (managed mesh member:
+#                  heartbeats into the fleet + auto-renews; firewall comes from the signed bundle's
+#                  control-plane invariant, so drift/renew can't close its API ports — see PR #7)
 #   6. harbor:     publish a cloud-trust config (this AWS account -> groups, auto-issue)
 #   7. gateway:    the OFF-MESH enrollment gateway (ADR 0005) — public enroll + a
 #                  Harbor-only mTLS collect port over a local queue; Harbor registers it
@@ -485,16 +487,25 @@ else
 fi # end MODE=genesis (steps 1-4); in recover, harbor was restored from the bundle above
 
 # ── 5. harbor: install control-plane cert + join the mesh ───────────────────
-echo "==> [harbor] install control-plane cert + start nebula (joins the mesh at $HARBOR_OVERLAY)"
-rcp "$WORK/ca.crt"          "$SSH_USER@$HB_ID:/tmp/ca.crt"
-rcp "$WORK/harbor-core.crt" "$SSH_USER@$HB_ID:/tmp/host.crt"
-rsh "$HB_ID" 'set -e
-  sudo install -m0644 /tmp/ca.crt   /etc/nebula/ca.crt
-  sudo install -m0644 /tmp/host.crt /etc/nebula/host.crt
-  rm -f /tmp/ca.crt /tmp/host.crt
-  sudo systemd-run --unit ncp-nebula --collect /usr/local/bin/nebula -config /etc/nebula/config.yml >/dev/null
-  echo started'
-echo "    harbor nebula running (control-plane node)"
+echo "==> [harbor] install control-plane cert + start nebula UNDER PILOT (joins at $HARBOR_OVERLAY; heartbeats + auto-renews)"
+rcp "$WORK/ca.crt"             "$SSH_USER@$HB_ID:/tmp/ca.crt"
+rcp "$WORK/harbor-core.crt"    "$SSH_USER@$HB_ID:/tmp/host.crt"
+rcp "$WORK/config-signing.pub" "$SSH_USER@$HB_ID:/tmp/config-signing.pub"   # pilot's bundle-pin
+rsh "$HB_ID" "set -e
+  sudo install -m0644 /tmp/ca.crt             /etc/nebula/ca.crt
+  sudo install -m0644 /tmp/host.crt           /etc/nebula/host.crt
+  sudo install -m0644 /tmp/config-signing.pub /etc/nebula/config-signing.pub
+  rm -f /tmp/ca.crt /tmp/host.crt /tmp/config-signing.pub
+  # Run nebula UNDER pilot (not standalone) so harbor is a MANAGED mesh member: it heartbeats
+  # (so it shows up in 'harbor fleet') and auto-renews its own control-plane cert. pilot's
+  # drift/renew re-render config.yml from the signed bundle — SAFE for the control-plane node
+  # because its bundle always carries the invariant inbound/outbound any/any/any firewall
+  # (bundle.CompileFirewall), a SUPERSET of the hand-opened control-plane ports, whether or not a
+  # policy is published. -core is harbor's OWN core-api over the mesh; pilot just warns+retries
+  # the renew/heartbeat until core-api comes up in step 8.
+  sudo systemd-run --unit ncp-nebula --collect /usr/local/bin/pilot supervise -dir /etc/nebula -config /etc/nebula/config.yml -core '$CORE_URL' -config-pub /etc/nebula/config-signing.pub >/dev/null
+  echo started"
+echo "    harbor nebula running under pilot (control-plane node — appears in fleet + auto-renews; firewall from the signed bundle)"
 
 # ── 6. derive this account from the client's IMDS + publish cloud-trust ──────
 # Genesis only — on recover the cloud-trust config already lives in Aurora (it survived).
