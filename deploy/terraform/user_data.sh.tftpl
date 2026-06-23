@@ -30,8 +30,9 @@ sigv4 attestation: sts:GetCallerIdentity works with no extra permissions.
 The harbor / pilot / gateway binaries are NOT auto-installed (no public signed-
 release pipeline yet — impl-plan 1.2). The genesis bootstrap script
 (deploy/scripts/bootstrap-genesis.sh) builds them locally and scp's them up for
-you; or build+copy by hand:
-  GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/harbor  ./cmd/harbor
+you; or build+copy by hand (harbor needs -tags ui to embed the admin console SPA):
+  npm --prefix ui install && npm --prefix ui run build   # build the console SPA first
+  GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -tags ui -o /tmp/harbor ./cmd/harbor
   GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/pilot   ./cmd/pilot
   GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/gateway ./cmd/gateway
   scp /tmp/{harbor,pilot,gateway} ec2-user@<this-ip>:/tmp/ && \
