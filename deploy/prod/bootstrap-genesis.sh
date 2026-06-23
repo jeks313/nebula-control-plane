@@ -717,6 +717,26 @@ exec $jc -u ncp-core -u ncp-collect -u ncp-admin -u ncp-nebula "$@"
 RLOGS
 echo "    harbor CLI env + harbor-logs installed (run 'harbor joinkey list' etc. with no flags)"
 
+# SSM convenience (account/region-wide): Session Manager runs a NON-LOGIN `sh`, which does NOT source
+# /etc/profile.d — so an `ssm-user` shell wouldn't pick up HARBOR_DB_* and `harbor` would fall back to
+# sqlite. Ensure the Session Manager shell profile sources the harbor env at session start. Idempotent:
+# create ONLY if the doc is absent (never clobber existing Session Manager logging/KMS prefs). The
+# shellProfile is guarded, so it's a no-op on instances without /etc/profile.d/harbor-cli.sh.
+echo "==> [account] ensure SSM Session Manager shell profile loads the harbor CLI env (for ssm-user)"
+if [[ -n "$TF_REGION" ]] && command -v aws >/dev/null 2>&1; then
+  if aws ssm get-document --name SSM-SessionManagerRunShell --region "$TF_REGION" >/dev/null 2>&1; then
+    echo "    SSM-SessionManagerRunShell already exists — leaving it (ensure its shellProfile.linux sources /etc/profile.d/harbor-cli.sh)"
+  else
+    aws ssm create-document --name SSM-SessionManagerRunShell --document-type Session --document-format JSON \
+      --region "$TF_REGION" \
+      --content '{"schemaVersion":"1.0","description":"Session Manager preferences - source the harbor CLI env (HARBOR_DB_*) so harbor subcommands work without flags.","sessionType":"Standard_Stream","inputs":{"shellProfile":{"linux":"[ -f /etc/profile.d/harbor-cli.sh ] && . /etc/profile.d/harbor-cli.sh"}}}' >/dev/null \
+      && echo "    created SSM-SessionManagerRunShell (ssm-user sessions now load the harbor env)" \
+      || echo "    WARN: could not create SSM-SessionManagerRunShell — set the Session Manager shell profile manually if you use ssm-user"
+  fi
+else
+  echo "    (skipped: no region/aws CLI — set the Session Manager shell profile manually for ssm-user)"
+fi
+
 # imac (off-cloud, no AWS identity) joins via a join key with manual approval. Genesis only — on
 # recover the imac's existing enrollment is unaffected (its cert validates against the same CA).
 IMAC_KEY=""
