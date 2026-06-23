@@ -111,6 +111,30 @@ func (v Values) Hosts() []string {
 	return hosts
 }
 
+// AmRelay reports whether this node acts as a Nebula relay. A lighthouse doubles as the mesh's
+// relay (ADR 0006): it is publicly reachable, so off-cloud hosts behind a symmetric NAT (e.g. an AWS
+// managed NAT Gateway) that cannot hole-punch to a private peer relay their traffic through it.
+func (v Values) AmRelay() bool { return v.AmLighthouse }
+
+// UseRelays reports whether this node routes through relays when a direct/hole-punched path fails.
+// Every non-lighthouse host does; a lighthouse (the relay itself) does not.
+func (v Values) UseRelays() bool { return !v.AmLighthouse }
+
+// RelayHosts returns the relay overlay IPs a non-lighthouse host routes through: the configured
+// lighthouses (which double as relays), so the relay list stays in lockstep with Lighthouses and can
+// never drift. Empty for a lighthouse (it relays for others and uses none) — the template then emits
+// "relays: []" (nebula rejects a null list).
+func (v Values) RelayHosts() []string {
+	if v.AmLighthouse {
+		return nil
+	}
+	out := make([]string, 0, len(v.Lighthouses))
+	for _, lh := range v.Lighthouses {
+		out = append(out, lh.OverlayIP)
+	}
+	return out
+}
+
 // Defaults fills unset policy fields with safe local-dev defaults. It does not
 // touch the PKI paths. The default firewall is intentionally tight: outbound is
 // open (a host may reach the mesh) but inbound allows only ICMP, so a freshly

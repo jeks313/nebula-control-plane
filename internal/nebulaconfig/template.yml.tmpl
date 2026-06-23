@@ -22,6 +22,13 @@ lighthouse:
 {{- range .Hosts }}
     - "{{ . }}"
 {{- end }}
+relay:
+  am_relay: {{ .AmRelay }}
+  use_relays: {{ .UseRelays }}
+  relays:{{ if not .RelayHosts }} []{{ end }}
+{{- range .RelayHosts }}
+    - "{{ . }}"
+{{- end }}
 listen:
   host: {{ .ListenHost }}
   port: {{ .ListenPort }}
