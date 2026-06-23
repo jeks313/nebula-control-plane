@@ -230,6 +230,53 @@ variable "acme_staging" {
   default     = false
 }
 
+# Enrollment-portal SSO (ADR 0004) static config. These 5 knobs make the LIVE SSO config durable so a
+# fresh bootstrap reproduces it (bootstrap reads them via outputs.tf, env taking precedence). The 3
+# PEMs (assertion + SP keypairs) are NOT here — they are genesis-generated and put into the gateway
+# secret by the bootstrap, never stored in terraform state. All default "" -> SSO stays disabled.
+variable "sso_acs_url" {
+  description = "Enrollment-portal PUBLIC ACS URL, e.g. https://<gateway-domain>:8443/v1/sso/acs. Setting this is the SSO ENABLE trigger (empty = disabled). Distinct from the admin console's SAML app."
+  type        = string
+  default     = ""
+  validation {
+    # Interpolated into the bootstrap shell as a single-quoted arg; reject whitespace/quotes.
+    condition     = var.sso_acs_url == "" || can(regex("^[^[:space:]'\"]+$", var.sso_acs_url))
+    error_message = "sso_acs_url must be a single token with no whitespace or quotes."
+  }
+}
+
+variable "sso_entity_id" {
+  description = "Enrollment-portal SP entity id (the portal app's Identifier in the IdP), e.g. https://<gateway-domain>:8443/v1/sso/metadata. MUST differ from the console app's entity id (ADR 0009 audience separation)."
+  type        = string
+  default     = ""
+  validation {
+    condition     = var.sso_entity_id == "" || can(regex("^[^[:space:]'\"]+$", var.sso_entity_id))
+    error_message = "sso_entity_id must be a single token with no whitespace or quotes."
+  }
+}
+
+variable "sso_issuer" {
+  description = "SSO assertion realm/issuer (the IdP 'iss'), fed to Core's usertrust.Match, e.g. https://sts.windows.net/<tenant-id>/."
+  type        = string
+  default     = ""
+  validation {
+    condition     = var.sso_issuer == "" || can(regex("^[^[:space:]'\"]+$", var.sso_issuer))
+    error_message = "sso_issuer must be a single token with no whitespace or quotes."
+  }
+}
+
+variable "sso_groups_attr" {
+  description = "Optional SAML group-claim attribute for the enrollment portal. Empty = the gateway's built-in default (\"groups\"). For Entra: http://schemas.microsoft.com/ws/2008/06/identity/claims/groups."
+  type        = string
+  default     = ""
+}
+
+variable "sso_idp_metadata_file" {
+  description = "Local path to the enrollment-portal app's IdP SAML federation-metadata XML (read by the bootstrap, folded into the gateway secret). Empty = supply SSO_IDP_METADATA_URL on the bootstrap run instead."
+  type        = string
+  default     = ""
+}
+
 variable "state_bucket_name" {
   description = "The foundation stack's Terraform state bucket (its `state_bucket` output) — this stack reads foundation's remote state from it for the KMS key ARNs + IAM policy. Same value you set in the backend block (versions.tf)."
   type        = string
