@@ -97,8 +97,12 @@ LH="$LH_OVERLAY=$LH_ADDR"
 
 # ── 0. build + distribute binaries ──────────────────────────────────────────
 if [[ "$SKIP_BUILD" -eq 0 ]]; then
-  echo "==> building harbor/pilot/gateway (linux/amd64, cgo-free)"
-  ( cd "$ROOT" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "$WORK/harbor" ./cmd/harbor \
+  # Build the React admin console SPA FIRST so harbor embeds it via -tags ui (the console is
+  # served by admin-api at /). Without -tags ui the binary ships the no-console fallback page.
+  echo "==> building admin console SPA (npm -> internal/adminui/dist)"
+  ( cd "$ROOT" && npm --prefix ui install --no-audit --no-fund && npm --prefix ui run build )
+  echo "==> building harbor (-tags ui)/pilot/gateway (linux/amd64, cgo-free)"
+  ( cd "$ROOT" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -tags ui -o "$WORK/harbor" ./cmd/harbor \
     && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "$WORK/pilot" ./cmd/pilot \
     && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "$WORK/gateway" ./cmd/gateway )
   # harbor/client are always EC2; the lighthouse + gateway are EC2 nodes only under their
