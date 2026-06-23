@@ -186,17 +186,29 @@ var dbPool struct {
 // dbFlags adds -driver/-dsn (and the Postgres pool-tuning flags) to a flagset and
 // returns the driver/dsn accessors. Default is local SQLite so dev needs zero setup;
 // the same flags slot in Postgres for prod.
+// envOr returns $key when set+non-empty, else def.
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
 func dbFlags(fs *flag.FlagSet) (*string, *string) {
-	driver := fs.String("driver", "sqlite", "sqlite|postgres")
-	dsn := fs.String("dsn", "", "data source name (default: ./harbor.db for sqlite)")
+	// Flag DEFAULTS come from the HARBOR_DB_* env vars when set (an explicit -flag still overrides), so
+	// an interactive shell on the control-plane node can run `harbor <cmd>` (any subcommand, positionals
+	// included) without retyping the connection. The systemd units pass explicit flags, so they are
+	// unaffected; tests with no env keep the original sqlite/empty defaults.
+	driver := fs.String("driver", envOr("HARBOR_DB_DRIVER", "sqlite"), "sqlite|postgres (default: $HARBOR_DB_DRIVER, else sqlite)")
+	dsn := fs.String("dsn", os.Getenv("HARBOR_DSN"), "data source name (default: $HARBOR_DSN; ./harbor.db for sqlite)")
 	// Postgres connection pool (ignored on SQLite; 0 => store.Open's built-in default).
 	dbPool.maxOpen = fs.Int("db-max-open-conns", 0, "postgres: max open connections (0 = default 20)")
 	dbPool.maxIdle = fs.Int("db-max-idle-conns", 0, "postgres: max idle connections (0 = default 5)")
 	dbPool.connMaxLifetime = fs.Duration("db-conn-max-lifetime", 0, "postgres: max connection lifetime, e.g. 30m (0 = default 30m)")
 	// Resolve the DB login from a (rotating) AWS Secrets Manager secret instead of the DSN, per
 	// connection — so no password is ever in the DSN/argv. Use with a passwordless postgres -dsn.
-	dbPool.secretARN = fs.String("db-secret-arn", "", "postgres: Secrets Manager ARN of the rotating DB credential (passwordless -dsn)")
-	dbPool.secretRegion = fs.String("db-secret-region", "", "postgres: region for -db-secret-arn (default: instance/SDK region)")
+	dbPool.secretARN = fs.String("db-secret-arn", os.Getenv("HARBOR_DB_SECRET_ARN"), "postgres: Secrets Manager ARN of the rotating DB credential (default: $HARBOR_DB_SECRET_ARN)")
+	dbPool.secretRegion = fs.String("db-secret-region", os.Getenv("HARBOR_DB_SECRET_REGION"), "postgres: region for -db-secret-arn (default: $HARBOR_DB_SECRET_REGION, else instance/SDK region)")
 	return driver, dsn
 }
 
