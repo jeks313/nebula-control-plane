@@ -81,6 +81,38 @@ resource "aws_iam_role_policy" "core_acme_token" {
   })
 }
 
+# ── Lighthouse cert rotation (Fargate lighthouse only) ───────────────────────
+# The Fargate lighthouse can't self-renew: core-api's host-renew is authed by the caller's
+# source overlay IP, which an off-box re-mint doesn't have. So the harbor box re-mints the
+# lighthouse cert against the CA (the core_kms_sign attachment above already covers the
+# signing), then re-injects it into the lighthouse secret and forces a new ECS deployment so
+# the container restarts onto the fresh cert. This grants EXACTLY those last two steps, scoped
+# to the lighthouse secret + service — driven by deploy/prod/lighthouse-rotate/ on a timer.
+# (No KMS statement: the lighthouse secret uses the default aws/secretsmanager key, so the
+# account's Get/Put is sufficient — unlike the Aurora secret's customer CMK above.)
+resource "aws_iam_role_policy" "core_lighthouse_rotate" {
+  count       = local.lh_fargate
+  name_prefix = "lighthouse-rotate-"
+  role        = aws_iam_role.core.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "ReInjectLighthouseCert"
+        Effect   = "Allow"
+        Action   = ["secretsmanager:GetSecretValue", "secretsmanager:PutSecretValue", "secretsmanager:DescribeSecret"]
+        Resource = [aws_secretsmanager_secret.lighthouse[0].arn]
+      },
+      {
+        Sid      = "RedeployLighthouseService"
+        Effect   = "Allow"
+        Action   = ["ecs:UpdateService", "ecs:DescribeServices"]
+        Resource = [aws_ecs_service.lighthouse[0].id]
+      },
+    ]
+  })
+}
+
 # ── EBS root-volume encryption (all nodes) ───────────────────────────────────
 # The instances already set root_block_device.encrypted=true (main.tf); pin a customer-
 # managed CMK so the at-rest key is controlled/rotated/audited like the Aurora + trust-root

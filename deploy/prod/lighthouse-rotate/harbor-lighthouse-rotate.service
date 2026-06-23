@@ -1,0 +1,13 @@
+[Unit]
+Description=Re-sign + re-inject the Fargate lighthouse nebula cert when it nears expiry
+Documentation=https://github.com/jeks313/nebula-control-plane/blob/main/deploy/prod/lighthouse-rotate/README.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# All auth (KMS sign, Secrets Manager, ECS, Aurora) is via the harbor instance role.
+ExecStart=/usr/local/bin/rotate-lighthouse-cert.sh /etc/nebula/lighthouse-rotate.env
+Nice=10
+# Re-signing is cheap and the script is internally idempotent (rotate-if-within), so a
+# transient failure just retries on the next timer tick — no restart loop needed.
