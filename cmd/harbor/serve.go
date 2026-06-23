@@ -189,6 +189,17 @@ func cmdCoreAPI(args []string) {
 		fatalf("core-api: signer: %v", err)
 	}
 	cfgPub, _ := cfgB.PublicKey()
+	// Allocator + revocation registry + central-block guard, shared by the heartbeat SELF-HEAL
+	// (repair a reaped-but-valid host) and the device reaper below — built once. The resolver-backed
+	// allocator re-claims an exact overlay IP cleanly; the registry is the live blocklist self-heal
+	// must consult before repairing; CentralBlock is the deterministic never-touch reserved block (R10).
+	selfHealAlloc, shErr := ipam.NewAllocator(s, ipam.Pool{Prefix: pool})
+	if shErr != nil {
+		fatalf("core-api: allocator: %v", shErr)
+	}
+	selfHealAlloc = selfHealAlloc.WithResolver(netblock.New(s.DB, pool, nil, selfHealAlloc, audit))
+	selfHealRevoke := revocation.New(s.DB, audit)
+	central := genesis.CentralBlock(pool)
 	api := coreapi.New(coreapi.Config{
 		Store: s, Signer: sg, ConfigBackend: cfgB, ConfigKeyID: wire.PubkeyHash(cfgPub),
 		CABundlePEM: caPEM, Lighthouses: parseLighthouses(*cf.lighthouse), LighthouseSource: cf.lighthouseSource(s), Policy: cf.policy(s),
@@ -199,6 +210,8 @@ func cmdCoreAPI(args []string) {
 		Pool:            pool, TunDev: *cf.tunDev, ListenPort: *cf.listenPort, CertLifetime: *cf.certLifetime,
 		NebulaVersion: *cf.nebulaVersion, NebulaSHA256: *cf.nebulaSHA256, NebulaURL: *cf.nebulaURL,
 		PilotVersion: *cf.pilotVersion, PilotSHA256: *cf.pilotSHA256, PilotURL: *cf.pilotURL,
+		// Heartbeat self-heal deps (nil-safe: self-heal is disabled if either is nil).
+		Revocation: selfHealRevoke, Allocator: selfHealAlloc, Central: central,
 	})
 	// Mesh-only observability: /metrics + /healthz + /readyz alongside the v1 API. The DB
 	// readiness probe is cached (1s) so an unauthenticated /readyz flood can't starve the
@@ -231,27 +244,18 @@ func cmdCoreAPI(args []string) {
 	}
 	wg.Add(1)
 	go func() { defer wg.Done(); sg.RunBreakerMetric(ctx, 15*time.Second) }()
-	// Device reaper (impl 2.12): reclaim leaked overlay IPs, prune stale heartbeats, and revoke
-	// (where still-live) hosts whose cert has lapsed beyond grace. core-api holds the allocator +
-	// revocation registry + audit, so it owns the reaper (admin-api/collect don't run it).
+	// Device reaper (impl 2.12): reclaim leaked overlay IPs and prune stale heartbeats for hosts whose
+	// cert has lapsed beyond grace (it NEVER reaps a valid cert and NEVER blocklists — off-boarding is
+	// an explicit revoke). core-api holds the allocator + audit, so it owns the reaper (admin-api/
+	// collect don't run it).
 	if !*reapDisable {
-		// Allocator + revocation registry the reaper mutates, built like the boot-seed/admin path:
-		// the resolver-backed allocator releases an IP cleanly; the registry blocklists a still-live
-		// cert under the silent trigger.
-		ralloc, rerr := ipam.NewAllocator(s, ipam.Pool{Prefix: pool})
-		if rerr != nil {
-			fatalf("core-api: reaper allocator: %v", rerr)
-		}
-		rreg := netblock.New(s.DB, pool, nil, ralloc, audit)
-		ralloc = ralloc.WithResolver(rreg)
-		// Central never-reap guard (R10): compute the reserved block DETERMINISTICALLY from the
-		// configured -pool — the pool's first /27, exactly what genesis/SeedNetblocks seed via
-		// genesis.CentralBlock. Deriving it from the pool (not a registry Resolve that can be
-		// absent during a boot-seed gap or a wiped netblocks table) keeps the guard ALWAYS ON, so a
-		// control-plane host with empty/malformed groups can never bypass both the group guard AND
-		// the central guard. If even the pool is somehow zero, FAIL CLOSED — refuse to start the
-		// reaper rather than run with the central guard off.
-		central := genesis.CentralBlock(pool)
+		// Reuse the allocator + revocation registry + central guard built above (shared with the
+		// heartbeat self-heal). The central never-reap guard (R10) is the pool's first /27, derived
+		// DETERMINISTICALLY from -pool (exactly what genesis/SeedNetblocks seed via
+		// genesis.CentralBlock) — always on, so a control-plane host with empty/malformed groups can
+		// never bypass both the group guard AND the central guard. If it could not be computed (a
+		// zero -pool), FAIL CLOSED: refuse to start the reaper rather than run with the guard off.
+		// (The reaper no longer revokes — it never calls the registry — but reaper.New still takes one.)
 		if !central.IsValid() {
 			fatalf("core-api: reaper central guard could not be computed from -pool %q; refusing to start the reaper (fail-closed) — fix -pool or set -reap-disable", pool.String())
 		}
@@ -261,7 +265,7 @@ func cmdCoreAPI(args []string) {
 			SilentAfter:     *reapSilentAfter,
 			DryRun:          *reapDryRun,
 		}
-		rp := reaper.New(s.DB, ralloc, revocation.New(s.DB, audit), audit, rcfg, central, ipam.ErrNotAllocated).WithLogger(log)
+		rp := reaper.New(s.DB, selfHealAlloc, selfHealRevoke, audit, rcfg, central, ipam.ErrNotAllocated).WithLogger(log)
 		mode := "ENABLED"
 		if *reapDryRun {
 			mode = "DRY-RUN (previewing only — mutates nothing)"
