@@ -191,8 +191,11 @@ func CompileHost(p Policy, hostGroups []string) Compiled {
 
 	// Baseline (invariant): cannot be removed by any policy.
 	if hg[GroupControlPlane] {
-		// Core must accept the mesh (its API auth is tunnel-identity, §4.2).
+		// Core must accept the mesh (its API auth is tunnel-identity, §4.2) and, as the trusted
+		// control plane, may reach any member. Open BOTH directions so a control-plane node never
+		// loses its own API ports or egress to drift / a default-deny policy.
 		c.Inbound = append(c.Inbound, nebulaconfig.Rule{Proto: "any", Port: "any", Host: "any"})
+		c.Outbound = append(c.Outbound, nebulaconfig.Rule{Proto: "any", Port: "any", Host: "any"})
 	} else {
 		// Every member can reach the control plane (renew/heartbeat).
 		c.Outbound = append(c.Outbound, nebulaconfig.Rule{Proto: "any", Port: "any", Group: GroupControlPlane})

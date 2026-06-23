@@ -6,8 +6,41 @@ import (
 
 	"github.com/jeks313/nebula-control-plane/internal/jws"
 	"github.com/jeks313/nebula-control-plane/internal/nebulaconfig"
+	"github.com/jeks313/nebula-control-plane/internal/policy"
 	"github.com/jeks313/nebula-control-plane/internal/signer"
 )
+
+// TestCompileFirewallControlPlaneInvariant: a control-plane host must ALWAYS get its invariant
+// firewall (inbound+outbound any/any/any) even with no published policy — otherwise pilot's
+// drift/renew config re-render would close harbor's own API ports and brick the control plane.
+// Non-control-plane hosts with nil policy keep the renderer default (nil), so clients are unaffected.
+func TestCompileFirewallControlPlaneInvariant(t *testing.T) {
+	fw := CompileFirewall(nil, []string{policy.GroupControlPlane})
+	if fw == nil {
+		t.Fatal("control-plane host with nil policy got no firewall (would brick under pilot)")
+	}
+	if !hasAnyAny(fw.Inbound) {
+		t.Errorf("control-plane inbound missing any/any/any: %+v", fw.Inbound)
+	}
+	if !hasAnyAny(fw.Outbound) {
+		t.Errorf("control-plane outbound missing any/any/any: %+v", fw.Outbound)
+	}
+	if got := CompileFirewall(nil, []string{"fleet"}); got != nil {
+		t.Errorf("non-control-plane host with nil policy should get nil firewall, got %+v", got)
+	}
+	if got := CompileFirewall(nil, nil); got != nil {
+		t.Errorf("groupless host with nil policy should get nil firewall, got %+v", got)
+	}
+}
+
+func hasAnyAny(rules []nebulaconfig.Rule) bool {
+	for _, r := range rules {
+		if r.Proto == "any" && r.Port == "any" && r.Host == "any" {
+			return true
+		}
+	}
+	return false
+}
 
 func TestSignVerifyRoundTrip(t *testing.T) {
 	b, err := signer.NewSoftwareBackend()
