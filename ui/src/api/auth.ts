@@ -98,12 +98,16 @@ export async function fetchProviders(): Promise<string[]> {
   }
 }
 
-// logout: POST (no CSRF required — it's mounted outside the CSRF wrapper), 204, no
-// redirect; the SPA routes itself back to the login screen.
+// logout: POST (no CSRF required — it's mounted outside the CSRF wrapper) to revoke the server
+// session + clear the cookies, THEN reload at the SPA root. AuthGate's /me then 401s (session gone)
+// and renders <Login/> with manual Sign in buttons. Do NOT redirect to loginUrl() — that hits the
+// server login endpoint, which immediately re-initiates SSO (Entra silently re-authenticates since
+// there's no SLO) and lands the user straight back in — the "signout just refreshes and comes back"
+// bug. window.location forces a full reload so in-memory auth state is dropped too.
 export async function logout(): Promise<void> {
   try {
     await fetch(`${AUTH_BASE}/logout`, { method: 'POST', credentials: 'same-origin' })
   } finally {
-    window.location.href = loginUrl({ returnTo: '/' })
+    window.location.href = '/'
   }
 }
