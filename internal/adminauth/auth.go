@@ -243,6 +243,18 @@ func (s *Service) handleCallback(w http.ResponseWriter, r *http.Request) {
 // (re-validated same-origin). FlowAuthenticators call this from their callback.
 func (s *Service) CompleteLogin(w http.ResponseWriter, r *http.Request, idp string, subj Subject, returnTo string) {
 	roles := s.cfg.RoleMapper.Roles(subj.Groups)
+	// Audit every console login at the one place IdP group membership becomes authority: who, via
+	// which IdP, the RAW IdP groups the assertion carried, and the Harbor roles they mapped to. This
+	// is the record for "why am I only a viewer?" (groups that matched no -role-map entry) and for
+	// admin-access auditing. Groups are identifiers (Entra group GUIDs / OIDC claims), not secrets.
+	s.cfg.Logger.Info("console login",
+		"idp", idp,
+		"principal", subj.Principal(),
+		"subject_id", subj.ID,
+		"groups", subj.Groups,
+		"roles", roles,
+		"mfa", subj.MFAAt != nil,
+	)
 	token, csrf, err := s.cfg.Store.Mint(r.Context(), subj, idp, roles, s.cfg.SessionTTL)
 	if err != nil {
 		s.fail(w, "login: mint session", err)
