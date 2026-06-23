@@ -112,13 +112,31 @@ func RenderNebulaConfig(b Bundle, caPath, certPath, keyPath string) ([]byte, err
 }
 
 // CompileFirewall compiles the central policy for a host's groups into the
-// bundle's signed firewall. nil policy -> nil firewall (Pilot keeps its default).
+// bundle's signed firewall. nil policy -> nil firewall (Pilot keeps its renderer
+// default), EXCEPT a control-plane host ALWAYS gets its invariant firewall (compiled
+// from an empty policy) so pilot's drift/renew config re-render can never close
+// harbor's own API ports — even before any policy is published. This is what lets a
+// control-plane node run under `pilot supervise` safely. Non-control-plane hosts are
+// unaffected (still nil -> renderer default), so clients keep their current firewall.
 func CompileFirewall(p *policy.Policy, groups []string) *Firewall {
 	if p == nil {
-		return nil
+		if !hasControlPlane(groups) {
+			return nil
+		}
+		c := policy.CompileHost(policy.Policy{}, groups) // baseline invariants only
+		return &Firewall{Inbound: c.Inbound, Outbound: c.Outbound}
 	}
 	c := policy.CompileHost(*p, groups)
 	return &Firewall{Inbound: c.Inbound, Outbound: c.Outbound}
+}
+
+func hasControlPlane(groups []string) bool {
+	for _, g := range groups {
+		if g == policy.GroupControlPlane {
+			return true
+		}
+	}
+	return false
 }
 
 // Sign serializes and signs a bundle with the config-signing key, returning the
