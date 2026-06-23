@@ -82,8 +82,9 @@ SSO_ISSUER="${SSO_ISSUER:-}"
 SSO_GROUPS_ATTR="${SSO_GROUPS_ATTR:-}"
 SSO_IDP_METADATA_URL="${SSO_IDP_METADATA_URL:-}"
 SSO_IDP_METADATA_FILE="${SSO_IDP_METADATA_FILE:-}"
-SSO_ENABLED=0
-[[ -n "$SSO_ACS_URL" ]] && SSO_ENABLED=1
+# SSO_ENABLED is computed AFTER the terraform-output fallback below (see "SSO knobs"), so the 5
+# static knobs can come durably from tfvars (var.sso_* -> outputs.tf) with env taking precedence —
+# a fresh bootstrap then reproduces the live enrollment-portal SSO without re-typing them.
 
 for t in terraform jq go npm ssh scp openssl aws session-manager-plugin; do command -v "$t" >/dev/null || { echo "missing tool: $t" >&2; exit 1; }; done
 [[ -f "$SSH_KEY" ]] || { echo "ssh private key not found: $SSH_KEY (set SSH_KEY=...)" >&2; exit 1; }
@@ -106,6 +107,17 @@ url_for() {
 echo "==> reading terraform outputs"
 OUT="$(terraform -chdir="$TFDIR" output -json)"
 val() { jq -r "$1 // \"\"" <<<"$OUT"; }
+# SSO knobs: env wins, else fall back to the durable terraform values (var.sso_* -> outputs.tf), so a
+# fresh bootstrap reproduces the live enrollment-portal SSO config without re-typing it. The 3 PEMs
+# (assertion + SP keypairs) are genesis-generated, never sourced here. SSO_IDP_METADATA_URL stays
+# env-only (no tf output). Presence of an ACS URL is the enable trigger (mirrors the gateway).
+SSO_ACS_URL="${SSO_ACS_URL:-$(val '.sso_acs_url.value')}"
+SSO_ENTITY_ID="${SSO_ENTITY_ID:-$(val '.sso_entity_id.value')}"
+SSO_ISSUER="${SSO_ISSUER:-$(val '.sso_issuer.value')}"
+SSO_GROUPS_ATTR="${SSO_GROUPS_ATTR:-$(val '.sso_groups_attr.value')}"
+SSO_IDP_METADATA_FILE="${SSO_IDP_METADATA_FILE:-$(val '.sso_idp_metadata_file.value')}"
+SSO_ENABLED=0
+[[ -n "$SSO_ACS_URL" ]] && SSO_ENABLED=1
 LH_IP="$(val '.public_ips.value.lighthouse')"
 HB_IP="$(val '.public_ips.value.harbor')"
 GW_IP="$(val '.public_ips.value.gateway')"          # off-mesh gateway EC2 node (empty when gateway_runtime=fargate)

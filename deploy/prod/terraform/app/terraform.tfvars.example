@@ -16,3 +16,13 @@ instance_type       = "t3.micro"
 # gateway_cidr      = "0.0.0.0/0"
 # gateway_port      = 8443
 # nebula_port       = 4242
+
+# Enrollment-portal SSO (ADR 0004). Leave all empty to keep SSO disabled (setting sso_acs_url is the
+# trigger). These make the SSO config durable so a fresh bootstrap reproduces it; the assertion + SP
+# keypairs are genesis-generated (never set here). sso_idp_metadata_file is the SECOND (portal) SAML
+# app's IdP federation-metadata XML on the machine running the bootstrap.
+# sso_acs_url           = "https://poc-gateway.mesh.failsafe.net:8443/v1/sso/acs"
+# sso_entity_id         = "https://poc-gateway.mesh.failsafe.net:8443/v1/sso/metadata"
+# sso_issuer            = "https://sts.windows.net/<tenant-id>/"
+# sso_groups_attr       = "http://schemas.microsoft.com/ws/2008/06/identity/claims/groups"
+# sso_idp_metadata_file = "/path/to/portal-app-federation-metadata.xml"
