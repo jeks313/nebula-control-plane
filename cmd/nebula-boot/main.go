@@ -28,6 +28,7 @@ const (
 	envHostKey    = "NCP_LH_HOST_KEY_PEM"
 	envNebulaPort = "NCP_LH_NEBULA_PORT"
 	envStatsPort  = "NCP_LH_STATS_PORT"
+	envAmRelay    = "NCP_LH_AM_RELAY"
 
 	nebulaBin = "/usr/local/bin/nebula"
 )
@@ -63,6 +64,16 @@ func prepare(getenv func(string) string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", envStatsPort, err)
 	}
+	// The lighthouse doubles as a Nebula relay (ADR 0006): off-cloud hosts behind symmetric
+	// NAT (e.g. an AWS managed NAT Gateway) can't hole-punch to private cloud nodes, so they
+	// relay through the publicly-reachable lighthouse instead. On by default since that is the
+	// lighthouse's whole point here; set NCP_LH_AM_RELAY=false to opt a lighthouse out.
+	amRelay := true
+	if v := strings.TrimSpace(getenv(envAmRelay)); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil { // accepts false/0/no... ; default stays true
+			amRelay = b
+		}
+	}
 
 	dir, err := os.MkdirTemp("", "nebula-boot")
 	if err != nil {
@@ -82,7 +93,7 @@ func prepare(getenv func(string) string) (string, error) {
 		}
 	}
 	configPath := filepath.Join(dir, "config.yml")
-	if err := os.WriteFile(configPath, []byte(renderConfig(dir, nebulaPort, statsPort)), 0o644); err != nil {
+	if err := os.WriteFile(configPath, []byte(renderConfig(dir, nebulaPort, statsPort, amRelay)), 0o644); err != nil {
 		return "", err
 	}
 	return configPath, nil
@@ -104,7 +115,7 @@ func port(s string, def int) (int, error) {
 // entrypoint's heredoc): cert paths under dir, UDP discovery on nebulaPort, and prometheus
 // stats on statsPort — the latter is the NLB's TCP health-check target (UDP target groups
 // can't be UDP-health-checked) and is internal-only (SG: NLB only).
-func renderConfig(dir string, nebulaPort, statsPort int) string {
+func renderConfig(dir string, nebulaPort, statsPort int, amRelay bool) string {
 	return fmt.Sprintf(`pki:
   ca: %[1]s/ca.crt
   cert: %[1]s/host.crt
@@ -112,6 +123,9 @@ func renderConfig(dir string, nebulaPort, statsPort int) string {
 static_host_map: {}
 lighthouse:
   am_lighthouse: true
+relay:
+  am_relay: %[4]t
+  use_relays: false
 listen:
   host: 0.0.0.0
   port: %[2]d
@@ -136,5 +150,5 @@ firewall:
     - port: any
       proto: any
       host: any
-`, dir, nebulaPort, statsPort)
+`, dir, nebulaPort, statsPort, amRelay)
 }
