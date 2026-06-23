@@ -269,22 +269,36 @@ func TestSilentTriggerOffByDefault(t *testing.T) {
 		return al, rev, rep
 	}
 
-	// OFF (default 0): not reaped.
+	// OFF (default 0): a still-valid, quiet cert is not reaped.
 	al, rev, rep := mk(0)
 	if rep.Reaped != 0 || len(al.released) != 0 || len(rev.added) != 0 {
-		t.Fatalf("silent OFF: reaped=%d released=%v revoked=%v, want NONE", rep.Reaped, al.released, rev.added)
+		t.Fatalf("silent OFF, valid cert: reaped=%d released=%v revoked=%v, want NONE", rep.Reaped, al.released, rev.added)
 	}
 
-	// ON (2d): reaped under the silent reason, and the still-valid cert is revoked.
+	// ON (2d): a silent host whose cert is STILL VALID is NEVER reaped and NEVER revoked — the fix.
+	// A quiet host with a live cert is presumed reachable-but-temporarily-unable-to-reach-Core, not
+	// abandoned; off-boarding is an explicit revoke, not a silence side effect.
 	al, rev, rep = mk(2 * 24 * time.Hour)
-	if rep.Reaped != 1 || rep.ByReason[ReasonSilent] != 1 {
-		t.Fatalf("silent ON: reaped=%d byReason=%v, want 1 silent", rep.Reaped, rep.ByReason)
+	if rep.Reaped != 0 || len(al.released) != 0 || len(rev.added) != 0 || rep.Revoked != 0 {
+		t.Fatalf("silent ON, valid cert: reaped=%d released=%v revoked=%v, want NONE (valid cert never reaped/revoked)",
+			rep.Reaped, al.released, rev.added)
 	}
-	if len(rev.added) != 1 || rev.added[0] != "deadbeef" {
-		t.Fatalf("silent ON: revoked=%v, want [deadbeef] (still-valid cert must be revoked)", rev.added)
+
+	// ON (2d) with an ALREADY-EXPIRED cert that is silent: reaped under silent — but NEVER revoked
+	// (the reaper no longer blocklists; an expired cert is already refused).
+	s := newDB(t)
+	cfg := Config{PersistentGrace: 7 * 24 * time.Hour, EphemeralGrace: time.Hour, SilentAfter: 2 * 24 * time.Hour}
+	seed(t, s.DB, host{name: "expired-quiet", ip: "100.64.0.51", fingerprint: "cafef00d",
+		certNotAfter: ago(8 * 24 * time.Hour), lastSeen: ago(3 * 24 * time.Hour)})
+	al2, rev2 := &fakeAlloc{}, &fakeRevoke{}
+	rp := build(s.DB, cfg, al2, rev2, (&auditRec{}).fn())
+	rp.notAlloc = nil
+	rep2, _ := rp.ReapOnce(context.Background())
+	if rep2.Reaped != 1 || rep2.ByReason[ReasonSilent] != 1 {
+		t.Fatalf("silent ON, expired cert: reaped=%d byReason=%v, want 1 silent", rep2.Reaped, rep2.ByReason)
 	}
-	if rep.Revoked != 1 {
-		t.Fatalf("silent ON: rep.Revoked=%d, want 1", rep.Revoked)
+	if len(rev2.added) != 0 || rep2.Revoked != 0 {
+		t.Fatalf("silent ON, expired cert: revoked=%v rep.Revoked=%d, want NONE (reaper never blocklists)", rev2.added, rep2.Revoked)
 	}
 }
 
@@ -293,6 +307,28 @@ func TestSilentTriggerOffByDefault(t *testing.T) {
 // TestReapActions: on a cert-expired reap the IP is released, the heartbeat row is deleted,
 // reaped_at + reap_reason are stamped, an audit entry is written, and the (already-expired) cert is
 // NOT revoked (moot).
+// TestConnectedHostNotReapedDespiteStaleCertNotAfter (the core fix): a host whose recorded
+// heartbeats.cert_not_after has lapsed past grace but whose last_seen is RECENT is heartbeating right
+// now — its recorded cert_not_after is a stale self-report (e.g. a fresh renew not yet re-reported),
+// not the truth — and MUST NOT be reaped, on the cert-expired path or the silent path.
+func TestConnectedHostNotReapedDespiteStaleCertNotAfter(t *testing.T) {
+	s := newDB(t)
+	cfg := Config{PersistentGrace: 7 * 24 * time.Hour, EphemeralGrace: time.Hour, SilentAfter: 2 * 24 * time.Hour}
+	seed(t, s.DB, host{name: "connected", ip: "100.64.0.55", fingerprint: "livefp",
+		certNotAfter: ago(10 * 24 * time.Hour), lastSeen: ago(time.Minute)})
+	al, rev := &fakeAlloc{}, &fakeRevoke{}
+	rp := build(s.DB, cfg, al, rev, (&auditRec{}).fn())
+	rp.notAlloc = nil
+	rep, err := rp.ReapOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Reaped != 0 || len(al.released) != 0 || len(rev.added) != 0 {
+		t.Fatalf("connected host: reaped=%d released=%v revoked=%v, want NONE (recent last_seen => live, never reap)",
+			rep.Reaped, al.released, rev.added)
+	}
+}
+
 func TestReapActions(t *testing.T) {
 	s := newDB(t)
 	cfg := Config{PersistentGrace: time.Hour, EphemeralGrace: time.Hour}
@@ -516,16 +552,19 @@ func TestStaleIssuedRowDoesNotDefeatGroupGuard(t *testing.T) {
 // trigger, one overlay_ip has two issued enrollments — a STALE fingerprint (lower id) and the LIVE
 // fingerprint (higher id) — with a still-valid cert gone silent past SilentAfter. The reaper must
 // act EXACTLY ONCE and revoke ONLY the LIVE (latest) fingerprint, never the stale, non-live one.
-func TestStaleIssuedRowSilentRevokesOnlyLiveFingerprint(t *testing.T) {
+// TestStaleIssuedRowReapedOnceNoRevoke (R18/R19): a host with multiple stale 'issued' enrollment rows
+// (re-enroll churn) at one overlay IP is acted on EXACTLY ONCE per pass (the latest-issued row is
+// authoritative), and — since the reaper no longer blocklists — NO fingerprint is ever revoked.
+func TestStaleIssuedRowReapedOnceNoRevoke(t *testing.T) {
 	s := newDB(t)
 	cfg := Config{PersistentGrace: 7 * 24 * time.Hour, EphemeralGrace: time.Hour, SilentAfter: 2 * 24 * time.Hour}
 	const ip = "100.64.0.101"
 	// STALE fingerprint (lower id), then the LIVE fingerprint (higher id = current identity).
 	addIssued(t, s.DB, "e-stale", "quiet-host", `[]`, ip, "STALEFP", false)
 	addIssued(t, s.DB, "e-live", "quiet-host", `[]`, ip, "LIVEFP", false)
-	// Cert still VALID (expires 10d out) but last seen 3d ago > 2d SilentAfter.
+	// Cert EXPIRED 8d ago and silent 3d (> 2d SilentAfter) -> reaped under silent, never revoked.
 	if err := s.DB.Exec(`INSERT INTO heartbeats (overlay_ip, device_name, cert_not_after, last_seen) VALUES (?,?,?,?)`,
-		ip, "quiet-host", ahead(10*24*time.Hour).UnixNano(), ago(3*24*time.Hour).UnixNano()).Error; err != nil {
+		ip, "quiet-host", ago(8*24*time.Hour).UnixNano(), ago(3*24*time.Hour).UnixNano()).Error; err != nil {
 		t.Fatal(err)
 	}
 	if err := s.DB.Exec(`INSERT INTO devices (name, created_at, reaped_at) VALUES (?,?,?)`, "quiet-host", 1, 0).Error; err != nil {
@@ -539,11 +578,11 @@ func TestStaleIssuedRowSilentRevokesOnlyLiveFingerprint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rep.Reaped != 1 || rep.ByReason[ReasonSilent] != 1 {
-		t.Fatalf("reaped=%d byReason=%v, want exactly 1 silent (host acted on once, not twice)", rep.Reaped, rep.ByReason)
+	if rep.Reaped != 1 {
+		t.Fatalf("reaped=%d, want exactly 1 (host acted on once despite two issued rows)", rep.Reaped)
 	}
-	if len(rev.added) != 1 || rev.added[0] != "LIVEFP" {
-		t.Fatalf("revoked=%v, want exactly [LIVEFP] (only the LIVE/latest fingerprint, never the stale one)", rev.added)
+	if len(rev.added) != 0 || rep.Revoked != 0 {
+		t.Fatalf("revoked=%v rep.Revoked=%d, want NONE (reaper never blocklists, even with a live fingerprint present)", rev.added, rep.Revoked)
 	}
 }
 

@@ -1,10 +1,11 @@
 // Package reaper turns Harbor's passive cert-expiry into ACTIVE reclamation (impl 2.12). On a
 // schedule it finds hosts that are gone — their issued cert has lapsed beyond a grace window, so
 // nebula already refuses them and they are off the mesh — reclaims their leaked overlay IP,
-// prunes their stale heartbeat (drops them from the fleet view), soft-marks the device reaped,
-// and (only where a still-valid cert is being reaped under the optional silent trigger) blocklists
-// the fingerprint. See docs/REAPER-DECISIONS.md (R1–R7) for the conservative defaults this
-// enforces.
+// prunes their stale heartbeat (drops them from the fleet view), and soft-marks the device reaped.
+// It NEVER blocklists a cert: both triggers require the cert to be ALREADY EXPIRED (so blocklisting
+// is moot), and revoking a still-VALID cert was the bug that knocked live-but-quiet hosts off the
+// mesh. Off-boarding a host is a separate, explicit revoke (the off-board-must-revoke contract). See
+// docs/REAPER-DECISIONS.md (R1–R7) for the conservative defaults this enforces.
 //
 // It is DESTRUCTIVE + AUTOMATED, so correctness and the safety guards are paramount:
 //
@@ -45,8 +46,9 @@ const (
 	// expired cert is already refused).
 	ReasonCertExpired = "cert-expired"
 	// ReasonSilent — the optional aggressive trigger (R2, off unless -reap-silent-after is set):
-	// the host has been silent past SilentAfter even though its cert is still valid. Here the
-	// revoke MATTERS (the cert would still handshake), so it is blocklisted at reap.
+	// the host has been silent past SilentAfter AND its cert is already expired. A still-valid cert
+	// is never reaped on silence alone (it may just be unable to reach Core yet). The reaper does NOT
+	// blocklist here — the cert is already expired and refused.
 	ReasonSilent = "silent"
 )
 
@@ -83,9 +85,10 @@ type Releaser interface {
 	Release(ctx context.Context, ip netip.Addr) error
 }
 
-// Revoker blocklists a cert fingerprint (*revocation.Registry satisfies it). The reaper calls it
-// only when reaping a host whose cert is still valid (the silent trigger). ErrAlreadyActive is
-// tolerated by the caller as success (the fingerprint is already blocklisted).
+// Revoker blocklists a cert fingerprint (*revocation.Registry satisfies it). RETAINED for wiring
+// stability but NO LONGER CALLED by the reaper: reaping never blocklists (both triggers reap only
+// already-expired certs; off-boarding a live host is a separate explicit revoke). Kept so the
+// constructor + deploy wiring are undisturbed and a future deliberate-offboard path can reuse it.
 type Revoker interface {
 	Add(ctx context.Context, fingerprint, reason, actor string) (revocation.Row, error)
 }
@@ -106,8 +109,9 @@ type Config struct {
 	EphemeralGrace  time.Duration
 
 	// SilentAfter is the optional aggressive trigger (R2; 0 = OFF, the default). When > 0, a host
-	// silent (last_seen older than this) is ALSO a candidate even with a still-valid cert — and
-	// that reap revokes the fingerprint (the cert would still handshake).
+	// silent (last_seen older than this) is ALSO a candidate — but ONLY if its cert is already
+	// KNOWN-EXPIRED (cert_not_after set and lapsed). A still-valid (or unknown-expiry) cert is never
+	// reaped on silence. The reap does NOT revoke (an expired cert is already refused).
 	SilentAfter time.Duration
 
 	// DryRun performs NONE of the mutations (R5): it logs + audits a would-reap line per candidate
@@ -202,12 +206,19 @@ func (c candidate) reason(now time.Time, cfg Config) (string, bool) {
 	if c.Ephemeral {
 		grace = cfg.EphemeralGrace
 	}
-	// R1: cert expired beyond grace (the host is already off the mesh).
-	if c.CertNotAfter != 0 && c.CertNotAfter < nowNs-grace.Nanoseconds() {
+	// R1: cert expired beyond grace AND the host is actually silent. A recent last_seen means the host
+	// is heartbeating right now — its recorded cert_not_after is a stale self-report, not the truth —
+	// so it must NEVER be reaped. A genuinely-expired cert can't complete a handshake, so a real
+	// expired host goes silent on its own; requiring silence here just refuses to trust a stale value.
+	if c.CertNotAfter != 0 && c.CertNotAfter < nowNs-grace.Nanoseconds() &&
+		c.LastSeen < nowNs-grace.Nanoseconds() {
 		return ReasonCertExpired, true
 	}
-	// R2: optional silent trigger (still-valid cert, but gone quiet past the window).
-	if cfg.SilentAfter > 0 && c.LastSeen < nowNs-cfg.SilentAfter.Nanoseconds() {
+	// R2: optional silent trigger — only ever reaps an ALREADY-EXPIRED cert. A still-valid cert is
+	// NEVER reaped, regardless of silence: a quiet host with a live cert is presumed reachable but
+	// temporarily unable to reach Core (e.g. a NAT/relay gap), not abandoned. Deliberate off-boarding
+	// is an explicit revoke, never a side effect of silence (the off-board-must-revoke contract).
+	if cfg.SilentAfter > 0 && c.CertNotAfter != 0 && !c.certStillValid(now) && c.LastSeen < nowNs-cfg.SilentAfter.Nanoseconds() {
 		return ReasonSilent, true
 	}
 	return "", false
@@ -284,7 +295,7 @@ func (r *Reaper) ReapOnce(ctx context.Context) (ReapReport, error) {
 
 // dryRunOne logs + audits a would-reap line and counts it; it mutates NOTHING (R5).
 func (r *Reaper) dryRunOne(ctx context.Context, c candidate, reason string, now time.Time, rep *ReapReport) {
-	wouldRevoke := reason == ReasonSilent && c.certStillValid(now)
+	wouldRevoke := false // the reaper never blocklists a cert any more (see reapOne step 2)
 	r.log.Info("reaper DRY-RUN: would reap host",
 		"device", c.DeviceName, "overlay_ip", c.OverlayIP, "reason", reason, "would_revoke", wouldRevoke)
 	r.recordAudit(ctx, "reaper-would-reap", c.DeviceName, fmt.Sprintf(
@@ -317,19 +328,12 @@ func (r *Reaper) reapOne(ctx context.Context, c candidate, reason string, now ti
 		r.log.Warn("reaper: unparseable overlay IP, skipping release", "device", c.DeviceName, "overlay_ip", c.OverlayIP)
 	}
 
-	// 2. Revoke ONLY when the cert is still valid (R3) — moot/skipped for an already-expired cert.
+	// 2. The reaper NEVER revokes/blocklists a cert. Both triggers now require the cert to be ALREADY
+	// EXPIRED (R1 cert-expired; R2 silent gated on !certStillValid), and an expired cert is already
+	// refused by every peer — so blocklisting it is moot. Blocklisting a STILL-VALID cert (the old
+	// silent behaviour) was the bug that knocked live hosts off the mesh. Deliberate off-boarding is a
+	// separate, explicit revoke (the off-board-must-revoke contract), never a side effect of reaping.
 	revoked := false
-	if c.certStillValid(now) && c.Fingerprint != "" {
-		switch _, err := r.revoke.Add(ctx, c.Fingerprint, "reaped: "+reason, actor); {
-		case err == nil || errors.Is(err, revocation.ErrAlreadyActive):
-			// Already blocklisted is success (idempotent) — the cert is on the blocklist either way.
-			revoked = true
-			rep.Revoked++
-		default:
-			r.log.Warn("reaper: revoke failed", "device", c.DeviceName, "fingerprint", c.Fingerprint, "err", err)
-			failed = true
-		}
-	}
 
 	// 3. Delete the stale heartbeat row so the host drops from the fleet view.
 	if err := r.db.WithContext(ctx).Exec("DELETE FROM heartbeats WHERE overlay_ip = ?", c.OverlayIP).Error; err != nil {
@@ -385,10 +389,12 @@ func (r *Reaper) loadCandidates(ctx context.Context) ([]candidate, error) {
 	}
 	certExpiredCutoff := now - minGrace.Nanoseconds()
 
-	// Build the WHERE: cert expired beyond the widest grace, OR (if silent trigger on) silent past
-	// the window. The two ?-args differ by branch, so assemble args alongside.
-	where := "h.cert_not_after != 0 AND h.cert_not_after < ?"
-	args := []any{certExpiredCutoff}
+	// Build the WHERE: cert expired beyond the widest grace AND silent beyond it (reason() now also
+	// requires last_seen-stale on the cert-expired path, so the pre-filter mirrors it to stay a
+	// superset — a host heartbeating now is never even loaded), OR (if silent trigger on) silent past
+	// the window. The ?-args differ by branch, so assemble args alongside.
+	where := "h.cert_not_after != 0 AND h.cert_not_after < ? AND h.last_seen < ?"
+	args := []any{certExpiredCutoff, certExpiredCutoff}
 	if r.cfg.SilentAfter > 0 {
 		where = "(" + where + ") OR h.last_seen < ?"
 		args = append(args, now-r.cfg.SilentAfter.Nanoseconds())
