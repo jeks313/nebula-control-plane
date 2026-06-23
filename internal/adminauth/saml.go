@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"encoding/xml"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -226,9 +227,11 @@ func (a *SAMLAuthenticator) subjectFrom(as *saml.Assertion) Subject {
 	if as.Subject != nil && as.Subject.NameID != nil {
 		subj.ID = as.Subject.NameID.Value
 	}
+	var seen []string // observability: every attribute the IdP actually sent
 	for _, st := range as.AttributeStatements {
 		for _, attr := range st.Attributes {
 			vals := attrValues(attr)
+			seen = append(seen, fmt.Sprintf("%s|%s=%q", attr.Name, attr.FriendlyName, vals))
 			switch {
 			case attr.Name == a.groupsAttr || attr.FriendlyName == a.groupsAttr:
 				subj.Groups = append(subj.Groups, vals...)
@@ -239,6 +242,10 @@ func (a *SAMLAuthenticator) subjectFrom(as *saml.Assertion) Subject {
 			}
 		}
 	}
+	// Observability: dump every assertion attribute (Name|FriendlyName="values") + which one we read
+	// as groups. This is THE diagnostic for "groups=null": shows whether the groups claim is absent,
+	// under a different attribute name, or an Entra group-overage link — at a glance, no debugger.
+	slog.Info("saml assertion attributes", "groups_attr", a.groupsAttr, "groups_found", len(subj.Groups), "attrs", seen)
 	if subj.Email == "" && strings.Contains(subj.ID, "@") {
 		subj.Email = subj.ID // NameID is commonly the email
 	}
