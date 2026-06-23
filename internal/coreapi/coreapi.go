@@ -21,8 +21,10 @@ import (
 
 	"github.com/jeks313/nebula-control-plane/internal/bundle"
 	"github.com/jeks313/nebula-control-plane/internal/enrollment"
+	"github.com/jeks313/nebula-control-plane/internal/ipam"
 	"github.com/jeks313/nebula-control-plane/internal/jws"
 	"github.com/jeks313/nebula-control-plane/internal/policy"
+	"github.com/jeks313/nebula-control-plane/internal/revocation"
 	"github.com/jeks313/nebula-control-plane/internal/rollout"
 	"github.com/jeks313/nebula-control-plane/internal/signer"
 	"github.com/jeks313/nebula-control-plane/internal/store"
@@ -130,6 +132,16 @@ type Config struct {
 	// proactive renewal). 0 disables it.
 	RenewCommandThreshold time.Duration
 	Now                   func() time.Time
+
+	// Revocation + Allocator + Central back the heartbeat self-heal: a host presenting a VALID,
+	// non-revoked, non-reserved cert whose device/heartbeat/IPAM rows were reclaimed (e.g. a reaper
+	// false-positive or a hard-deleted enrollment) repairs itself on its next heartbeat instead of
+	// 403-ing forever. Identity is taken STRICTLY from the surviving enrollment row keyed by the
+	// authenticated source overlay IP — never from the request body. When Revocation or Allocator is
+	// nil, self-heal is DISABLED and a missing device 403s exactly as before.
+	Revocation *revocation.Registry
+	Allocator  *ipam.Allocator
+	Central    netip.Prefix
 }
 
 // Server is the mesh-only Core API.
@@ -227,6 +239,147 @@ func (s *Server) device(ctx context.Context, r *http.Request) (enrollment.Enroll
 	return e, true
 }
 
+// allocationOwner returns the device NAME currently holding overlay IP ip in IPAM (overlay_ip is
+// UNIQUE among live allocations, so at most one). Used by self-heal to fail closed when the IP was
+// re-handed to a DIFFERENT device.
+func (s *Server) allocationOwner(ctx context.Context, ip string) (string, bool) {
+	var name string
+	err := s.cfg.Store.DB.WithContext(ctx).Raw(
+		"SELECT d.name FROM ip_allocations a JOIN devices d ON d.id = a.device_id WHERE a.ip = ?", ip).
+		Scan(&name).Error
+	if err != nil || name == "" {
+		return "", false
+	}
+	return name, true
+}
+
+// trySelfHeal repairs the control-plane rows for a host that presents a VALID, non-revoked,
+// non-reserved cert (authenticated by its source overlay IP) but whose device/heartbeat/IPAM state
+// was reclaimed (a reaper false-positive, or a hard-deleted enrollment). Identity is taken STRICTLY
+// from the surviving enrollment row keyed by the authenticated overlay IP — NEVER from the request
+// body (a host must not assert its own name/groups/IP). Every guardrail fails CLOSED; on refusal the
+// caller keeps the 403. Disabled (always false) unless Revocation + Allocator are wired.
+func (s *Server) trySelfHeal(ctx context.Context, r *http.Request) (enrollment.Enrollment, bool) {
+	if s.cfg.Revocation == nil || s.cfg.Allocator == nil {
+		return enrollment.Enrollment{}, false
+	}
+	ip := r.RemoteAddr
+	if h, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		ip = h
+	}
+	refuse := func(reason string) (enrollment.Enrollment, bool) {
+		// LOG, never audit: a persistently-refused host heartbeats every ~60s, so an audit-chain write
+		// here (global mutex + advisory lock + serialized INSERT) would be an unbounded, lock-contending
+		// DB write. The hash-chained audit records the SUCCESSFUL heal (a real state change) only.
+		slog.Warn("heartbeat self-heal refused", "overlay_ip", ip, "reason", reason)
+		return enrollment.Enrollment{}, false
+	}
+
+	// 1. Authoritative identity: the LATEST enrollment at this overlay IP, any status. No row at all
+	//    means nothing to repair from — never fabricate identity from the body; keep the 403 silently
+	//    (an unknown source IP is not worth an audit row on every beat).
+	var e enrollment.Enrollment
+	if err := s.cfg.Store.DB.WithContext(ctx).
+		Where("overlay_ip = ?", ip).Order("id DESC").First(&e).Error; err != nil {
+		return enrollment.Enrollment{}, false
+	}
+
+	// 2. Cert validity from the STORED cert — never the host-reported cert_not_after.
+	c, _, perr := cert.UnmarshalCertificateFromPEM(e.CertPEM)
+	if perr != nil || !c.NotAfter().After(s.now()) {
+		return refuse(`{"reason":"cert-expired-or-unparseable"}`)
+	}
+
+	// 3. Revocation/blocklist — independent of expiry, a live DB read so a not-yet-propagated
+	//    blocklisting still bars the heal. Fail closed if the read fails.
+	if e.Fingerprint != "" {
+		fps, ferr := s.cfg.Revocation.ActiveFingerprints(ctx)
+		if ferr != nil {
+			return refuse(`{"reason":"revocation-read-failed"}`)
+		}
+		for _, fp := range fps {
+			if fp == e.Fingerprint {
+				return refuse(fmt.Sprintf(`{"reason":"revoked","fingerprint":%q}`, e.Fingerprint))
+			}
+		}
+	}
+
+	// 4. Control-plane / reserved guard — never silently re-home a reserved-group or central-block
+	//    identity off the heartbeat path (defense-in-depth; a CP host should never have been reaped).
+	var groups []string
+	_ = json.Unmarshal([]byte(e.Groups), &groups)
+	if policy.GrantsReservedGroup(groups) {
+		return refuse(`{"reason":"reserved-group"}`)
+	}
+	addr, aerr := netip.ParseAddr(ip)
+	if aerr != nil {
+		return refuse(`{"reason":"bad-overlay-ip"}`)
+	}
+	if s.cfg.Central.IsValid() && s.cfg.Central.Contains(addr) {
+		return refuse(`{"reason":"central-netblock"}`)
+	}
+
+	// 5. Re-assert the EXACT overlay IP. ErrAddrTaken is ambiguous: already-healed (same device, ok),
+	//    or the IP was re-handed to a DIFFERENT device — then FAIL CLOSED (two live certs must never
+	//    share one overlay IP).
+	switch err := s.cfg.Allocator.AllocateSpecific(ctx, e.DeviceName, addr, "self-heal"); {
+	case err == nil:
+	case errors.Is(err, ipam.ErrAddrTaken):
+		if owner, ok := s.allocationOwner(ctx, ip); !ok || owner != e.DeviceName {
+			return refuse(fmt.Sprintf(`{"reason":"ip-conflict","owner":%q}`, owner))
+		}
+	default:
+		return refuse(fmt.Sprintf(`{"reason":"ipam-error","err":%q}`, err.Error()))
+	}
+
+	// 6. Re-mark the enrollment issued if it isn't (by id, idempotent — never INSERT a duplicate
+	//    issued row, which would confuse device()'s id-DESC pick and the reaper's MAX(id) join).
+	if e.Status != enrollment.StatusIssued {
+		_ = s.cfg.Store.DB.WithContext(ctx).Model(&enrollment.Enrollment{}).
+			Where("id = ? AND status != ?", e.ID, enrollment.StatusIssued).
+			Update("status", enrollment.StatusIssued)
+	}
+
+	// 7. Clear the reaper soft-mark (CAS) so the next reaper pass doesn't see a live-but-flagged host.
+	_ = s.cfg.Store.DB.WithContext(ctx).Exec(
+		"UPDATE devices SET reaped_at = 0, reap_reason = '' WHERE name = ? AND reaped_at != 0", e.DeviceName)
+
+	_, _ = s.cfg.Store.AppendAudit(ctx, "system", "heartbeat-self-heal", ip,
+		fmt.Sprintf(`{"device":%q,"fingerprint":%q}`, e.DeviceName, e.Fingerprint))
+
+	// 8. Re-resolve via the normal issued-only path; the caller's heartbeat UPSERT then recreates the
+	//    heartbeats row, restoring fleet visibility.
+	return s.device(ctx, r)
+}
+
+// reconcileAllocation re-asserts dev's overlay-IP allocation if it went missing — e.g. a reaper
+// false-positive released it while the host stayed live with an 'issued' enrollment (so device()
+// resolves it and the self-heal gate never fires). Runs on every heartbeat; the common case is one
+// cheap indexed lookup (overlay_ip is UNIQUE among live allocations). Fail-CLOSED on a genuine
+// conflict (a DIFFERENT device now holds the IP): never clobber — the data plane still works off the
+// cert — but surface it. Logs, never audits: this is per-beat, so audit-chain writes would be
+// unbounded. No-op (always) when the allocator is unwired.
+func (s *Server) reconcileAllocation(ctx context.Context, dev enrollment.Enrollment) {
+	if s.cfg.Allocator == nil || dev.OverlayIP == "" {
+		return
+	}
+	if owner, ok := s.allocationOwner(ctx, dev.OverlayIP); ok {
+		if owner != dev.DeviceName {
+			slog.Warn("heartbeat: overlay IP held by a different device while a live host heartbeats on it",
+				"overlay_ip", dev.OverlayIP, "current_owner", owner, "device", dev.DeviceName)
+		}
+		return // already allocated (to us, or — logged — to another device; never clobber)
+	}
+	addr, err := netip.ParseAddr(dev.OverlayIP)
+	if err != nil {
+		return
+	}
+	if err := s.cfg.Allocator.AllocateSpecific(ctx, dev.DeviceName, addr, "heartbeat-reconcile"); err != nil && !errors.Is(err, ipam.ErrAddrTaken) {
+		slog.Warn("heartbeat: re-assert overlay IP allocation failed",
+			"overlay_ip", dev.OverlayIP, "device", dev.DeviceName, "err", err)
+	}
+}
+
 // handleHeartbeat implements POST /v1/heartbeat (4.6): persist the device's
 // reported state (fleet visibility) and return the typed command channel.
 func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
@@ -235,9 +388,20 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 
 	dev, ok := s.device(ctx, r)
 	if !ok {
-		wire.WriteError(w, wire.CodeAccountNotAllowed, "no enrolled device at this overlay address")
-		return
+		// A host presenting a VALID, non-revoked cert (authenticated by its source overlay IP) whose
+		// control-plane rows were reclaimed repairs itself here instead of 403-ing forever. Disabled
+		// (always !ok) unless self-heal is wired; identity is taken strictly from the surviving
+		// enrollment row, never the request body.
+		if dev, ok = s.trySelfHeal(ctx, r); !ok {
+			wire.WriteError(w, wire.CodeAccountNotAllowed, "no enrolled device at this overlay address")
+			return
+		}
 	}
+	// Reconcile the device's overlay-IP allocation on EVERY beat. A reaper false-positive (or any
+	// reclaim) can release a live host's IP while its enrollment stays 'issued' — so device() still
+	// resolves it and the self-heal gate above never fires, yet the freed IP could be re-handed to a
+	// SECOND device. Re-assert it idempotently so one overlay IP can never back two live certs.
+	s.reconcileAllocation(ctx, dev)
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBody))
 	if err != nil {
 		wire.WriteError(w, wire.CodeInvalidRequest, "request too large")
@@ -430,6 +594,15 @@ func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
 		Where("id = ?", dev.ID).Update("fingerprint", fp).Error; err != nil {
 		wire.WriteError(w, wire.CodeInternal, "renew bookkeeping failed")
 		return
+	}
+	// Advance the heartbeat row's recorded cert_not_after to the freshly-issued expiry so the reaper
+	// sees the new validity immediately, instead of lagging (and possibly mis-judging the host
+	// cert-expired) until the host's next heartbeat re-reports it. Best-effort: a host that has never
+	// heartbeated has no row (RowsAffected 0 is fine), and a failure here must not fail the renew —
+	// the next heartbeat reconciles it.
+	if res := s.cfg.Store.DB.WithContext(ctx).Exec(
+		"UPDATE heartbeats SET cert_not_after = ? WHERE overlay_ip = ?", notAfter.UnixNano(), dev.OverlayIP); res.Error != nil {
+		_, _ = s.cfg.Store.AppendAudit(ctx, "system", "renew-heartbeat-cert-update-error", dev.OverlayIP, res.Error.Error())
 	}
 	_, _ = s.cfg.Store.AppendAudit(ctx, "renew:"+dev.DeviceName, "cert-renewed", dev.DeviceName,
 		fmt.Sprintf(`{"overlay_ip":%q,"fingerprint":%q}`, dev.OverlayIP, fp))
