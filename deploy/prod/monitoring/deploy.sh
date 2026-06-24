@@ -39,7 +39,7 @@ ADMIN_PORT="${ADMIN_PORT:-443}" # MUST match bootstrap-genesis.sh's ADMIN_PORT d
 LH_STATS_PORT="${LH_STATS_PORT:-4280}"
 COLLECT_OBS_PORT="${COLLECT_OBS_PORT:-9445}" # harbor collect /metrics over the overlay (matches bootstrap-genesis.sh)
 
-for t in terraform jq go ssh scp aws session-manager-plugin; do command -v "$t" >/dev/null || { echo "missing tool: $t" >&2; exit 1; }; done
+for t in terraform jq go ssh scp tar aws session-manager-plugin; do command -v "$t" >/dev/null || { echo "missing tool: $t" >&2; exit 1; }; done
 [[ -f "$SSH_KEY" ]] || { echo "ssh key not found: $SSH_KEY (set SSH_KEY=...)" >&2; exit 1; }
 [[ -f "$PIN" ]] || { echo "config-signing pin not found: $PIN — run deploy/prod/bootstrap-genesis.sh first" >&2; exit 1; }
 [[ "${GF_ADMIN_PASSWORD:-changeme}" != "changeme" ]] || echo "WARNING: GF_ADMIN_PASSWORD not set — Grafana admin password will be 'changeme'. Set it + re-run for production." >&2
@@ -47,6 +47,16 @@ for t in terraform jq go ssh scp aws session-manager-plugin; do command -v "$t" 
 SSH_OPTS=(-i "$SSH_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=30 -o ServerAliveInterval=15 -o BatchMode=yes)
 rsh() { local h="$1"; shift; ssh "${SSH_OPTS[@]}" "$SSH_USER@$h" "$@"; }
 rcp() { scp "${SSH_OPTS[@]}" "$@"; }
+# Copy a LOCAL directory tree to <instance-id>:<remote-parent>/<basename> via a tar stream.
+# `scp -r` over the SSM ProxyCommand silently drops nested subdirs (it dropped
+# grafana/provisioning/dashboards/, so the lighthouse-rotation dashboard never shipped) — pipe
+# tar through ssh instead, which preserves the full tree. The remote dir is cleaned first so a
+# re-deploy can't leave stale files behind. Usage: rcp_dir <local-dir> <instance-id> <remote-parent>
+rcp_dir() {
+  local src="$1" id="$2" parent="$3" base; base="$(basename "$src")"
+  tar -C "$(dirname "$src")" -cf - "$base" \
+    | rsh "$id" "rm -rf '$parent/$base' && mkdir -p '$parent' && tar -C '$parent' -xf -"
+}
 
 echo "==> reading terraform outputs"
 OUT="$(terraform -chdir="$TFDIR" output -json)"
@@ -154,7 +164,7 @@ YAML
 # ── 4. deploy the stack (docker compose) ────────────────────────────────────
 echo "==> installing docker + bringing up Prometheus/Alertmanager/Grafana"
 rcp "$HERE/alerts.yml" "$HERE/alertmanager.yml" "$HERE/loki-config.yml" "$HERE/compose.yml" "$WORK/prometheus.yml" "$SSH_USER@$MON_ID:/tmp/"
-rcp -r "$HERE/grafana" "$SSH_USER@$MON_ID:/tmp/grafana"
+rcp_dir "$HERE/grafana" "$MON_ID" /tmp # tar stream: scp -r over SSM drops nested provisioning/dashboards/
 rsh "$MON_ID" "set -e
   # AL2023 ships docker (NOT podman); install it + enable the daemon. The docker compose v2
   # plugin isn't packaged either, so fetch the static binary into the cli-plugins dir.
