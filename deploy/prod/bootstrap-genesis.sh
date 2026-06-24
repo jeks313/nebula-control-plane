@@ -761,10 +761,17 @@ CORE_SSO_FLAGS=""
 # here; the resulting commands run on the harbor box inside the core/collect-start rsh below — so
 # EVERY lighthouse (1..N) is in the registry as the -lighthouse-db authoritative source before any
 # -lighthouse-db service starts (an empty/partial registry would drop lighthouses from bundles).
+# Match by NAME, not the derived overlay IP. The overlay IP from LH_OVERLAYS is a deterministic
+# GUESS (lighthouse-N -> 10.44.0.(N+1)); on a populated mesh the real IP can differ (day-2
+# lighthouses probe past leaked clients — e.g. lighthouse-2 landed on .6, not .3). Keying the
+# "already registered?" check on the guessed IP made recover re-add the lighthouse at the WRONG IP
+# (a bogus duplicate, even colliding with a client). So: if this lighthouse NAME already has an
+# ACTIVE registry row (any IP — the registry/Aurora is authoritative + persists across recover),
+# leave it; only add (with the derived IP) when the name is genuinely absent, i.e. a fresh genesis.
 LH_REGISTER_BLOCK=""
 for i in "${!LH_NAMES[@]}"; do
-  LH_REGISTER_BLOCK+="  harbor lighthouse list $HARBOR_DB_FLAGS 2>/dev/null | grep -Fq '${LH_OVERLAYS[$i]}' || harbor lighthouse add $HARBOR_DB_FLAGS -ip '${LH_OVERLAYS[$i]}' -addrs '${LH_PUBADDRS[$i]}' -name '${LH_NAMES[$i]}' -actor alice
-  harbor lighthouse list $HARBOR_DB_FLAGS 2>/dev/null | grep -Fq '${LH_OVERLAYS[$i]}' || { echo 'FATAL: lighthouse ${LH_OVERLAYS[$i]} (${LH_NAMES[$i]}) not registered — bundles under -lighthouse-db would carry it as missing' >&2; exit 1; }
+  LH_REGISTER_BLOCK+="  harbor lighthouse list $HARBOR_DB_FLAGS 2>/dev/null | awk -v n='${LH_NAMES[$i]}' '\$2==\"active\" && \$3==n{f=1} END{exit !f}' || harbor lighthouse add $HARBOR_DB_FLAGS -ip '${LH_OVERLAYS[$i]}' -addrs '${LH_PUBADDRS[$i]}' -name '${LH_NAMES[$i]}' -actor alice
+  harbor lighthouse list $HARBOR_DB_FLAGS 2>/dev/null | awk -v n='${LH_NAMES[$i]}' '\$2==\"active\" && \$3==n{f=1} END{exit !f}' || { echo 'FATAL: lighthouse ${LH_NAMES[$i]} has no active registry entry — bundles under -lighthouse-db would carry it as missing' >&2; exit 1; }
 "
 done
 
