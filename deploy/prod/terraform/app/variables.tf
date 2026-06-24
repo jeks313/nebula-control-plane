@@ -152,6 +152,17 @@ variable "lighthouse_image" {
   default     = ""
 }
 
+variable "lighthouse_count" {
+  description = "Number of Fargate lighthouse identities to run (lighthouse_runtime=fargate). 2 (the default) gives HA: each lighthouse has its own cert/overlay-IP + its own NLB+EIP, so rotating one (an ECS redeploy) never blacks out discovery — the others keep serving. The genesis bootstrap mints + registers each. 1 = the original single lighthouse. Ignored for the ec2 runtime."
+  type        = number
+  default     = 2
+
+  validation {
+    condition     = var.lighthouse_count >= 1 && var.lighthouse_count <= 5
+    error_message = "lighthouse_count must be between 1 and 5."
+  }
+}
+
 variable "lighthouse_fargate_cpu" {
   description = "Fargate task CPU units for the lighthouse (256 = 0.25 vCPU)."
   type        = number
