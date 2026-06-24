@@ -125,6 +125,8 @@ usage:
   harbor lighthouse rotate-cert -ca-cert PEM [-name N] [-lifetime D] [-rotate-if-within D]
                            [-backend kms -kms-key-id ID] [db flags]   re-sign the lighthouse
                            cert IN PLACE (same IP/groups/key, new expiry) — Fargate cert rotation
+  harbor lighthouse rotation-record -name N -result ok|skip|fail [-error MSG] [db flags]
+                           record a rotation run — the timer writes liveness for ncp_lighthouse_rotation_*
   harbor blocklist add     -fingerprint FP | -device OVERLAY [-reason R] -actor A
                            [-canary K] [-wave-size W] [-observe D] [-no-rollout] [db flags]
   harbor blocklist remove  -fingerprint FP | -device OVERLAY -actor A [db flags]   (lifts the block)

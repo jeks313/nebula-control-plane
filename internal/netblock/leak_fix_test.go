@@ -3,14 +3,18 @@ package netblock
 import (
 	"context"
 	"testing"
+
+	"github.com/jeks313/nebula-control-plane/internal/ipam"
 )
 
 // Regression tests for the central-block leak: ordinary clients received overlay IPs inside
 // the reserved central /27 (aws-client@10.44.0.3, .4/.5). Two compounding defects, both fixed:
 //   (a) the default-fill skip list (Carves) was named-only, so a 'default' range overlapping
 //       'central' would bleed into it;
-//   (b) a join-source name resolving to a reserved block (e.g. "central") returned central's
-//       /27 instead of falling back to 'default'.
+//   (b) a join-source binding that named a reserved block (e.g. "central") allocated from it.
+//       The guard lives at ALLOCATION (ipam.Allocate falls a reserved-resolved binding back to
+//       'default'); resolution stays TRUTHFUL (central resolves to itself) so allocation
+//       PROVENANCE (netblockIDContaining) still records central's real id.
 
 func seedCentralDefault(t *testing.T, r *Registry) {
 	t.Helper()
@@ -58,9 +62,10 @@ func TestCarvesIncludesReservedCentral(t *testing.T) {
 	}
 }
 
-// (b) A join-source name resolving to a RESERVED block falls back to 'default' (bounded,
-// Named=false) — reserved control-plane space is never handed out by name-resolution.
-func TestResolveReservedNameFallsBackToDefault(t *testing.T) {
+// (b1) Resolution is TRUTHFUL: a reserved name resolves to ITS OWN block, flagged Reserved — so
+// allocation provenance (netblockIDContaining) records central's real id. The leak guard is NOT
+// here; it's in ipam.Allocate (see b2).
+func TestResolveReservedIsTruthful(t *testing.T) {
 	ctx := context.Background()
 	r := newRegistry(t, "10.44.0.0/16", nil)
 	seedCentralDefault(t, r)
@@ -69,20 +74,44 @@ func TestResolveReservedNameFallsBackToDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveFull(central): %v", err)
 	}
-	if full.CIDR != mustP("10.44.64.0/18") {
-		t.Fatalf("ResolveFull(central).CIDR = %s, want default 10.44.64.0/18 (reserved must not resolve to its /27)", full.CIDR)
+	if full.CIDR != mustP("10.44.0.0/27") || !full.Reserved || full.Named {
+		t.Fatalf("ResolveFull(central) = %+v; want central /27, Reserved=true, Named=false (truthful)", full)
 	}
-	if full.Named {
-		t.Error("the fallback must be Named=false (bounded default, not auto-grow-eligible)")
+	if cidr, err := r.Resolve(ctx, "central"); err != nil || cidr != mustP("10.44.0.0/27") {
+		t.Fatalf("Resolve(central) = %s, %v; want the truthful central /27", cidr, err)
 	}
-	if cidr, err := r.Resolve(ctx, "central"); err != nil || cidr != mustP("10.44.64.0/18") {
-		t.Fatalf("Resolve(central) = %s, %v; want default 10.44.64.0/18", cidr, err)
-	}
-	// A real named block still resolves to itself (the guard is reserved-only).
+	// A named block resolves to itself (Named=true, not Reserved).
 	if _, err := r.Add(ctx, "office", mustP("10.44.20.0/24"), "office", "op"); err != nil {
 		t.Fatal(err)
 	}
-	if full, err := r.ResolveFull(ctx, "office"); err != nil || full.CIDR != mustP("10.44.20.0/24") || !full.Named {
-		t.Fatalf("ResolveFull(office) = %+v, %v; want the named 10.44.20.0/24", full, err)
+	if full, err := r.ResolveFull(ctx, "office"); err != nil || full.CIDR != mustP("10.44.20.0/24") || !full.Named || full.Reserved {
+		t.Fatalf("ResolveFull(office) = %+v, %v; want named 10.44.20.0/24 (Named, not Reserved)", full, err)
+	}
+}
+
+// (b2) The leak guard, end-to-end: a join-source binding that names the reserved 'central' block
+// ALLOCATES from 'default', never from central — but the reserved block is still allocatable via
+// the control-plane path (AllocateSpecific) for provenance/genesis.
+func TestAllocateFromReservedNameFallsBackToDefault(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	r := New(s.DB, mustP("10.44.0.0/16"), nil, &fakeAllocs{}, nil)
+	seedCentralDefault(t, r)
+
+	alloc, err := ipam.NewAllocator(s, ipam.Pool{Prefix: mustP("10.44.0.0/16")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	alloc = alloc.WithResolver(r)
+
+	ip, err := alloc.Allocate(ctx, "client-x", "central", "token")
+	if err != nil {
+		t.Fatalf("allocate (central-bound): %v", err)
+	}
+	if mustP("10.44.0.0/27").Contains(ip) {
+		t.Fatalf("client allocated %s INSIDE the reserved central /27 — the leak is not closed", ip)
+	}
+	if !mustP("10.44.64.0/18").Contains(ip) {
+		t.Fatalf("client allocated %s; want it in the 'default' block 10.44.64.0/18", ip)
 	}
 }

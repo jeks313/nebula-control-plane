@@ -373,13 +373,10 @@ func (r *Registry) Resolve(ctx context.Context, name string) (netip.Prefix, erro
 	if name == "" {
 		name = NameDefault
 	}
-	// A join source must never draw from a RESERVED (control-plane) block such as
-	// 'central'; a reserved binding falls back to 'default' exactly like an unknown name
-	// (mirrors ResolveFull). Reserved space is allocated only via the control-plane path.
-	if row, ok := c.rows[name]; ok && !(row.Kind == KindReserved && name != NameDefault) {
-		return c.byName[name], nil
+	if p, ok := c.byName[name]; ok {
+		return p, nil // truthful (central resolves to itself); the join-source guard is in ipam.Allocate
 	}
-	// Unknown/deleted/reserved name -> fall back to 'default'.
+	// Unknown/deleted name -> fall back to 'default'.
 	if name != NameDefault {
 		r.logFallback(name)
 		if p, ok := c.byName[NameDefault]; ok {
@@ -443,14 +440,6 @@ func (r *Registry) ResolveFull(ctx context.Context, name string) (ipam.Resolved,
 		name = NameDefault
 	}
 	row, ok := c.rows[name]
-	if ok && row.Kind == KindReserved && name != NameDefault {
-		// A join source must NEVER draw from a RESERVED (control-plane) block such as
-		// 'central' — that is what let a bound name of "central" hand out 10.44.0.3/.4/.5
-		// to ordinary clients. Treat a reserved binding as a misconfiguration and fall
-		// back to 'default' (like an unknown name); reserved space is allocated only via
-		// the control-plane path (genesis / AllocateSpecific), never name-resolution.
-		ok = false
-	}
 	if !ok {
 		// Unknown/deleted name -> fall back to 'default' (D20). The resolved block is
 		// 'default' (kind=default), so Named=false: an unknown binding must NOT become
@@ -467,11 +456,16 @@ func (r *Registry) ResolveFull(ctx context.Context, name string) (ipam.Resolved,
 			return ipam.Resolved{}, fmt.Errorf("%w: %q", ErrNotFound, name)
 		}
 	}
+	// Resolution is TRUTHFUL — a reserved block (central) resolves to ITSELF, with Reserved set.
+	// This keeps provenance correct (netblockIDContaining resolves central's real id). Preventing a
+	// JOIN SOURCE from allocating from a reserved block is the allocator's job (ipam.Allocate's
+	// resolve(), which falls a Reserved result back to 'default') — not resolution's.
 	return ipam.Resolved{
-		ID:    row.ID,
-		Name:  row.Name,
-		CIDR:  row.Prefix(),
-		Named: row.Kind == KindNamed,
+		ID:       row.ID,
+		Name:     row.Name,
+		CIDR:     row.Prefix(),
+		Named:    row.Kind == KindNamed,
+		Reserved: row.Kind == KindReserved,
 	}, nil
 }
 

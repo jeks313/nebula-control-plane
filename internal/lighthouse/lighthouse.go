@@ -58,6 +58,62 @@ func (r Row) Addrs() []string {
 	return out
 }
 
+// RotationStatus is the run-record the scheduled cert-rotation writes per lighthouse, so
+// rotation liveness is observable (ncp_lighthouse_rotation_* metrics). Times are unix seconds.
+type RotationStatus struct {
+	Name          string `gorm:"column:name;primaryKey"`
+	LastRunAt     int64  `gorm:"column:last_run_at"`     // any run (ok|skip|fail) — drives the "stale timer" alert
+	LastResult    string `gorm:"column:last_result"`     // ok | skip | fail
+	LastRotatedAt int64  `gorm:"column:last_rotated_at"` // last ACTUAL rotation (0 = never)
+	LastError     string `gorm:"column:last_error"`
+	RunsOK        int64  `gorm:"column:runs_ok"`
+	RunsSkip      int64  `gorm:"column:runs_skip"`
+	RunsFail      int64  `gorm:"column:runs_fail"`
+}
+
+// TableName pins the table.
+func (RotationStatus) TableName() string { return "lighthouse_rotations" }
+
+// RecordRotation upserts a lighthouse's rotation run-record. result is "ok" (rotated +
+// re-injected + ECS stable), "skip" (cert not yet due), or "fail" (any error; errMsg is the
+// detail). It always stamps last_run_at (so a dead timer is detectable) and bumps the matching
+// runs_* counter; "ok" also stamps last_rotated_at. Driven by the rotation timer via
+// `harbor lighthouse rotation-record`.
+func (r *Registry) RecordRotation(ctx context.Context, name, result, errMsg string) error {
+	if name == "" {
+		return errors.New("lighthouse: rotation-record requires a name")
+	}
+	switch result {
+	case "ok", "skip", "fail":
+	default:
+		return fmt.Errorf("lighthouse: rotation-record result must be ok|skip|fail (got %q)", result)
+	}
+	now := r.now().Unix()
+	var rs RotationStatus
+	err := r.db.WithContext(ctx).Where("name = ?", name).First(&rs).Error
+	create := errors.Is(err, gorm.ErrRecordNotFound)
+	if err != nil && !create {
+		return err
+	}
+	rs.Name = name
+	rs.LastRunAt = now
+	rs.LastResult = result
+	rs.LastError = errMsg
+	switch result {
+	case "ok":
+		rs.RunsOK++
+		rs.LastRotatedAt = now
+	case "skip":
+		rs.RunsSkip++
+	case "fail":
+		rs.RunsFail++
+	}
+	if create {
+		return r.db.WithContext(ctx).Create(&rs).Error
+	}
+	return r.db.WithContext(ctx).Save(&rs).Error
+}
+
 // AuditFunc appends one row to the hash-chained audit log.
 type AuditFunc func(ctx context.Context, actor, action, target, details string) error
 

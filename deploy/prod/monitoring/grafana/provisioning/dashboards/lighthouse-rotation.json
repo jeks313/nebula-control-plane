@@ -1,0 +1,87 @@
+{
+  "uid": "ncp-lighthouse-rotation",
+  "title": "Lighthouse Cert Rotation",
+  "tags": ["ncp", "lighthouse", "rotation"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "1m",
+  "time": { "from": "now-90d", "to": "now" },
+  "templating": { "list": [] },
+  "annotations": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Cert time-to-expiry (by lighthouse) — BACKSTOP",
+      "description": "Seconds until each lighthouse's issued cert expires. The rotation renews at ~90d; red <14d / yellow <60d means rotation has FAILED. Lighthouses are not fleet members, so this is the only signal.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "min by (name) (ncp_lighthouse_cert_expiry_seconds)", "legendFormat": "{{name}}", "instant": true }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "yellow", "value": 1209600 }, { "color": "green", "value": 5184000 } ] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "background", "graphMode": "none", "textMode": "value_and_name", "orientation": "auto" }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Time since last rotation run (by lighthouse) — LIVENESS",
+      "description": "Age of the last rotation-check run (any result). The timer is monthly; red >35d means it may be disabled/wedged. No value until the first run records.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "time() - max by (name) (ncp_lighthouse_rotation_last_run_seconds)", "legendFormat": "{{name}}", "instant": true }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 2592000 }, { "color": "red", "value": 3024000 } ] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "background", "graphMode": "none", "textMode": "value_and_name", "orientation": "auto" }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Cert time-to-expiry over time",
+      "description": "Each lighthouse cert's remaining lifetime. Healthy = a sawtooth: decays toward ~90d, then jumps back to ~1y when the rotation renews.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 7 },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "ncp_lighthouse_cert_expiry_seconds", "legendFormat": "{{name}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 8 } }, "overrides": [] }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Rotation runs by result",
+      "description": "Cumulative rotation-check runs per lighthouse by outcome (ok = rotated+deployed, skip = not due, fail = errored).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 7 },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" }, "expr": "sum by (name, result) (ncp_lighthouse_rotation_runs_total)", "legendFormat": "{{name}} {{result}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 8, "stepInterval": "" } }, "overrides": [] }
+    },
+    {
+      "id": 5,
+      "type": "logs",
+      "title": "Rotation run logs (harbor-lighthouse-rotate.service)",
+      "description": "The rotation timer's run output, shipped harbor journald -> Alloy -> Loki. last_error detail for any fail lands here.",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 15 },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "loki", "uid": "loki" }, "expr": "{job=\"systemd-journal\", unit=\"harbor-lighthouse-rotate.service\"}" }
+      ],
+      "options": { "showTime": true, "wrapLogMessage": true, "sortOrder": "Descending", "enableLogDetails": true }
+    }
+  ]
+}

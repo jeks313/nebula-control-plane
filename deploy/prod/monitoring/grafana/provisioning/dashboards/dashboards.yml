@@ -1,0 +1,12 @@
+# Grafana dashboard provisioning — load the JSON dashboards shipped alongside this provider
+# (the whole grafana/ tree is mounted read-only at /etc/grafana/provisioning by compose.yml and
+# rsync'd to the node by deploy.sh).
+apiVersion: 1
+providers:
+  - name: ncp
+    type: file
+    disableDeletion: false
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/provisioning/dashboards
+      foldersFromFilesStructure: false

@@ -113,10 +113,11 @@ type NetblockGrower interface {
 // Resolved is the netblock a name resolved to: its id (for provenance), CIDR, and
 // whether it is a 'named' (auto-growable) block.
 type Resolved struct {
-	ID    int64
-	Name  string
-	CIDR  netip.Prefix
-	Named bool // true for kind=named (eligible for auto-grow)
+	ID       int64
+	Name     string
+	CIDR     netip.Prefix
+	Named    bool // true for kind=named (eligible for auto-grow)
+	Reserved bool // true for kind=reserved (control-plane, e.g. central) — never fillable by a join source
 }
 
 // IDResolver, when implemented by the resolver, lets the allocator record the
@@ -355,7 +356,21 @@ func (a *Allocator) purgeExpiredQuarantine(ctx context.Context) error {
 func (a *Allocator) resolve(ctx context.Context, netblockName string) (Resolved, error) {
 	if a.resolver != nil {
 		if idr, ok := a.resolver.(IDResolver); ok {
-			return idr.ResolveFull(ctx, netblockName)
+			res, err := idr.ResolveFull(ctx, netblockName)
+			if err != nil {
+				return Resolved{}, err
+			}
+			// Join-source guard: a binding that names a RESERVED (control-plane) block such as
+			// 'central' must NOT allocate from it — fall back to 'default'. ResolveFull stays
+			// TRUTHFUL (so provenance via netblockIDContaining still resolves central's real id);
+			// the guard lives HERE, on the allocation path, not in resolution. Genesis/AllocateSpecific
+			// pin a specific IP and never go through here, so the control plane can still use central.
+			if res.Reserved {
+				if def, derr := idr.ResolveFull(ctx, NameDefault); derr == nil {
+					res = def
+				}
+			}
+			return res, nil
 		}
 		cidr, err := a.resolver.Resolve(ctx, netblockName)
 		if err != nil {

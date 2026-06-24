@@ -22,7 +22,7 @@ import (
 // dispatched before any shared parse.
 func cmdLighthouse(args []string) {
 	if len(args) < 1 {
-		fatalf("lighthouse: want add|replace|remove|list|mint|rotate-cert")
+		fatalf("lighthouse: want add|replace|remove|list|mint|rotate-cert|rotation-record")
 	}
 	sub := args[0]
 	switch sub {
@@ -30,6 +30,8 @@ func cmdLighthouse(args []string) {
 		cmdLighthouseMint(args[1:])
 	case "rotate-cert":
 		cmdLighthouseRotateCert(args[1:])
+	case "rotation-record":
+		cmdLighthouseRotationRecord(args[1:])
 	case "add", "replace", "remove", "list":
 		cmdLighthouseRegistry(args)
 	default:
