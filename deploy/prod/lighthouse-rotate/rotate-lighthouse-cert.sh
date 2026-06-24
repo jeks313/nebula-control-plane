@@ -78,6 +78,17 @@ for tuple in $LIGHTHOUSES; do
         --cluster "$CLUSTER" --service "$SERVICE" --force-new-deployment >/dev/null; then
     echo "  ERROR: ecs redeploy $SERVICE (secret WAS updated; container will pick up the new cert on next restart)" >&2; rc=1; continue
   fi
-  echo "  rotated: $NAME secret updated + ECS redeploy forced"
+
+  # Blip-free HA: a lighthouse redeploy restarts its task (~30-60s of that one being down).
+  # With >1 lighthouse, hosts keep discovering via the others ONLY if we restart strictly one
+  # at a time — so wait for THIS service to reach steady state before touching the next one. If
+  # it doesn't stabilize, STOP (don't redeploy the next lighthouse — that could down two at once);
+  # the still-due ones just rotate on the next timer tick.
+  echo "  redeploy forced; waiting for $SERVICE to reach steady state before the next lighthouse..."
+  if ! aws ecs wait services-stable --region "$REGION" --cluster "$CLUSTER" --services "$SERVICE"; then
+    echo "  ERROR: $SERVICE did not stabilize in the wait window — STOPPING before any other lighthouse so we never restart two at once. Re-run once it's healthy." >&2
+    rc=1; break
+  fi
+  echo "  rotated: $NAME secret updated, ECS redeployed, service stable"
 done
 exit $rc

@@ -139,6 +139,26 @@ LIGHTHOUSE_RUNTIME="$(val '.lighthouse_runtime.value')"; LIGHTHOUSE_RUNTIME="${L
 NAME_PREFIX="$(val '.name_prefix.value')"; NAME_PREFIX="${NAME_PREFIX:-ncp}"
 HARBOR_CONFIG_ARN="$(val '.harbor_config_secret_arn.value')" # durable harbor identity+config bundle (Secrets Manager)
 TF_REGION="$(val '.region.value')"
+# Lighthouse set (HA). For the fargate runtime the app stack stands up N INDEPENDENT lighthouses
+# (var.lighthouse_count) — each with its own cert/overlay-IP AND its own NLB+EIP — so rotating one
+# (an ECS redeploy) never blacks out discovery: the others keep serving. Derive (name, overlay_ip,
+# public_addr) for each from the lighthouse_addrs output. Overlay IPs are deterministic + reserved
+# in the central block: lighthouse-1 = $LH_OVERLAY (10.44.0.1), lighthouse-N>1 = 10.44.0.(N+1)
+# (skips harbor's .2). EC2 (or older state without the output) keeps the single lighthouse-1.
+LH_ADDRS_JSON="$(val '.lighthouse_addrs.value')"
+[[ -z "$LH_ADDRS_JSON" || "$LH_ADDRS_JSON" == "null" ]] && LH_ADDRS_JSON="{}"
+declare -a LH_NAMES LH_OVERLAYS LH_PUBADDRS
+if [[ "$LIGHTHOUSE_RUNTIME" == "fargate" && "$LH_ADDRS_JSON" != "{}" ]]; then
+  while IFS=$'\t' read -r _ln _la; do
+    [[ -z "$_ln" ]] && continue
+    _n="${_ln##*-}" # lighthouse-2 -> 2
+    if [[ "$_n" == 1 ]]; then _lip="$LH_OVERLAY"; else _lip="10.44.0.$((_n + 1))"; fi
+    LH_NAMES+=("$_ln"); LH_OVERLAYS+=("$_lip"); LH_PUBADDRS+=("$_la")
+  done < <(jq -r 'to_entries[] | "\(.key)\t\(.value)"' <<<"$LH_ADDRS_JSON" | sort)
+else
+  LH_NAMES=("lighthouse-1"); LH_OVERLAYS=("$LH_OVERLAY"); LH_PUBADDRS=("$LH_ADDR")
+fi
+LH_COUNT="${#LH_NAMES[@]}"
 # SSH/scp to the nodes ride SSM Session Manager — the private nodes (harbor/client/monitoring) have
 # no public IP. Append the ProxyCommand now that the region is known; rsh/rcp target INSTANCE IDs
 # (HB_ID/CL_ID/LH_ID/GW_ID), and SSH key auth still happens over the SSM tunnel (the EC2 key pair).
@@ -368,13 +388,20 @@ else
 fi
 echo "    got lighthouse host pubkey"
 
-# ── 2. harbor: init its OWN mesh key, with the lighthouse in static_host_map ─
-echo "==> [harbor] pilot init (control-plane node key)"
+# ── 2. harbor: init its OWN mesh key, with ALL lighthouses in static_host_map ─
+# All N lighthouses go in harbor's initial static_host_map so it can reach discovery before its
+# first signed bundle (under pilot, the bundle — built from the -lighthouse-db registry below —
+# then carries the authoritative set). Built locally from the derived lighthouse arrays.
+echo "==> [harbor] pilot init (control-plane node key); ${LH_COUNT} lighthouse(s) in static_host_map"
+LH_VALUES_YAML="lighthouses:"
+for i in "${!LH_NAMES[@]}"; do
+  LH_VALUES_YAML+="
+  - overlay_ip: ${LH_OVERLAYS[$i]}
+    public_addrs: [\"${LH_PUBADDRS[$i]}\"]"
+done
 rsh "$HB_ID" "set -e
   sudo tee /etc/nebula-values.yml >/dev/null <<YAML
-lighthouses:
-  - overlay_ip: $LH_OVERLAY
-    public_addrs: [\"$LH_ADDR\"]
+$LH_VALUES_YAML
 YAML
   sudo pilot init -dir /etc/nebula -values /etc/nebula-values.yml >/dev/null
   sudo cat /etc/nebula/host.pub" > "$WORK/hb-host.pub"
@@ -490,6 +517,34 @@ else
   echo "    lighthouse image pushed, secret populated, ECS deployment forced (tun.disabled nebula behind the UDP NLB)"
   fi
 fi # end MODE=genesis (steps 1-4); in recover, harbor was restored from the bundle above
+
+# ── 4b. additional lighthouses (HA): mint identity + inject secret + deploy ──
+# lighthouse-1 was minted by genesis (step 3) + deployed (step 4). For HA (lighthouse_count>1) the
+# app stack also stood up lighthouse-2..N — each its OWN NLB+EIP + an EMPTY config secret. Stand
+# each up here: generate a keypair off-box, `harbor lighthouse mint` ON the harbor box (pins the
+# reserved overlay IP, issues in group lighthouse, records the enrollment so rotate-cert finds it),
+# then inject its secret {ca,cert,key} + force its ECS deploy. Genesis only — on recover the extra
+# lighthouses' certs (Secrets Manager) + enrollments (Aurora) survive. They're added to the
+# discovery registry alongside lighthouse-1 in the -lighthouse-db step below (which runs in both modes).
+if [[ "$MODE" != "recover" && "$LIGHTHOUSE_RUNTIME" == "fargate" && "$LH_COUNT" -gt 1 ]]; then
+  for i in "${!LH_NAMES[@]}"; do
+    [[ "$i" == 0 ]] && continue # lighthouse-1 handled by genesis + step 4
+    ln="${LH_NAMES[$i]}"; lip="${LH_OVERLAYS[$i]}"
+    echo "==> [lighthouse/fargate] $ln @ $lip: mint identity + inject secret + deploy (HA)"
+    "$WORK/pilot" init -am-lighthouse -dir "$WORK/lhkeys-$ln" >/dev/null
+    rcp "$WORK/lhkeys-$ln/host.pub" "$SSH_USER@$HB_ID:/tmp/$ln.pub"
+    # Mint ON the harbor box (it holds the CA backend + DB); the new cert is mint's stdout.
+    LH_CRT="$(rsh "$HB_ID" "harbor lighthouse mint $HARBOR_DB_FLAGS $ROTATE_BACKEND -ca-cert ~/ncp/genesis/ca.crt -name '$ln' -ip '$lip' -in-pub /tmp/$ln.pub -pool '$POOL' 2>/dev/null; rm -f /tmp/$ln.pub")"
+    [[ -n "$LH_CRT" ]] || { echo "FATAL: minting $ln produced no cert" >&2; exit 1; }
+    LH_SECRET_JSON="$(jq -n --rawfile ca "$WORK/ca.crt" --arg crt "$LH_CRT" --rawfile key "$WORK/lhkeys-$ln/host.key" \
+      '{ca_crt_pem:$ca, host_crt_pem:$crt, host_key_pem:$key}')"
+    aws secretsmanager put-secret-value --region "$TF_REGION" \
+      --secret-id "${NAME_PREFIX}-${ln}-config" --secret-string "$LH_SECRET_JSON" >/dev/null
+    aws ecs update-service --region "$TF_REGION" \
+      --cluster "${NAME_PREFIX}-lighthouse" --service "${NAME_PREFIX}-${ln}" --force-new-deployment >/dev/null
+    echo "    $ln minted ($lip), secret populated, ECS deploy forced"
+  done
+fi
 
 # ── 5. harbor: install control-plane cert + join the mesh ───────────────────
 echo "==> [harbor] install control-plane cert + start nebula UNDER PILOT (joins at $HARBOR_OVERLAY; heartbeats + auto-renews)"
@@ -671,6 +726,17 @@ fi # end step 7 mint+gateway (genesis only)
 CORE_SSO_FLAGS=""
 [[ "$SSO_ENABLED" -eq 1 ]] && CORE_SSO_FLAGS="-sso-assert-pub \$G/sso-assert.pub -usertrust-db"
 
+# Build the lighthouse register+verify commands (one per HA lighthouse). Values expand LOCALLY
+# here; the resulting commands run on the harbor box inside the core/collect-start rsh below — so
+# EVERY lighthouse (1..N) is in the registry as the -lighthouse-db authoritative source before any
+# -lighthouse-db service starts (an empty/partial registry would drop lighthouses from bundles).
+LH_REGISTER_BLOCK=""
+for i in "${!LH_NAMES[@]}"; do
+  LH_REGISTER_BLOCK+="  harbor lighthouse list $HARBOR_DB_FLAGS 2>/dev/null | grep -Fq '${LH_OVERLAYS[$i]}' || harbor lighthouse add $HARBOR_DB_FLAGS -ip '${LH_OVERLAYS[$i]}' -addrs '${LH_PUBADDRS[$i]}' -name '${LH_NAMES[$i]}' -actor alice
+  harbor lighthouse list $HARBOR_DB_FLAGS 2>/dev/null | grep -Fq '${LH_OVERLAYS[$i]}' || { echo 'FATAL: lighthouse ${LH_OVERLAYS[$i]} (${LH_NAMES[$i]}) not registered — bundles under -lighthouse-db would carry it as missing' >&2; exit 1; }
+"
+done
+
 echo "==> [harbor] register the gateway + start the pull collector"
 rcp "$WORK/gw-collect.crt" "$SSH_USER@$HB_ID:/tmp/gw-collect.crt"
 rsh "$HB_ID" "set -e
@@ -684,16 +750,13 @@ rsh "$HB_ID" "set -e
   fi
   harbor gateway list $HARBOR_DB_FLAGS 2>/dev/null | grep -Fq '$GW_COLLECT' \
     || { echo 'FATAL: gateway gw1 ($GW_COLLECT) not registered with harbor — the collector would pull nothing' >&2; exit 1; }
-  # Register the lighthouse in the DB registry (idempotent) so the -lighthouse-db services below read
-  # it as the AUTHORITATIVE source (like the gateway list) and 'harbor lighthouse list' shows it; the
-  # static -lighthouse flag stays as the read-error fallback. VERIFY it landed BEFORE starting any
-  # -lighthouse-db service — an EMPTY registry under -lighthouse-db yields bundles with NO lighthouse
-  # (the static fallback only triggers on a DB read ERROR, not on an empty result).
-  if ! harbor lighthouse list $HARBOR_DB_FLAGS 2>/dev/null | grep -Fq '$LH_OVERLAY'; then
-    harbor lighthouse add $HARBOR_DB_FLAGS -ip '$LH_OVERLAY' -addrs '$LH_ADDR' -name lighthouse-1 -actor alice
-  fi
-  harbor lighthouse list $HARBOR_DB_FLAGS 2>/dev/null | grep -Fq '$LH_OVERLAY' \
-    || { echo 'FATAL: lighthouse $LH_OVERLAY not registered — bundles under -lighthouse-db would carry no lighthouse' >&2; exit 1; }
+  # Register EVERY lighthouse (1..N) in the DB registry (idempotent) so the -lighthouse-db services
+  # below read them as the AUTHORITATIVE source (like the gateway list) and 'harbor lighthouse list'
+  # shows them; the static -lighthouse flag stays as the read-error fallback. VERIFY each landed
+  # BEFORE starting any -lighthouse-db service — an EMPTY registry under -lighthouse-db yields bundles
+  # with NO lighthouse (the static fallback only triggers on a DB read ERROR, not on an empty result).
+  # The per-lighthouse add/verify lines were built locally as \$LH_REGISTER_BLOCK.
+$LH_REGISTER_BLOCK
   sudo systemctl reset-failed ncp-collect ncp-core ncp-admin 2>/dev/null || true
   # Run AS ec2-user (owns ~/ncp; on the SQLite backend this keeps harbor.db writable by the CLI/console).
   # -blocklist-db: bundles issued for NEW gateway enrollments carry the live pki.blocklist
@@ -779,8 +842,16 @@ if [[ "$LIGHTHOUSE_RUNTIME" == "fargate" ]]; then
   rcp "$LR/rotate-lighthouse-cert.sh"        "$SSH_USER@$HB_ID:/tmp/rotate-lighthouse-cert.sh"
   rcp "$LR/harbor-lighthouse-rotate.service" "$SSH_USER@$HB_ID:/tmp/harbor-lighthouse-rotate.service"
   rcp "$LR/harbor-lighthouse-rotate.timer"   "$SSH_USER@$HB_ID:/tmp/harbor-lighthouse-rotate.timer"
-  # One tuple per lighthouse: name:secret:cluster:service. Add tuples for multi-lighthouse HA.
-  LH_ROTATE_TUPLES="lighthouse-1:${NAME_PREFIX}-lighthouse-config:${NAME_PREFIX}-lighthouse:${NAME_PREFIX}-lighthouse"
+  # One tuple per lighthouse: name:secret:cluster:service. The rotation script health-gates between
+  # them (one redeploy at a time) so an HA rotation is blip-free. Names match the terraform rname:
+  # lighthouse-1 keeps the legacy ncp-lighthouse(-config); the rest are ncp-<name>(-config). Shared
+  # cluster ncp-lighthouse.
+  LH_ROTATE_TUPLES=""
+  for i in "${!LH_NAMES[@]}"; do
+    _rn="${NAME_PREFIX}-lighthouse"; [[ "$i" != 0 ]] && _rn="${NAME_PREFIX}-${LH_NAMES[$i]}"
+    LH_ROTATE_TUPLES+="${LH_NAMES[$i]}:${_rn}-config:${NAME_PREFIX}-lighthouse:${_rn} "
+  done
+  LH_ROTATE_TUPLES="${LH_ROTATE_TUPLES% }"
   rsh "$HB_ID" "sudo tee /etc/nebula/lighthouse-rotate.env >/dev/null && sudo chmod 600 /etc/nebula/lighthouse-rotate.env" <<RENV
 # Auto-generated by bootstrap-genesis.sh — config for rotate-lighthouse-cert.sh (run by
 # harbor-lighthouse-rotate.timer). All auth (KMS sign, Secrets Manager, ECS, Aurora) is via the
@@ -1041,6 +1112,14 @@ ROLE="${ROLE:-<unchanged>}"
 REGION="${REGION:-$TF_REGION}"
 BANNER="$([[ "$MODE" == "recover" ]] && echo "HARBOR RECOVER COMPLETE  (restored from Secrets Manager + KMS + Aurora)" || echo "GENESIS BOOTSTRAP COMPLETE  (control plane + data plane)")"
 
+# Lighthouse summary line(s): one per HA lighthouse (overlay @ underlay).
+LH_SUMMARY=""
+for i in "${!LH_NAMES[@]}"; do
+  [[ "$i" == 0 ]] && LH_SUMMARY="${LH_NAMES[$i]} ${LH_OVERLAYS[$i]} @ ${LH_PUBADDRS[$i]}" \
+    || LH_SUMMARY+="
+                     ${LH_NAMES[$i]} ${LH_OVERLAYS[$i]} @ ${LH_PUBADDRS[$i]}"
+done
+
 cat <<EOF
 
 ────────────────────────────────────────────────────────────────────────────
@@ -1050,7 +1129,7 @@ cat <<EOF
                      collect $GW_COLLECT  (Harbor-only, mTLS) — Harbor PULLS it, gateway
                      initiates nothing, no mesh identity (ADR 0005). In-VPC clients use the
                      INTERNAL enroll URL (a public NLB isn't reachable from inside the VPC).
- Lighthouse        : $LH_OVERLAY @ $LH_ADDR  (pool $POOL)
+ Lighthouse(s)     : $LH_SUMMARY  (pool $POOL)$( [[ "$LH_COUNT" -gt 1 ]] && echo " — HA: blip-free cert rotation" )
  Harbor (mesh)     : $HARBOR_OVERLAY  — core-api :$CORE_PORT, console :$ADMIN_PORT (mesh-only)$HARBOR_TLS_NOTE
  Config-signing pin: deploy/prod/terraform/app/config-signing.pub  (give this to clients)
  Cloud-trust       : account $ACCOUNT / role $ROLE -> groups [workloads], auto-issue$SSO_NOTE

@@ -57,6 +57,7 @@ var cliSurface = map[string]surfaceEntry{
 	"lighthouse remove":      {op: "removeLighthouse"},
 	"lighthouse list":        {op: "listLighthouses"},
 	"lighthouse rotate-cert": {why: "re-mints the Fargate lighthouse's cert in place via the CA backend (KMS) — like issue-cert/genesis, a direct CA-signing action run by the rotation timer on the harbor box (the lighthouse can't self-renew over core-api: that's authed by source overlay IP, which an off-box re-mint doesn't have). Never a console capability — it signs certs"},
+	"lighthouse mint":        {why: "creates a NEW lighthouse identity — pins its reserved overlay IP, issues its cert in the lighthouse group from its own key, and records the control-plane enrollment — like issue-cert/genesis, a direct CA-signing/offline action (the bootstrap mints additional lighthouses for HA; operators scale out day-2). Never a console capability — it signs certs"},
 	"rollout start":          {op: "startRollout"},
 	"rollout step":           {op: "stepRollout"},
 	"rollout status":         {op: "getCurrentRollout"},
