@@ -119,6 +119,9 @@ usage:
   harbor lighthouse replace -ip OVERLAY -addrs host:port[,...] -actor A [db flags]
   harbor lighthouse remove -ip OVERLAY -actor A [db flags]   (keeps >=1 active)
   harbor lighthouse list   [db flags]
+  harbor lighthouse mint   -ca-cert PEM -name N -ip OVERLAY -in-pub PUB [-lifetime D]
+                           [-backend kms -kms-key-id ID] [db flags]   create a NEW lighthouse
+                           identity (pin IP, issue in group lighthouse, record enrollment) — HA
   harbor lighthouse rotate-cert -ca-cert PEM [-name N] [-lifetime D] [-rotate-if-within D]
                            [-backend kms -kms-key-id ID] [db flags]   re-sign the lighthouse
                            cert IN PLACE (same IP/groups/key, new expiry) — Fargate cert rotation
