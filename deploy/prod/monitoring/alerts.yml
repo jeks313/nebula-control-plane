@@ -60,3 +60,47 @@ groups:
         annotations:
           summary: "Control-plane target down: {{ $labels.job }} ({{ $labels.instance }})"
           description: "Prometheus cannot scrape {{ $labels.job }} at {{ $labels.instance }} for 2m."
+
+  # ── Lighthouse cert rotation (deploy/prod/lighthouse-rotate) ─────────────────
+  # The Fargate lighthouse can't self-renew + is NOT a fleet member, so the fleet/renewal-health
+  # alerts never see its cert — these are the only signal. ncp_lighthouse_* come from harbor's
+  # /metrics (core-api/admin-api), min/max by name to collapse the per-Core duplicates.
+  - name: ncp-lighthouse-rotation
+    rules:
+      # BACKSTOP (the outcome): the rotation re-mints at ~90d-to-expiry, so a cert should never get
+      # this close — if it does, the rotation has FAILED for SOME reason (timer off, script bug, ECS
+      # stuck, KMS perm, secret-inject failed). Catches every failure mode with weeks of lead time.
+      - alert: LighthouseCertExpiringSoon
+        expr: min by (name) (ncp_lighthouse_cert_expiry_seconds) < 60 * 86400
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "Lighthouse cert expiring <60d and not rotated: {{ $labels.name }}"
+          description: "ncp_lighthouse_cert_expiry_seconds for {{ $labels.name }} is under 60 days — the rotation should have renewed it at ~90d. Check the rotation timer/logs (LighthouseRotation* alerts) and the lighthouse ECS service."
+      - alert: LighthouseCertExpiringCritical
+        expr: min by (name) (ncp_lighthouse_cert_expiry_seconds) < 14 * 86400
+        for: 10m
+        labels: { severity: critical }
+        annotations:
+          summary: "Lighthouse cert expiring <14d: {{ $labels.name }} — rotation is failing"
+          description: "ncp_lighthouse_cert_expiry_seconds for {{ $labels.name }} is under 14 days. If it expires, that lighthouse drops off the mesh (discovery degrades). Rotate it manually now: harbor lighthouse rotate-cert + re-inject (deploy/prod/lighthouse-rotate)."
+
+      # LIVENESS (the job): a rotation run failed recently — tells you WHICH part broke before the
+      # cert is at risk. (last_error carries the detail in the DB / dashboard.)
+      - alert: LighthouseRotationFailed
+        expr: increase(ncp_lighthouse_rotation_runs_total{result="fail"}[2h]) > 0
+        labels: { severity: warning }
+        annotations:
+          summary: "Lighthouse rotation run FAILED: {{ $labels.name }}"
+          description: "ncp_lighthouse_rotation_runs_total{result=fail} increased for {{ $labels.name }} — a scheduled rotation errored (mint/secret/ECS). See the rotation logs in Loki + lighthouse_rotations.last_error."
+
+      # The rotation timer hasn't recorded a run in over a month (it fires monthly) — it may be
+      # disabled/wedged. The cert-expiry backstop above is the safety net; this is the early signal.
+      # (No series until the first run records — trigger the service once on install so this is live.)
+      - alert: LighthouseRotationStale
+        expr: time() - max by (name) (ncp_lighthouse_rotation_last_run_seconds) > 35 * 86400
+        for: 1h
+        labels: { severity: warning }
+        annotations:
+          summary: "Lighthouse rotation timer stale (>35d no run): {{ $labels.name }}"
+          description: "No rotation-check has been recorded for {{ $labels.name }} in over 35 days — the monthly harbor-lighthouse-rotate.timer may be disabled or wedged. Check 'systemctl status harbor-lighthouse-rotate.timer' on harbor."

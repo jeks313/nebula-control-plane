@@ -177,6 +177,11 @@ func cmdCoreAPI(args []string) {
 		if rerr := ipam.RegisterNetblockCollector(ipam.NewNetblockCollector(s.DB, sreg, *staleAfter)); rerr != nil {
 			log.Warn("core-api: registering the IPAM netblock collector failed; ncp_ipam_netblock_* gauges will be absent", "err", rerr)
 		}
+		// Lighthouse cert-expiry (the rotation BACKSTOP — lighthouses aren't fleet members so
+		// nothing else observes their certs) + rotation liveness on /metrics. Idempotent.
+		if rerr := lighthouse.RegisterCollector(lighthouse.NewCollector(s.DB)); rerr != nil {
+			log.Warn("core-api: registering the lighthouse collector failed; ncp_lighthouse_* metrics will be absent", "err", rerr)
+		}
 	}
 	sg, err := signer.New(signer.Config{
 		CACertPEM: caPEM, Backend: caB,
@@ -437,6 +442,10 @@ func cmdAdminAPI(args []string) {
 	// /metrics each exposes reports correct utilization regardless of which is scraped.
 	if err := ipam.RegisterNetblockCollector(ipam.NewNetblockCollector(s.DB, nbReg, *staleAfter)); err != nil {
 		log.Warn("admin-api: registering the IPAM netblock collector failed; ncp_ipam_netblock_* gauges will be absent", "err", err)
+	}
+	// Lighthouse cert-expiry backstop + rotation liveness (ncp_lighthouse_*), same as core-api.
+	if err := lighthouse.RegisterCollector(lighthouse.NewCollector(s.DB)); err != nil {
+		log.Warn("admin-api: registering the lighthouse collector failed; ncp_lighthouse_* metrics will be absent", "err", err)
 	}
 
 	api := adminapi.New(adminapi.Config{

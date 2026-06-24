@@ -40,6 +40,12 @@ CONF="${1:-/etc/nebula/lighthouse-rotate.env}"
   "${LIGHTHOUSES:?env: space/newline-separated name:secret:cluster:service tuples}"
 HARBOR_BIN="${HARBOR_BIN:-/usr/local/bin/harbor}"
 
+# record reports each run's outcome to harbor so rotation LIVENESS is observable
+# (ncp_lighthouse_rotation_* metrics): record <name> <ok|skip|fail> [error]. Best-effort — a
+# recording failure must never fail the rotation itself (observability is downstream of the work).
+# shellcheck disable=SC2086
+record() { "$HARBOR_BIN" lighthouse rotation-record $HARBOR_DB_FLAGS -name "$1" -result "$2" -error "${3:-}" 2>/dev/null || true; }
+
 rc=0
 for tuple in $LIGHTHOUSES; do
   IFS=: read -r NAME SECRET CLUSTER SERVICE <<<"$tuple"
@@ -54,29 +60,29 @@ for tuple in $LIGHTHOUSES; do
   if ! CRT="$("$HARBOR_BIN" lighthouse rotate-cert $HARBOR_DB_FLAGS $BACKEND_FLAGS \
         -ca-cert "$CA_CERT" -name "$NAME" -pool "$POOL" \
         -lifetime "$LIFETIME" -rotate-if-within "$WITHIN")"; then
-    echo "  ERROR: rotate-cert failed for $NAME" >&2; rc=1; continue
+    echo "  ERROR: rotate-cert failed for $NAME" >&2; record "$NAME" fail "rotate-cert failed"; rc=1; continue
   fi
   if [ -z "$CRT" ]; then
     echo "  not due — cert still comfortably valid, no rotation"
-    continue
+    record "$NAME" skip; continue
   fi
 
   echo "  re-signed; patching host_crt_pem in $SECRET + forcing ECS redeploy of $SERVICE"
   if ! CUR="$(aws secretsmanager get-secret-value --region "$REGION" \
         --secret-id "$SECRET" --query SecretString --output text)"; then
-    echo "  ERROR: read secret $SECRET" >&2; rc=1; continue
+    echo "  ERROR: read secret $SECRET" >&2; record "$NAME" fail "read secret $SECRET"; rc=1; continue
   fi
   # Merge: keep ca_crt_pem + host_key_pem, overwrite ONLY host_crt_pem with the new cert.
   if ! NEW="$(jq -n --argjson cur "$CUR" --arg crt "$CRT" '$cur + {host_crt_pem:$crt}')"; then
-    echo "  ERROR: jq merge for $SECRET (is the secret valid JSON?)" >&2; rc=1; continue
+    echo "  ERROR: jq merge for $SECRET (is the secret valid JSON?)" >&2; record "$NAME" fail "jq merge $SECRET"; rc=1; continue
   fi
   if ! aws secretsmanager put-secret-value --region "$REGION" \
         --secret-id "$SECRET" --secret-string "$NEW" >/dev/null; then
-    echo "  ERROR: put secret $SECRET" >&2; rc=1; continue
+    echo "  ERROR: put secret $SECRET" >&2; record "$NAME" fail "put secret $SECRET"; rc=1; continue
   fi
   if ! aws ecs update-service --region "$REGION" \
         --cluster "$CLUSTER" --service "$SERVICE" --force-new-deployment >/dev/null; then
-    echo "  ERROR: ecs redeploy $SERVICE (secret WAS updated; container will pick up the new cert on next restart)" >&2; rc=1; continue
+    echo "  ERROR: ecs redeploy $SERVICE (secret WAS updated; container will pick up the new cert on next restart)" >&2; record "$NAME" fail "ecs redeploy $SERVICE"; rc=1; continue
   fi
 
   # Blip-free HA: a lighthouse redeploy restarts its task (~30-60s of that one being down).
@@ -87,8 +93,9 @@ for tuple in $LIGHTHOUSES; do
   echo "  redeploy forced; waiting for $SERVICE to reach steady state before the next lighthouse..."
   if ! aws ecs wait services-stable --region "$REGION" --cluster "$CLUSTER" --services "$SERVICE"; then
     echo "  ERROR: $SERVICE did not stabilize in the wait window — STOPPING before any other lighthouse so we never restart two at once. Re-run once it's healthy." >&2
-    rc=1; break
+    record "$NAME" fail "$SERVICE not stable after redeploy"; rc=1; break
   fi
   echo "  rotated: $NAME secret updated, ECS redeployed, service stable"
+  record "$NAME" ok
 done
 exit $rc
