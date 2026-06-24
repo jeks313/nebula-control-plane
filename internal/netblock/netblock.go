@@ -373,10 +373,13 @@ func (r *Registry) Resolve(ctx context.Context, name string) (netip.Prefix, erro
 	if name == "" {
 		name = NameDefault
 	}
-	if p, ok := c.byName[name]; ok {
-		return p, nil
+	// A join source must never draw from a RESERVED (control-plane) block such as
+	// 'central'; a reserved binding falls back to 'default' exactly like an unknown name
+	// (mirrors ResolveFull). Reserved space is allocated only via the control-plane path.
+	if row, ok := c.rows[name]; ok && !(row.Kind == KindReserved && name != NameDefault) {
+		return c.byName[name], nil
 	}
-	// Unknown/deleted name -> fall back to 'default'.
+	// Unknown/deleted/reserved name -> fall back to 'default'.
 	if name != NameDefault {
 		r.logFallback(name)
 		if p, ok := c.byName[NameDefault]; ok {
@@ -404,14 +407,27 @@ func (r *Registry) NetblockCIDRs(ctx context.Context) ([]ipam.NamedCIDR, error) 
 	return out, nil
 }
 
-// Carves returns the 'named' netblock CIDRs (for the allocator's overlap checks
-// when filling 'default'). It implements ipam.NetblockResolver.
+// Carves returns every netblock the 'default' fill must avoid: named carves AND
+// reserved blocks (e.g. central). It implements ipam.NetblockResolver and is consulted
+// ONLY when filling the non-named 'default' block. Returning named-only let default-fill
+// bleed into the reserved central /27 whenever the two overlapped (the IPAM leak: clients
+// landing on 10.44.0.3/.4/.5); skipping ALL non-default blocks closes that regardless of
+// how 'default' is sized. (Disjoint blocks are unaffected — firstFree only skips carves
+// that overlap the range it is filling.)
 func (r *Registry) Carves(ctx context.Context) ([]netip.Prefix, error) {
 	c, err := r.snapshot(ctx)
 	if err != nil {
 		return nil, err
 	}
-	out := append([]netip.Prefix(nil), c.named...)
+	out := make([]netip.Prefix, 0, len(c.rows))
+	for _, row := range c.rows {
+		if row.Kind == KindDefault { // the block being filled; every OTHER block is off-limits
+			continue
+		}
+		if p := row.Prefix(); p.IsValid() {
+			out = append(out, p)
+		}
+	}
 	return out, nil
 }
 
@@ -427,6 +443,14 @@ func (r *Registry) ResolveFull(ctx context.Context, name string) (ipam.Resolved,
 		name = NameDefault
 	}
 	row, ok := c.rows[name]
+	if ok && row.Kind == KindReserved && name != NameDefault {
+		// A join source must NEVER draw from a RESERVED (control-plane) block such as
+		// 'central' — that is what let a bound name of "central" hand out 10.44.0.3/.4/.5
+		// to ordinary clients. Treat a reserved binding as a misconfiguration and fall
+		// back to 'default' (like an unknown name); reserved space is allocated only via
+		// the control-plane path (genesis / AllocateSpecific), never name-resolution.
+		ok = false
+	}
 	if !ok {
 		// Unknown/deleted name -> fall back to 'default' (D20). The resolved block is
 		// 'default' (kind=default), so Named=false: an unknown binding must NOT become
