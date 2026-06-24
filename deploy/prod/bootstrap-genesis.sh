@@ -346,6 +346,65 @@ if [[ "$MODE" == "recover" ]]; then
   jq -r '.host_crt_pem' <<<"$BUNDLE" | rsh "$HB_ID" "sudo tee /etc/nebula/host.crt >/dev/null && sudo chmod 644 /etc/nebula/host.crt"
   jq -r '.ca_crt_pem' <<<"$BUNDLE" | rsh "$HB_ID" "sudo tee /etc/nebula/ca.crt >/dev/null && sudo chmod 644 /etc/nebula/ca.crt"
   jq -r '.host_config_yml' <<<"$BUNDLE" | rsh "$HB_ID" "sudo tee /etc/nebula/config.yml >/dev/null && sudo chmod 644 /etc/nebula/config.yml"
+  # Reseed harbor's lighthouse discovery from the live REGISTRY (the source of truth), overriding
+  # the snapshot's possibly-stale static_host_map. A lighthouse added day-2 — and at a
+  # non-deterministic overlay IP after central-block contention — lives in Aurora but may not be in
+  # the snapshot's host_config_yml, so a recover would otherwise come up reachable to only the
+  # genesis lighthouse(s). Rewrite static_host_map + lighthouse.hosts from the registry; no-op (keeps
+  # the snapshot) if the registry read returns nothing (e.g. DB not ready / pre-`-static-host-map`
+  # binary), so it's strictly safer than the prior behaviour.
+  rsh "$HB_ID" "cat > /tmp/reseed-lh.py" <<'RESEED_PY'
+import sys
+cfg = sys.argv[1]
+entries = []
+for line in sys.stdin:
+    line = line.rstrip("\n")
+    if not line.strip():
+        continue
+    ip, _, addrs = line.partition("\t")
+    ip, addrs = ip.strip(), addrs.strip()
+    if ip and addrs:
+        entries.append((ip, addrs))
+if not entries:
+    print("    lighthouse reseed: registry returned nothing — kept the snapshot static_host_map")
+    sys.exit(0)
+def ind(s):
+    return len(s) - len(s.lstrip(" "))
+lines = open(cfg).read().splitlines()
+out, i, n = [], 0, len(lines)
+while i < n:
+    line = lines[i]
+    if ind(line) == 0 and line.strip() == "static_host_map:":
+        out.append("static_host_map:")
+        for ip, addrs in entries:
+            out.append('  "%s": %s' % (ip, addrs))
+        i += 1
+        while i < n and ind(lines[i]) > 0:
+            i += 1
+        continue
+    if ind(line) == 0 and line.strip() == "lighthouse:":
+        out.append(line)
+        i += 1
+        while i < n and ind(lines[i]) > 0:
+            l = lines[i]
+            if l.strip() == "hosts:":
+                out.append(l)
+                hi = ind(l)
+                i += 1
+                while i < n and ind(lines[i]) > hi and lines[i].strip().startswith("-"):
+                    i += 1
+                for ip, _ in entries:
+                    out.append('%s- "%s"' % (" " * (hi + 2), ip))
+                continue
+            out.append(l)
+            i += 1
+        continue
+    out.append(line)
+    i += 1
+open(cfg, "w").write("\n".join(out) + "\n")
+print("    lighthouse reseed: %d active lighthouse(s) -> static_host_map + lighthouse.hosts" % len(entries))
+RESEED_PY
+  rsh "$HB_ID" "harbor lighthouse list -static-host-map $HARBOR_DB_FLAGS 2>/dev/null | sudo python3 /tmp/reseed-lh.py /etc/nebula/config.yml; rm -f /tmp/reseed-lh.py"
   rsh "$HB_ID" "umask 077; mkdir -p ~/ncp/genesis"
   jq -r '.ca_crt_pem' <<<"$BUNDLE" | rsh "$HB_ID" "cat > ~/ncp/genesis/ca.crt"
   jq -r '.config_signing_pub_pem' <<<"$BUNDLE" | rsh "$HB_ID" "cat > ~/ncp/genesis/config-signing.pub"
