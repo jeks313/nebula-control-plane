@@ -268,6 +268,31 @@ func TestDeviceConditionMatchesFleetHealth(t *testing.T) {
 	}
 }
 
+// TestDeviceStaleFlag: a long-silent host carries stale=true on /devices (so the UI
+// won't keep showing its last-known "ok"), while a freshly-seen host omits it
+// (omitempty). The flag uses the same StaleAfter as the dashboard + condition=stale.
+func TestDeviceStaleFlag(t *testing.T) {
+	s, h := newServer(t)
+	good := provNow.Add(30 * 24 * time.Hour)
+	hbFull(t, s.DB, "100.64.0.1", "fresh", good, provNow, 0, "ok")
+	hbFull(t, s.DB, "100.64.0.2", "silent", good, provNow.Add(-22*time.Minute), 0, "ok")
+
+	_, body := do(t, h, "GET", "/admin/v1/devices", "alice")
+	devs := devicesBy(t, body)
+
+	if devs["100.64.0.1"]["stale"] != nil {
+		t.Errorf("fresh host should omit stale, got %v", devs["100.64.0.1"]["stale"])
+	}
+	if devs["100.64.0.2"]["stale"] != true {
+		t.Errorf("silent host stale = %v, want true", devs["100.64.0.2"]["stale"])
+	}
+	// The silent host still self-reported "ok" — the stale flag, not health, is what
+	// tells the UI its health is no longer current.
+	if devs["100.64.0.2"]["health"] != "ok" {
+		t.Errorf("silent host health = %v, want ok", devs["100.64.0.2"]["health"])
+	}
+}
+
 func TestDeviceBadCondition(t *testing.T) {
 	_, h := newServer(t)
 	rr, body := do(t, h, "GET", "/admin/v1/devices?condition=bogus", "alice")

@@ -699,6 +699,8 @@ export interface components {
             health?: string;
             /** Format: date-time */
             last_seen?: string;
+            /** @description host has not heartbeated within StaleAfter — its reported health is no longer current (same definition as the dashboard + condition=stale filter) */
+            stale?: boolean;
             /** @description provenance: cloud-attestation provider, e.g. aws (attested hosts only) */
             attest_provider?: string;
             /** @description provenance: attested account/subscription/project */

@@ -88,15 +88,28 @@ export function JoinedVia({
     )
   }
   if (p.join_key_name) {
+    // Mirror the attested-provider layout: a colored, clickable "token" badge (the
+    // join-method icon) followed by the join-key name as a mono detail — so token-enrolled
+    // hosts read consistently with AWS/SSO ones instead of as dim plain text.
     return (
       <span className="flex items-center gap-1.5">
-        <span className="text-[11px] text-ink-faint">token</span>
         {onFilter ? (
           <button onClick={() => onFilter('join_key', p.join_key_name!)} title="Filter by join key">
-            <Chip>{p.join_key_name}</Chip>
+            <Chip tone="permit">token</Chip>
           </button>
         ) : (
-          <Chip>{p.join_key_name}</Chip>
+          <Chip tone="permit">token</Chip>
+        )}
+        {onFilter ? (
+          <button
+            onClick={() => onFilter('join_key', p.join_key_name!)}
+            className="font-mono text-[11px] text-ink-dim hover:text-ink"
+            title="Filter by join key"
+          >
+            {p.join_key_name}
+          </button>
+        ) : (
+          <span className="font-mono text-[11px] text-ink-faint">{p.join_key_name}</span>
         )}
         {p.ephemeral && <EphemeralBadge />}
       </span>

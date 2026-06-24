@@ -88,7 +88,7 @@ export function Devices() {
                     <td className="px-4 py-2"><Groups groups={d.groups} /></td>
                     <td className="nums px-4 py-2 text-ink-dim">{d.pilot_version ?? '—'}</td>
                     <td className="nums px-4 py-2 text-ink-dim">{fmtDate(d.cert_not_after)}</td>
-                    <td className={cx('px-4 py-2', healthTone(d.health))}>{d.health ?? '—'}</td>
+                    <td className={cx('px-4 py-2', healthTone(d.stale ? 'stale' : d.health))} title={d.stale && d.health ? `last reported "${d.health}" before going silent` : undefined}>{d.stale ? 'stale' : d.health ?? '—'}</td>
                     <td className="nums px-4 py-2 text-ink-faint">{fmtDate(d.last_seen)}</td>
                   </tr>
                 ))}

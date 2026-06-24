@@ -474,6 +474,11 @@ type Device struct {
 	ClockOffsetMs        int    `json:"clock_offset_ms"`
 	Health               string `json:"health,omitempty"`
 	LastSeen             string `json:"last_seen,omitempty"`
+	// Stale is true when the host has not heartbeated within Thresholds.StaleAfter — the
+	// same definition the fleet dashboard and the `condition=stale` filter use. Health is
+	// the host's LAST self-report, so a long-silent host would otherwise still read "ok";
+	// Stale tells the UI that its reported health is no longer current.
+	Stale                bool   `json:"stale,omitempty"`
 	// Provenance — how the host joined, from its authoritative (latest issued)
 	// enrollment. Cloud-attested hosts carry the attestation evidence; token-enrolled
 	// hosts carry the join-key name. Groups are the groups the host was issued.
@@ -628,6 +633,10 @@ func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Stale per row, computed identically to fleet.ConditionSQL("stale") so the Devices
+	// list, the dashboard count, and a `condition=stale` filter all agree.
+	nowNs := s.now().UnixNano()
+	staleNs := s.cfg.Thresholds.StaleAfter.Nanoseconds()
 	out := make([]Device, len(kept))
 	for i, h := range kept {
 		d := Device{
@@ -635,6 +644,7 @@ func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
 			PilotVersion: h.PilotVersion, NebulaVersion: h.NebulaVersion,
 			CertNotAfter: rfc3339(h.CertNotAfter), AppliedBundleVersion: h.AppliedBundleVersion,
 			ClockOffsetMs: h.ClockOffsetMs, Health: h.Health, LastSeen: rfc3339(h.LastSeen),
+			Stale: staleNs > 0 && h.LastSeen < nowNs-staleNs,
 		}
 		if p, ok := prov[h.OverlayIP]; ok {
 			d.Groups = p.Groups

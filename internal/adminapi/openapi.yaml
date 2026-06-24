@@ -822,6 +822,7 @@ components:
         clock_offset_ms: { type: integer }
         health: { type: string }
         last_seen: { type: string, format: date-time }
+        stale: { type: boolean, description: "host has not heartbeated within StaleAfter — its reported health is no longer current (same definition as the dashboard + condition=stale filter)" }
         attest_provider: { type: string, description: "provenance: cloud-attestation provider, e.g. aws (attested hosts only)" }
         attest_account: { type: string, description: "provenance: attested account/subscription/project" }
         attest_principal: { type: string, description: "provenance: attested ARN/principal/service-account" }
