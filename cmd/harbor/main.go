@@ -119,6 +119,9 @@ usage:
   harbor lighthouse replace -ip OVERLAY -addrs host:port[,...] -actor A [db flags]
   harbor lighthouse remove -ip OVERLAY -actor A [db flags]   (keeps >=1 active)
   harbor lighthouse list   [db flags]
+  harbor lighthouse rotate-cert -ca-cert PEM [-name N] [-lifetime D] [-rotate-if-within D]
+                           [-backend kms -kms-key-id ID] [db flags]   re-sign the lighthouse
+                           cert IN PLACE (same IP/groups/key, new expiry) — Fargate cert rotation
   harbor blocklist add     -fingerprint FP | -device OVERLAY [-reason R] -actor A
                            [-canary K] [-wave-size W] [-observe D] [-no-rollout] [db flags]
   harbor blocklist remove  -fingerprint FP | -device OVERLAY -actor A [db flags]   (lifts the block)

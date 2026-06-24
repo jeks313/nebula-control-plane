@@ -1,0 +1,15 @@
+[Unit]
+Description=Monthly check + rotate of the Fargate lighthouse nebula cert
+
+[Timer]
+# First of every month, early UTC, jittered up to an hour so a fleet of harbors doesn't
+# stampede KMS/ECS at once. With a ~1y cert and a 90d (WITHIN) window, this gives ~3 monthly
+# attempts inside the window before expiry — comfortable margin if one tick is missed.
+OnCalendar=*-*-01 03:30:00 UTC
+RandomizedDelaySec=1h
+# Catch up after downtime: if the box was off when the timer was due, run on next boot.
+Persistent=true
+Unit=harbor-lighthouse-rotate.service
+
+[Install]
+WantedBy=timers.target

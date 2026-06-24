@@ -13,12 +13,32 @@ import (
 
 // Harbor fleet-registry commands: lighthouse + gateway add/remove/list (split from main.go).
 
-// cmdLighthouse manages the lighthouse fleet registry (6.8). Core serves the
-// active rows into every bundle's static_host_map when run with -lighthouse-db.
+// cmdLighthouse manages the lighthouse fleet registry (6.8) plus scheduled cert
+// rotation. Core serves the active rows into every bundle's static_host_map when run
+// with -lighthouse-db. This is a SINGLE positional-dispatch switch over every
+// subcommand (the cli_surface_test extractor models exactly one switch per function);
+// the registry actions, which share a flagset, live in cmdLighthouseRegistry, and
+// rotate-cert — which needs its OWN flagset (-ca-cert/-backend/-lifetime/...) — gets
+// dispatched before any shared parse.
 func cmdLighthouse(args []string) {
 	if len(args) < 1 {
-		fatalf("lighthouse: want add|replace|remove|list")
+		fatalf("lighthouse: want add|replace|remove|list|rotate-cert")
 	}
+	sub := args[0]
+	switch sub {
+	case "rotate-cert":
+		cmdLighthouseRotateCert(args[1:])
+	case "add", "replace", "remove", "list":
+		cmdLighthouseRegistry(args)
+	default:
+		fatalf("lighthouse: unknown subcommand %q", sub)
+	}
+}
+
+// cmdLighthouseRegistry handles the add/replace/remove/list registry actions, which
+// all share one flagset (db + ip/addrs/name/actor). Split from cmdLighthouse so the
+// latter stays a single positional switch the CLI-surface extractor can read.
+func cmdLighthouseRegistry(args []string) {
 	sub := args[0]
 	fs := flag.NewFlagSet("lighthouse "+sub, flag.ExitOnError)
 	driver, dsn := dbFlags(fs)
