@@ -23,8 +23,13 @@ output "instance_ids" {
 }
 
 output "lighthouse_addr" {
-  description = "Lighthouse underlay address for static_host_map / genesis -lighthouse-addr. EC2: the node's Elastic IP; Fargate: the NLB's Elastic IP."
-  value       = var.lighthouse_runtime == "fargate" ? "${one(aws_eip.lighthouse_nlb[*].public_ip)}:${var.nebula_port}" : "${lookup(local.public_ip, "lighthouse", "")}:${var.nebula_port}"
+  description = "FIRST lighthouse's underlay address for static_host_map / genesis -lighthouse-addr. EC2: the node's Elastic IP; Fargate: lighthouse-1's NLB Elastic IP. For HA, see lighthouse_addrs."
+  value       = var.lighthouse_runtime == "fargate" ? "${try(aws_eip.lighthouse_nlb["lighthouse-1"].public_ip, "")}:${var.nebula_port}" : "${lookup(local.public_ip, "lighthouse", "")}:${var.nebula_port}"
+}
+
+output "lighthouse_addrs" {
+  description = "ALL Fargate lighthouse underlay addresses, keyed by name (HA): name => \"EIP:port\". The bootstrap mints/registers one lighthouse per entry. Empty for the ec2 runtime."
+  value       = { for k, v in aws_eip.lighthouse_nlb : k => "${v.public_ip}:${var.nebula_port}" }
 }
 
 output "lighthouse_runtime" {

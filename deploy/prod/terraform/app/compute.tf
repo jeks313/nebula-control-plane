@@ -101,13 +101,13 @@ resource "aws_iam_role_policy" "core_lighthouse_rotate" {
         Sid      = "ReInjectLighthouseCert"
         Effect   = "Allow"
         Action   = ["secretsmanager:GetSecretValue", "secretsmanager:PutSecretValue", "secretsmanager:DescribeSecret"]
-        Resource = [aws_secretsmanager_secret.lighthouse[0].arn]
+        Resource = [for k, v in aws_secretsmanager_secret.lighthouse : v.arn]
       },
       {
         Sid      = "RedeployLighthouseService"
         Effect   = "Allow"
         Action   = ["ecs:UpdateService", "ecs:DescribeServices"]
-        Resource = [aws_ecs_service.lighthouse[0].id]
+        Resource = [for k, v in aws_ecs_service.lighthouse : v.id]
       },
     ]
   })
