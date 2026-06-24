@@ -309,6 +309,45 @@ func TestSilentCanaryAutoRollsBack(t *testing.T) {
 	}
 }
 
+// TestStaleLaterWaveDoesNotRollBack is the regression guard for the missing-host bug: after the
+// canary validates the update, a LATER wave whose hosts have been silent since before the rollout
+// (decommissioned / unreachable leftovers) must NOT roll the fleet back — they are EXCLUDED, and
+// the rollout completes. (Previously any `missing` host was a blanket rollback trigger, so one
+// stale leftover torpedoed every rollout — exactly what reverted harbor's relay on the live poc.)
+func TestStaleLaterWaveDoesNotRollBack(t *testing.T) {
+	eng, db, clk := newEngine(t)
+	ctx := context.Background()
+	start(t, eng, []string{"100.64.0.1", "100.64.0.2", "100.64.0.3"})
+
+	// Wave-1 hosts (.2, .3) are STALE — last heartbeat long before the rollout, then silent.
+	heartbeat(t, db, "100.64.0.2", 1, "ok", clk.now().Add(-2*time.Hour))
+	heartbeat(t, db, "100.64.0.3", 1, "ok", clk.now().Add(-2*time.Hour))
+
+	// Canary (.1) applies the target + healthy -> advances to wave 1.
+	heartbeat(t, db, "100.64.0.1", 2, "ok", clk.now())
+	if changed, _ := eng.Evaluate(ctx); !changed {
+		t.Fatal("healthy canary should advance the rollout")
+	}
+	if r, _, _ := eng.Status(ctx); r.State != rollout.StateWidening || r.ActiveWave != 1 {
+		t.Fatalf("after canary: state=%s wave=%d, want widening/1", r.State, r.ActiveWave)
+	}
+
+	// Past MissingAfter, wave 1 is all stale/missing -> excluded (NOT a rollback); the rollout
+	// completes because nothing reachable is left to converge.
+	clk.add(4 * time.Minute)
+	changed, err := eng.Evaluate(ctx)
+	if err != nil || !changed {
+		t.Fatalf("stale wave should resolve (advance/complete): changed=%v err=%v", changed, err)
+	}
+	r, _, _ := eng.Status(ctx)
+	if r.State == rollout.StateRolledBack {
+		t.Fatal("stale later-wave hosts must NOT roll the fleet back")
+	}
+	if r.State != rollout.StateCompleted {
+		t.Fatalf("rollout should complete with the stale wave excluded; state=%s", r.State)
+	}
+}
+
 // TestCommandDrivesCanaryToTarget: an in-wave host not yet on target is told to
 // apply it; once on target it gets no command.
 func TestCommandDrivesCanaryToTarget(t *testing.T) {

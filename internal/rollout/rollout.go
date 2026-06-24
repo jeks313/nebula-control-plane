@@ -321,22 +321,35 @@ func (e *Engine) evaluateLane(ctx context.Context, lane string) (changed bool, e
 			}
 		}
 
+		// A MISSING host (silent past MissingAfter — typically an off / decommissioned /
+		// unreachable node, often silent since BEFORE the rollout) is EXCLUDED from a wave, not
+		// counted as a failure: it cannot converge but it is not a regression, so a stale leftover
+		// must NOT roll the fleet back (it used to — `missing > 0` was a blanket rollback trigger,
+		// so one dead host torpedoed every rollout). The wave converges over the REACHABLE hosts
+		// (need is capped at reachable, so an all-missing LATER wave has need==0 and simply
+		// advances/skips). The ONE case a missing host still rolls back is the CANARY: if the
+		// canary wave produced NO converged host (its probe(s) went silent), the update was never
+		// validated, so we can't trust widening it.
+		reachable := len(hosts) - missing
 		need := r.MinHealthy
-		if need <= 0 || need > len(hosts) {
-			need = len(hosts)
+		if need <= 0 || need > reachable {
+			need = reachable
 		}
 
 		var aerr error
 		switch {
-		case failed > 0 || missing > 0:
+		case failed > 0:
 			changed = true
 			audits, aerr = e.rollbackTx(tx, r, now, trigger)
+		case r.ActiveWave == 0 && converged == 0 && missing > 0:
+			changed = true
+			audits, aerr = e.rollbackTx(tx, r, now, "canary not validated: "+trigger)
 		case converged >= need:
 			changed = true
 			audits, aerr = e.advanceTx(tx, r, now)
 		case elapsed >= r.ObserveWindow:
 			changed = true
-			audits, aerr = e.rollbackTx(tx, r, now, fmt.Sprintf("wave %d did not converge within the observe window (%d/%d healthy)", r.ActiveWave, converged, need))
+			audits, aerr = e.rollbackTx(tx, r, now, fmt.Sprintf("wave %d did not converge within the observe window (%d/%d reachable healthy; %d missing excluded)", r.ActiveWave, converged, need, missing))
 		}
 		return aerr
 	})
