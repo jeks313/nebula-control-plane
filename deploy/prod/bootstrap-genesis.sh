@@ -38,6 +38,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TFDIR="$ROOT/deploy/prod/terraform/app" # the app stack (foundation/ is layer 0, applied separately)
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/absolute.pub}"   # public key selecting the agent identity (private may be passphrase-locked in the agent)
 SSH_USER="${SSH_USER:-ec2-user}"
+SAML_DIR="/home/$SSH_USER/ncp/saml" # on the box: console SAML SP keypair + idp-metadata + saml.env (durable; snapshotted)
 SKIP_BUILD=0
 [[ "${1:-}" == "--skip-build" ]] && SKIP_BUILD=1
 # MODE: genesis (default — the full first-time ceremony) | recover (a destroyed/recreated harbor:
@@ -58,7 +59,7 @@ CORE_PORT="${CORE_PORT:-8444}"                   # core-api (renew/heartbeat), m
 ADMIN_PORT="${ADMIN_PORT:-443}"                  # admin console, mesh-only (default 443 => clean https URLs over the overlay; still NOT public)
 MOCK_IDP_PORT="${MOCK_IDP_PORT:-8446}"           # dev mock-IdP for the console login
 COLLECT_OBS_PORT="${COLLECT_OBS_PORT:-9445}"     # harbor collect /metrics + /healthz (Phase 7b), mesh-only on the overlay
-DB_BACKEND="${DB_BACKEND:-sqlite}"               # sqlite (local file on harbor) | aurora (managed Postgres; rotating creds via Secrets Manager, no static password)
+DB_BACKEND="${DB_BACKEND:-}"                     # sqlite (local file on harbor) | aurora (managed Postgres; rotating creds via Secrets Manager, no static password). Empty => DERIVED from the durable layer below (Aurora if the app stack provisioned it), so a recover/replace never silently falls back to an empty local SQLite.
 
 # ── SSO enrollment portal (ADR 0004, OPTIONAL — default OFF) ──────────────────
 # SSO is wired into the SAME off-mesh gateway (ADR 0009: no new tier). It is DISABLED unless
@@ -197,6 +198,17 @@ fi
 # EVERY harbor invocation (migrate/genesis/cloudtrust/gateway/collect/joinkey/core-api/admin-api)
 # so they all hit the same database. The DSN is single-quoted so the remote shell keeps the
 # '?'/'&' query chars literal (no globbing/splitting).
+# Derive the data backend from the DURABLE layer (terraform outputs) so a recover/replace can't
+# silently come up against an empty local SQLite while Aurora still holds all the genesis/enrollment
+# state. If the app stack provisioned Aurora (db_cluster_endpoint output set), default to aurora; an
+# explicit DB_BACKEND env still wins. Fail LOUD on the footgun: Aurora exists but someone forced
+# sqlite — that would hollow the control plane on recover.
+if [[ -z "$DB_BACKEND" ]]; then
+  if [[ -n "$(val '.db_cluster_endpoint.value')" ]]; then DB_BACKEND="aurora"; else DB_BACKEND="sqlite"; fi
+elif [[ "$DB_BACKEND" == "sqlite" && -n "$(val '.db_cluster_endpoint.value')" ]]; then
+  echo "FATAL: DB_BACKEND=sqlite but the app stack has Aurora (db_cluster_endpoint is set). Harbor's state lives in Aurora; a sqlite recover would come up HOLLOW (empty registry/cloudtrust/enrollments). Unset DB_BACKEND (auto-derives aurora) or pass DB_BACKEND=aurora." >&2
+  exit 1
+fi
 if [[ "$DB_BACKEND" == "aurora" || "$DB_BACKEND" == "postgres" ]]; then
   DB_HOST="$(val '.db_cluster_endpoint.value')"
   DB_PORT="$(val '.db_port.value')"; DB_PORT="${DB_PORT:-5432}"
@@ -371,6 +383,25 @@ if [[ "$MODE" == "recover" ]]; then
     echo "    restored SSO material (assertion keypair + SP keypair + IdP metadata + ACS/entity/issuer knobs) — SSO re-enabled"
   else
     SSO_ENABLED=0
+  fi
+  # Console SAML (admin login): if the bundle carries it (saml_role_map non-empty => real Entra SAML
+  # was wired), restore the SP keypair + IdP metadata to the box and set the vars so the IDP_FLAGS
+  # recover branch (below) rebuilds production flags. Without this, recover SILENTLY downgrades the
+  # console to the dev mock-IdP and drops the admin role-map. Empty => console stays mock-IdP (dev).
+  SAML_ROLE_MAP="$(jq -r '.saml_role_map // ""' <<<"$BUNDLE")"
+  if [[ -n "$SAML_ROLE_MAP" ]]; then
+    SAML_RESTORED=1
+    SAML_ENTITY_ID="$(jq -r '.saml_entity_id // ""' <<<"$BUNDLE")"
+    SAML_GROUPS_ATTR="$(jq -r '.saml_groups_attr // ""' <<<"$BUNDLE")"
+    SAML_METADATA_URL="$(jq -r '.saml_metadata_url // ""' <<<"$BUNDLE")"
+    rsh "$HB_ID" "umask 077; mkdir -p $SAML_DIR"
+    jq -r '.saml_sp_key_pem'  <<<"$BUNDLE" | rsh "$HB_ID" "umask 077; cat > $SAML_DIR/sp.key && chmod 600 $SAML_DIR/sp.key"
+    jq -r '.saml_sp_cert_pem' <<<"$BUNDLE" | rsh "$HB_ID" "cat > $SAML_DIR/sp.crt && chmod 644 $SAML_DIR/sp.crt"
+    IDP_META="$(jq -r '.saml_idp_metadata // ""' <<<"$BUNDLE")"
+    [[ -n "$IDP_META" ]] && printf '%s' "$IDP_META" | rsh "$HB_ID" "cat > $SAML_DIR/idp-metadata.xml && chmod 644 $SAML_DIR/idp-metadata.xml"
+    echo "    restored console SAML (role-map + SP keypair + IdP metadata) — console SSO re-enabled on recover"
+  else
+    SAML_RESTORED=0
   fi
   cp "$WORK/config-signing.pub" "$ROOT/deploy/prod/terraform/app/config-signing.pub" # the pin for clients
   echo "    restored: ca.crt + config-signing pin + harbor identity (key/cert/config) + hmac + collect mTLS + queue key"
@@ -916,7 +947,22 @@ fi
 #   SAML_ENTITY_ID      (optional)                — SP entity id (defaults to the SP metadata URL)
 #   SAML_GROUPS_ATTR    (optional)                — IdP group-claim name (defaults to the Entra claim URI)
 IDP_FLAGS="-mock-idp -mock-idp-addr $HARBOR_OVERLAY:$MOCK_IDP_PORT -environment development"
-if [[ -n "${SAML_METADATA_URL:-}" || -n "${SAML_METADATA_FILE:-}" ]]; then
+if [[ "$MODE" == "recover" && "${SAML_RESTORED:-0}" == "1" ]]; then
+  # RECOVER: the console SAML material (SP keypair [+ idp-metadata.xml] + role-map/entity/groups/
+  # metadata-url) was restored to the box + into these vars from the ncp-harbor-config bundle. Build
+  # the SAME production flags from the box-resident paths — NO operator env needed, so a recovered
+  # console comes back on real Entra (not the dev mock-IdP). Fully durable console SSO.
+  echo "==> [harbor] console SAML restored from the bundle (production posture)"
+  IDP_FLAGS="-saml-sp-key $SAML_DIR/sp.key -saml-sp-cert $SAML_DIR/sp.crt -role-map '$SAML_ROLE_MAP' -environment production"
+  if [[ -n "${SAML_METADATA_URL:-}" ]]; then
+    IDP_FLAGS="$IDP_FLAGS -saml-idp-metadata-url '$SAML_METADATA_URL'"
+  else
+    IDP_FLAGS="$IDP_FLAGS -saml-idp-metadata-file $SAML_DIR/idp-metadata.xml"
+  fi
+  [[ -n "${SAML_ENTITY_ID:-}" ]] && IDP_FLAGS="$IDP_FLAGS -saml-entity-id '$SAML_ENTITY_ID'"
+  IDP_FLAGS="$IDP_FLAGS -saml-groups-attr '${SAML_GROUPS_ATTR:-http://schemas.microsoft.com/ws/2008/06/identity/claims/groups}'"
+  echo "    console IdP: Entra SAML [production] — role-map + SP keypair + IdP metadata restored from Secrets Manager"
+elif [[ "$MODE" != "recover" && ( -n "${SAML_METADATA_URL:-}" || -n "${SAML_METADATA_FILE:-}" ) ]]; then
   echo "==> [harbor] wire the console to real Entra SAML (production posture)"
   # SAML needs HTTPS: the cross-site ACS cookie is SameSite=None => Secure (set by -environment
   # production), so a plain-HTTP overlay console can never complete login. base-url ($ADMIN_URL) is
@@ -942,6 +988,15 @@ if [[ -n "${SAML_METADATA_URL:-}" || -n "${SAML_METADATA_FILE:-}" ]]; then
   # to the Entra claim name (override SAML_GROUPS_ATTR for a different IdP or a renamed claim).
   SAML_GROUPS_ATTR="${SAML_GROUPS_ATTR:-http://schemas.microsoft.com/ws/2008/06/identity/claims/groups}"
   IDP_FLAGS="$IDP_FLAGS -saml-groups-attr '$SAML_GROUPS_ATTR'"
+  # Persist the console SAML config to the box (env-free) so the snapshot can bundle it and a
+  # recover can rebuild the SAME flags WITHOUT the operator's env — fully durable console SSO.
+  # Single-quoted values keep ';'/'='/URI chars literal (GUID/role-map values carry no single quote).
+  rsh "$HB_ID" "umask 077; cat > $SAML_DIR/saml.env" <<SAMLENV
+SAML_ROLE_MAP='$SAML_ROLE_MAP'
+SAML_ENTITY_ID='${SAML_ENTITY_ID:-}'
+SAML_GROUPS_ATTR='$SAML_GROUPS_ATTR'
+SAML_METADATA_URL='${SAML_METADATA_URL:-}'
+SAMLENV
   # The SP advertises ACS/metadata/entity-id derived from base-url ($ADMIN_URL); print the EXACT
   # values (clean https URLs now that the console defaults to 443) the operator registers in Entra so
   # they can't drift. Entity ID is the -saml-entity-id override if set, else the SP metadata URL.
@@ -1053,6 +1108,23 @@ if [[ "$MODE" != "recover" && -n "$HARBOR_CONFIG_ARN" ]]; then
       '{sso_assert_priv_pem:$apriv, sso_assert_pub_pem:$apub, sso_sp_cert_pem:$spc, sso_sp_key_pem:$spk,
         sso_idp_metadata:$idp, sso_acs_url:$acs, sso_entity_id:$ent, sso_issuer:$iss, sso_groups_attr:$grp}')"
   fi
+  # Console SAML (admin login) — snapshot the role-map + STABLE SP keypair + IdP metadata so
+  # MODE=recover reconstructs real-Entra console SSO byte-identical (else recover silently reverts to
+  # the dev mock-IdP + drops the admin role-map). Read straight off the box ($SAML_DIR/saml.env +
+  # the SP keypair / idp-metadata), so a later MODE=snapshot refresh needs no operator env. Empty
+  # (no saml.env => SAML off) => the bundle is byte-for-byte the pre-SAML object.
+  SAML_BUNDLE_JSON='{}'
+  if rsh "$HB_ID" "test -f $SAML_DIR/saml.env" >/dev/null 2>&1; then
+    rsh "$HB_ID" "cat $SAML_DIR/sp.key"                              > "$WORK/saml-sp.key"
+    rsh "$HB_ID" "cat $SAML_DIR/sp.crt"                              > "$WORK/saml-sp.crt"
+    rsh "$HB_ID" "cat $SAML_DIR/idp-metadata.xml 2>/dev/null || true" > "$WORK/saml-idp.xml"
+    eval "$(rsh "$HB_ID" "cat $SAML_DIR/saml.env")" # our file; sets SAML_ROLE_MAP/ENTITY_ID/GROUPS_ATTR/METADATA_URL
+    SAML_BUNDLE_JSON="$(jq -n \
+      --rawfile spk "$WORK/saml-sp.key" --rawfile spc "$WORK/saml-sp.crt" --rawfile idp "$WORK/saml-idp.xml" \
+      --arg rm "$SAML_ROLE_MAP" --arg ent "${SAML_ENTITY_ID:-}" --arg grp "${SAML_GROUPS_ATTR:-}" --arg url "${SAML_METADATA_URL:-}" \
+      '{saml_sp_key_pem:$spk, saml_sp_cert_pem:$spc, saml_idp_metadata:$idp,
+        saml_role_map:$rm, saml_entity_id:$ent, saml_groups_attr:$grp, saml_metadata_url:$url}')"
+  fi
   # ca.crt, config-signing.pub, harbor-collect.crt, gw-collect.crt, hmac.b64 are already in $WORK.
   HARBOR_BUNDLE_JSON="$(jq -n \
     --rawfile ca     "$WORK/ca.crt" \
@@ -1067,10 +1139,11 @@ if [[ "$MODE" != "recover" && -n "$HARBOR_CONFIG_ARN" ]]; then
     --rawfile gwcrt  "$WORK/gw-collect.crt" \
     --rawfile acmeb64 "$WORK/acme.tgz.b64" \
     --argjson sso "$SSO_BUNDLE_JSON" \
+    --argjson saml "$SAML_BUNDLE_JSON" \
     '{ca_crt_pem:$ca, config_signing_pub_pem:$cfgpub, host_key_pem:$hkey, host_crt_pem:$hcrt,
       host_config_yml:$hcfg, hmac_key_b64:($hmac|rtrimstr("\n")), harbor_collect_cert_pem:$hccrt,
       harbor_collect_key_pem:$hckey, queue_key_b64:($qkey|rtrimstr("\n")), gw_collect_cert_pem:$gwcrt,
-      acme_cache_tgz_b64:($acmeb64|rtrimstr("\n"))} + $sso')"
+      acme_cache_tgz_b64:($acmeb64|rtrimstr("\n"))} + $sso + $saml')"
   aws secretsmanager put-secret-value --region "$TF_REGION" \
     --secret-id "$HARBOR_CONFIG_ARN" --secret-string "$HARBOR_BUNDLE_JSON" >/dev/null
   echo "    snapshot stored — harbor is recoverable from Secrets Manager + KMS + Aurora$( [[ "$SSO_ENABLED" -eq 1 ]] && echo ' (incl. SSO material)')"
