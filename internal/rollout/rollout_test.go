@@ -348,6 +348,41 @@ func TestStaleLaterWaveDoesNotRollBack(t *testing.T) {
 	}
 }
 
+// TestCompletedRolloutCatchesUpStraggler: after a rollout COMPLETES (a stale host was excluded),
+// that host is still driven to the target gen when it next checks in — the completed target is the
+// fleet-wide FLOOR, not just an in-flight goal. Without this, an excluded/intermittent host (e.g.
+// an off-cloud node that missed the rollout window) would stay on the old gen forever, since an
+// update command otherwise only comes from an ACTIVE rollout.
+func TestCompletedRolloutCatchesUpStraggler(t *testing.T) {
+	eng, db, clk := newEngine(t)
+	ctx := context.Background()
+	start(t, eng, []string{"100.64.0.1", "100.64.0.2"})
+
+	// Wave-1 host (.2) is stale -> excluded; canary (.1) converges -> the rollout completes.
+	heartbeat(t, db, "100.64.0.2", 1, "ok", clk.now().Add(-2*time.Hour))
+	heartbeat(t, db, "100.64.0.1", 2, "ok", clk.now())
+	if _, err := eng.Evaluate(ctx); err != nil { // canary converges -> widen to wave 1
+		t.Fatal(err)
+	}
+	clk.add(4 * time.Minute)
+	if _, err := eng.Evaluate(ctx); err != nil { // wave 1 stale -> excluded -> completed
+		t.Fatal(err)
+	}
+	if r, _, _ := eng.Status(ctx); r.State != rollout.StateCompleted {
+		t.Fatalf("precondition: rollout should have completed; state=%s", r.State)
+	}
+
+	// The straggler (.2) checks back in still on the old gen -> driven up to the target.
+	cmd, ok := eng.CommandFor(ctx, "100.64.0.2", 1)
+	if !ok || cmd.Type != wire.CmdApplyBundle || cmd.BundleVersion != 2 {
+		t.Fatalf("straggler command = %+v ok=%v, want apply_bundle v2 (catch up to the completed floor)", cmd, ok)
+	}
+	// Once it's on the target, no further command.
+	if _, ok := eng.CommandFor(ctx, "100.64.0.2", 2); ok {
+		t.Fatal("a straggler already on the target must get no command")
+	}
+}
+
 // TestCommandDrivesCanaryToTarget: an in-wave host not yet on target is told to
 // apply it; once on target it gets no command.
 func TestCommandDrivesCanaryToTarget(t *testing.T) {

@@ -474,6 +474,16 @@ func (e *Engine) commandForLane(ctx context.Context, lane, overlayIP string, rep
 		if h.Wave <= r.ActiveWave && reportedVersion != r.TargetVersion {
 			return wire.Command{Type: wire.CmdApplyBundle, BundleVersion: r.TargetVersion}, true
 		}
+	case StateCompleted:
+		// The completed rollout's target is the fleet-wide FLOOR (genForLane already stamps it
+		// for everyone). A host EXCLUDED during the rollout (missing/intermittent — e.g. an
+		// off-cloud node that couldn't converge in the window) must still converge when it next
+		// checks in; without this it stays on the old gen forever, since an update command
+		// otherwise only comes from an ACTIVE rollout. Drive any straggler still behind the
+		// target up to it.
+		if reportedVersion != r.TargetVersion {
+			return wire.Command{Type: wire.CmdApplyBundle, BundleVersion: r.TargetVersion}, true
+		}
 	case StateRolledBack:
 		if lane == LaneBlocklist {
 			return wire.Command{}, false // freeze: no content revert for the blocklist lane
