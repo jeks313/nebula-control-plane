@@ -50,6 +50,15 @@ type PutResultsRequest struct {
 	Results []Result `json:"results"`
 }
 
+// PendingResponse lists the enrollment ids the gateway still holds a PENDING result
+// for. Harbor pulls this on its outbound poll (the delivery-reconcile lane), resolves
+// each against its own decisions, and pushes the now-signed results back via
+// /collect/v1/results — so an admin approval reaches the host without the gateway
+// ever calling in to Harbor.
+type PendingResponse struct {
+	EnrollmentIDs []string `json:"enrollment_ids"`
+}
+
 // AckRequest acks consumed lease ids (done) and nacks transient ones (redeliver).
 type AckRequest struct {
 	Ack  []int64 `json:"ack"`
@@ -85,6 +94,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /collect/v1/claim", s.handleClaim)
 	mux.HandleFunc("POST /collect/v1/results", s.handleResults)
 	mux.HandleFunc("POST /collect/v1/ack", s.handleAck)
+	// Delivery-reconcile lane — structurally separate from the claim/ack candidate flow.
+	// Harbor pulls the ids of results still pending here, then pushes the resolved ones
+	// back via /results. Read-only; the gateway never originates a call to Harbor.
+	mux.HandleFunc("GET /collect/v1/pending", s.handlePending)
 	return mux
 }
 
@@ -129,6 +142,17 @@ func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handlePending reports the enrollment ids the gateway is still holding a pending
+// result for — the delivery-reconcile work-list. Read-only over the local queue.
+func (s *Server) handlePending(w http.ResponseWriter, r *http.Request) {
+	ids, err := s.q.PendingResultIDs(r.Context())
+	if err != nil {
+		http.Error(w, "pending lookup failed", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, PendingResponse{EnrollmentIDs: ids})
 }
 
 func (s *Server) handleAck(w http.ResponseWriter, r *http.Request) {

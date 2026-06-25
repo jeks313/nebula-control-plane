@@ -427,6 +427,7 @@ func cmdCollect(args []string) {
 	clientKeyPath := fs.String("client-key", "", "Harbor's collect client key PEM")
 	interval := fs.Duration("interval", 5*time.Second, "gateway poll interval")
 	batch := fs.Int("batch", 64, "candidates claimed per poll")
+	deliveryTTL := fs.Duration("delivery-ttl", 24*time.Hour, "delivery-reconcile lane: how long a delivered issued/denied result stays fetchable on the gateway after an admin decision")
 	once := fs.Bool("once", false, "collect a single batch and exit (cron/test)")
 	obsAddr := fs.String("obs-addr", "", "internal listener for /metrics + /healthz + /readyz (e.g. 10.44.0.2:9445); served plaintext over the overlay, empty disables")
 	lf := addLogFlags(fs)
@@ -445,7 +446,10 @@ func cmdCollect(args []string) {
 	defer s.Close()
 	sink := collect.NewCaptureSink()
 	cons := cf.buildConsumer(s, sink)
-	coll := collect.New(collect.Config{Processor: cons, Sink: sink, ClientCert: clientCert, Batch: *batch, Logger: log})
+	// cons is also the delivery-reconcile Resolver (it re-derives a decided enrollment's
+	// signed result via BuildDeliverable), so an admin approval reaches the gateway on the
+	// next OUTBOUND poll — the gateway never calls Harbor.
+	coll := collect.New(collect.Config{Processor: cons, Sink: sink, ClientCert: clientCert, Batch: *batch, Resolver: cons, DeliveryTTL: *deliveryTTL, Logger: log})
 
 	// Gateways to poll: a single ad-hoc gateway from flags (Phase-1 override), or —
 	// the default — every ACTIVE gateway in the registry (Phase 2), re-read each
@@ -489,15 +493,20 @@ func cmdCollect(args []string) {
 	}
 
 	if *once {
-		total := 0
+		total, delivered := 0, 0
 		for _, gw := range gateways() {
 			n, err := coll.CollectOnce(context.Background(), gw)
 			if err != nil {
 				fatalf("collect %s: %v", gw.Name, err)
 			}
 			total += n
+			d, err := coll.ReconcileOnce(context.Background(), gw)
+			if err != nil {
+				fatalf("collect reconcile %s: %v", gw.Name, err)
+			}
+			delivered += d
 		}
-		fmt.Printf("collected %d candidate(s)\n", total)
+		fmt.Printf("collected %d candidate(s), delivered %d decided result(s)\n", total, delivered)
 		return
 	}
 

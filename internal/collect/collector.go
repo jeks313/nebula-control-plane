@@ -22,6 +22,14 @@ type Processor interface {
 	Process(ctx context.Context, cand queue.Candidate) (enrollment.Result, error)
 }
 
+// Resolver re-derives the signed result to deliver for a DECIDED enrollment (or
+// ok=false if it's still pending). *enrollment.Consumer satisfies it via
+// BuildDeliverable. The delivery-reconcile lane uses it to carry an admin approval to
+// the gateway on Harbor's OUTBOUND poll — the gateway never calls Harbor.
+type Resolver interface {
+	BuildDeliverable(ctx context.Context, enrollmentID string) (status string, bundleJWS []byte, reason string, ok bool, err error)
+}
+
 // CaptureSink is an enrollment.ResultSink that buffers issued/denied results in
 // memory so the collector can ship them back to the originating gateway after a
 // claim batch (instead of writing them to a local queue). Drain returns + clears.
@@ -65,13 +73,16 @@ type Gateway struct {
 // sink), ships the results back, then acks. Collection is SEQUENTIAL per gateway —
 // the shared CaptureSink maps cleanly to one in-flight batch.
 type Collector struct {
-	proc       Processor
-	sink       *CaptureSink
-	clientCert tls.Certificate
-	batch      int
-	leaseTTL   time.Duration
-	httpClient func(gw Gateway) *http.Client
-	log        *slog.Logger
+	proc        Processor
+	sink        *CaptureSink
+	clientCert  tls.Certificate
+	batch       int
+	leaseTTL    time.Duration
+	resolver    Resolver
+	deliveryTTL time.Duration
+	now         func() time.Time
+	httpClient  func(gw Gateway) *http.Client
+	log         *slog.Logger
 
 	mu      sync.Mutex
 	clients map[string]*http.Client // cached per gateway (name|pin) so connections pool across cycles
@@ -79,12 +90,14 @@ type Collector struct {
 
 // Config parameterizes a Collector.
 type Config struct {
-	Processor  Processor
-	Sink       *CaptureSink
-	ClientCert tls.Certificate // Harbor's pinned client identity
-	Batch      int             // candidates per claim (0 -> 64)
-	LeaseTTL   time.Duration   // claim lease (0 -> 60s)
-	Logger     *slog.Logger
+	Processor   Processor
+	Sink        *CaptureSink
+	ClientCert  tls.Certificate // Harbor's pinned client identity
+	Batch       int             // candidates per claim (0 -> 64)
+	LeaseTTL    time.Duration   // claim lease (0 -> 60s)
+	Resolver    Resolver        // delivery-reconcile: re-derive results for decided enrollments (nil disables the lane)
+	DeliveryTTL time.Duration   // how long a delivered issued/denied result stays fetchable (0 -> 24h)
+	Logger      *slog.Logger
 }
 
 // New builds a Collector.
@@ -98,9 +111,14 @@ func New(cfg Config) *Collector {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
+	if cfg.DeliveryTTL <= 0 {
+		cfg.DeliveryTTL = 24 * time.Hour
+	}
 	c := &Collector{
 		proc: cfg.Processor, sink: cfg.Sink, clientCert: cfg.ClientCert,
-		batch: cfg.Batch, leaseTTL: cfg.LeaseTTL, log: cfg.Logger,
+		batch: cfg.Batch, leaseTTL: cfg.LeaseTTL,
+		resolver: cfg.Resolver, deliveryTTL: cfg.DeliveryTTL, now: time.Now,
+		log:     cfg.Logger,
 		clients: map[string]*http.Client{},
 	}
 	c.httpClient = func(gw Gateway) *http.Client {
@@ -209,6 +227,11 @@ func (c *Collector) Run(ctx context.Context, gateways func() []Gateway, interval
 					break // gateway drained
 				}
 			}
+			// Delivery-reconcile lane (separate from the claim/ack drain above): on this
+			// same OUTBOUND cycle, push any admin decisions the gateway is still waiting on.
+			if _, err := c.ReconcileOnce(ctx, gw); err != nil {
+				c.log.Warn("collect: reconcile failed", "gateway", gw.Name, "err", err)
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -241,4 +264,63 @@ func (c *Collector) post(ctx context.Context, client *http.Client, gw Gateway, p
 		return json.Unmarshal(rb, out)
 	}
 	return nil
+}
+
+func (c *Collector) get(ctx context.Context, client *http.Client, gw Gateway, path string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, gw.URL+path, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	rb, _ := io.ReadAll(io.LimitReader(resp.Body, collectMaxBody))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("%s -> %d: %s", path, resp.StatusCode, rb)
+	}
+	return json.Unmarshal(rb, out)
+}
+
+// ReconcileOnce delivers admin decisions the gateway is still waiting on — the
+// delivery-reconcile lane, structurally separate from CollectOnce's claim/ack. On
+// Harbor's OUTBOUND poll it pulls the gateway's still-pending enrollment ids, asks the
+// Resolver whether each is now decided, and pushes the signed results back via
+// /collect/v1/results with a fresh delivery TTL. The gateway then serves them to the
+// host's own poll — it never calls Harbor. Idempotent: PutResult upserts, and a row
+// that flips to issued/denied drops off the pending list, so each decision ships once.
+func (c *Collector) ReconcileOnce(ctx context.Context, gw Gateway) (delivered int, err error) {
+	if c.resolver == nil {
+		return 0, nil
+	}
+	client := c.clientFor(gw)
+	var pending PendingResponse
+	if err := c.get(ctx, client, gw, "/collect/v1/pending", &pending); err != nil {
+		return 0, fmt.Errorf("pending: %w", err)
+	}
+	var results []Result
+	for _, id := range pending.EnrollmentIDs {
+		status, bundleJWS, reason, ok, rerr := c.resolver.BuildDeliverable(ctx, id)
+		if rerr != nil {
+			c.log.Warn("collect: reconcile resolve failed", "gateway", gw.Name, "enrollment", id, "err", rerr)
+			continue
+		}
+		if !ok {
+			continue // still pending on Harbor's side too — nothing to deliver yet
+		}
+		results = append(results, Result{
+			EnrollmentID: id, Status: status, Bundle: bundleJWS, Reason: reason,
+			SecretHash: nil, // the gateway preserves the pending row's secret_hash on upsert
+			ExpiresAt:  c.now().Add(c.deliveryTTL),
+		})
+	}
+	if len(results) == 0 {
+		return 0, nil
+	}
+	if err := c.post(ctx, client, gw, "/collect/v1/results", PutResultsRequest{Results: results}, nil); err != nil {
+		return 0, fmt.Errorf("deliver results: %w", err)
+	}
+	c.log.Info("collect: delivered decided enrollments", "gateway", gw.Name, "count", len(results))
+	return len(results), nil
 }

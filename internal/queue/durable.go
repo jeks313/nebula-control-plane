@@ -300,6 +300,21 @@ func (d *Durable) GetResult(ctx context.Context, enrollmentID, secret string) (P
 	return PollResult{Status: r.Status, Bundle: r.Bundle, Reason: r.Reason}, nil
 }
 
+// PendingResultIDs lists the enrollment ids the gateway is still holding a PENDING
+// result for. It is the work-list Harbor reconciles against its own decisions on
+// each outbound poll: the gateway only ANSWERS this query (it never calls Harbor),
+// so an admin approval reaches the host without crossing the inbound boundary.
+func (d *Durable) PendingResultIDs(ctx context.Context) ([]string, error) {
+	var ids []string
+	err := d.db.WithContext(ctx).Model(&result{}).
+		Where("status = ?", "pending").
+		Pluck("enrollment_id", &ids).Error
+	if err != nil {
+		return nil, fmt.Errorf("queue: pending result ids: %w", err)
+	}
+	return ids, nil
+}
+
 func (d *Durable) mac(it item) []byte {
 	h := hmac.New(sha256.New, d.key)
 	writeField(h, []byte(it.EnrollmentID))

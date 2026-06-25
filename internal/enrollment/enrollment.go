@@ -34,6 +34,7 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/store"
 	"github.com/jeks313/nebula-control-plane/internal/usertrust"
 	"github.com/jeks313/nebula-control-plane/internal/wire"
+	"github.com/slackhq/nebula/cert"
 	"gorm.io/gorm"
 )
 
@@ -768,6 +769,40 @@ func (c *Consumer) existing(ctx context.Context, enrollmentID string) (Result, b
 	return Result{}, false
 }
 
+// BuildDeliverable re-derives the signed poll result to ship for an enrollment that
+// has been DECIDED (issued/denied), or ok=false if it is still pending (nothing to
+// deliver yet) or unknown to us. It rebuilds the issued bundle from the stored row —
+// the same inputs Approve used — so the ADR-0005 collector can carry an admin approval
+// to the gateway on its OUTBOUND poll, without the gateway ever calling in to Harbor.
+// Primitive return types so *Consumer satisfies collect.Resolver with no import cycle.
+func (c *Consumer) BuildDeliverable(ctx context.Context, enrollmentID string) (status string, bundleJWS []byte, reason string, ok bool, err error) {
+	var e Enrollment
+	if derr := c.cfg.Store.DB.WithContext(ctx).Where("enrollment_id = ?", enrollmentID).First(&e).Error; derr != nil {
+		if errors.Is(derr, gorm.ErrRecordNotFound) {
+			return "", nil, "", false, nil // gateway holds a pending result for an id we don't recognize — skip
+		}
+		return "", nil, "", false, derr
+	}
+	switch e.Status {
+	case StatusIssued:
+		var groups []string
+		_ = json.Unmarshal([]byte(e.Groups), &groups)
+		crt, _, cerr := cert.UnmarshalCertificateFromPEM(e.CertPEM)
+		if cerr != nil {
+			return "", nil, "", false, fmt.Errorf("enroll: deliverable %s: parse cert: %w", enrollmentID, cerr)
+		}
+		b, berr := c.buildBundle(ctx, e.DeviceName, e.OverlayIP, groups, e.CertPEM, crt.NotAfter(), e.GOOS, e.GOARCH)
+		if berr != nil {
+			return "", nil, "", false, berr
+		}
+		return StatusIssued, b, "", true, nil
+	case StatusDenied:
+		return StatusDenied, nil, "enrollment denied by an administrator", true, nil
+	default: // pending or unknown — nothing to deliver yet
+		return "", nil, "", false, nil
+	}
+}
+
 // Pending lists enrollments awaiting approval (feeds the admin queue, 3.9).
 func (c *Consumer) Pending(ctx context.Context) ([]Enrollment, error) {
 	var es []Enrollment
@@ -1024,11 +1059,19 @@ func (c *Consumer) writeResult(ctx context.Context, enrollmentID string, secretH
 	if c.cfg.Results == nil {
 		return
 	}
-	ttl := c.cfg.ResultTTL
-	if ttl <= 0 {
-		ttl = time.Hour
+	// A pending-approval result must outlive the operator-paced, unbounded manual-approval
+	// wait, so it gets NO expiry — epoch (UnixNano 0) is the store's never-expire sentinel
+	// (queue GetResult skips the expiry check when ExpiresAt == 0). issued/denied carry a
+	// finite delivery TTL: the host has that long to fetch before the row is reaped.
+	expiresAt := time.Unix(0, 0) // never-expire sentinel (pending awaiting approval)
+	if status != StatusPending {
+		ttl := c.cfg.ResultTTL
+		if ttl <= 0 {
+			ttl = time.Hour
+		}
+		expiresAt = c.now().Add(ttl)
 	}
-	_ = c.cfg.Results.PutResult(ctx, enrollmentID, status, secretHash, bundleJWS, reason, c.now().Add(ttl))
+	_ = c.cfg.Results.PutResult(ctx, enrollmentID, status, secretHash, bundleJWS, reason, expiresAt)
 }
 
 // evidence carries cloud-attestation facts captured (from the cloud provider, never the

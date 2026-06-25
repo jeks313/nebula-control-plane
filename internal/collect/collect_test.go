@@ -109,6 +109,73 @@ func TestPullTransportEndToEnd(t *testing.T) {
 	}
 }
 
+// fakeResolver stands in for Harbor's enrollment store after an admin decision: it
+// yields an issued bundle for the ids it knows are approved, and ok=false otherwise.
+type fakeResolver struct{ approved map[string][]byte }
+
+func (r fakeResolver) BuildDeliverable(_ context.Context, id string) (string, []byte, string, bool, error) {
+	if b, ok := r.approved[id]; ok {
+		return "issued", b, "", true, nil
+	}
+	return "", nil, "", false, nil // still pending on Harbor's side
+}
+
+// TestReconcileDeliversDecided: a host enrolled and went PENDING (the gateway holds a
+// never-expiring pending result), an admin later approved it in Harbor — and the
+// delivery-reconcile lane carries that approval to the gateway on Harbor's OUTBOUND
+// poll, so the host's next poll gets the signed bundle. The gateway initiates nothing.
+func TestReconcileDeliversDecided(t *testing.T) {
+	ctx := context.Background()
+	q := openQueue(t) // the gateway's LOCAL queue
+
+	// The gateway holds a PENDING result (shipped during initial processing), the
+	// retrieval-secret hash bound and NO expiry (epoch sentinel) so it survives the wait.
+	secret := "retrieval-secret-xyz"
+	h := sha256.Sum256([]byte(secret))
+	if err := q.PutResult(ctx, "eid-1", "pending", h[:], nil, "", time.Unix(0, 0)); err != nil {
+		t.Fatal(err)
+	}
+
+	gwCert, gwPin := mustCert(t, "gateway")
+	harborCert, harborPin := mustCert(t, "harbor")
+	srv := httptest.NewUnstartedServer(collect.NewServer(q, nil).Handler())
+	srv.TLS = collect.ServerTLS(gwCert, harborPin)
+	srv.StartTLS()
+	defer srv.Close()
+
+	// Harbor's side: the admin approved eid-1, so the resolver now yields an issued bundle.
+	approvedBundle := []byte(`{"bundle":"approved-eid-1"}`)
+	coll := collect.New(collect.Config{
+		Resolver:   fakeResolver{approved: map[string][]byte{"eid-1": approvedBundle}},
+		ClientCert: harborCert, Batch: 10,
+	})
+	gw := collect.Gateway{Name: "gw1", URL: srv.URL, ServerCertPin: gwPin}
+
+	delivered, err := coll.ReconcileOnce(ctx, gw)
+	if err != nil {
+		t.Fatalf("ReconcileOnce: %v", err)
+	}
+	if delivered != 1 {
+		t.Fatalf("delivered %d, want 1", delivered)
+	}
+
+	// The host's poll now gets the issued bundle, with the secret_hash preserved from the
+	// pending row (we push secret_hash=nil and rely on the gateway's upsert to keep it).
+	res, err := q.GetResult(ctx, "eid-1", secret)
+	if err != nil {
+		t.Fatalf("GetResult after reconcile: %v", err)
+	}
+	if res.Status != "issued" || string(res.Bundle) != string(approvedBundle) {
+		t.Fatalf("result = %+v, want issued with the approved bundle", res)
+	}
+
+	// Now that it's issued (not pending), it drops off the pending work-list — a second
+	// reconcile delivers nothing (each decision ships once).
+	if d, err := coll.ReconcileOnce(ctx, gw); err != nil || d != 0 {
+		t.Fatalf("second reconcile = (%d, %v), want (0, nil)", d, err)
+	}
+}
+
 // TestWrongServerPinRefused: the collector must refuse a gateway whose server cert
 // doesn't match the pinned leaf (a MITM / wrong endpoint) — no candidate leaks.
 func TestWrongServerPinRefused(t *testing.T) {

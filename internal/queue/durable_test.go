@@ -191,6 +191,47 @@ func TestGetResultOneTime(t *testing.T) {
 	}
 }
 
+// TestPendingResultIDsAndNeverExpire: a pending result written with the never-expire
+// sentinel (epoch) is NOT reaped, IS listed by PendingResultIDs (the delivery-reconcile
+// work-list), and once it flips to issued it drops off the list with its secret_hash
+// preserved. An already-issued result is never on the list (it's terminal).
+func TestPendingResultIDsAndNeverExpire(t *testing.T) {
+	d := newDurable(t)
+	ctx := context.Background()
+	sum := sha256.Sum256([]byte("sek"))
+
+	// A pending-approval result with the never-expire sentinel (epoch => ExpiresAt 0).
+	if err := d.PutResult(ctx, "pend-1", "pending", sum[:], nil, "", time.Unix(0, 0)); err != nil {
+		t.Fatal(err)
+	}
+	putIssued(t, d, "iss-1", "sek2", []byte("b")) // terminal — must not be listed
+
+	ids, err := d.PendingResultIDs(ctx)
+	if err != nil {
+		t.Fatalf("PendingResultIDs: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != "pend-1" {
+		t.Fatalf("pending ids = %v, want [pend-1]", ids)
+	}
+
+	// Never-expire pending is still fetchable (not reaped) and reads as pending.
+	if r, err := d.GetResult(ctx, "pend-1", "sek"); err != nil || r.Status != "pending" {
+		t.Fatalf("GetResult pending = (%+v, %v), want pending", r, err)
+	}
+
+	// An approval delivered: flip pending -> issued with secret_hash=nil; the upsert must
+	// preserve the original secret_hash, and the id drops off the pending work-list.
+	if err := d.PutResult(ctx, "pend-1", "issued", nil, []byte("approved"), "", time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if ids, _ := d.PendingResultIDs(ctx); len(ids) != 0 {
+		t.Fatalf("pending ids after issue = %v, want []", ids)
+	}
+	if r, err := d.GetResult(ctx, "pend-1", "sek"); err != nil || string(r.Bundle) != "approved" {
+		t.Fatalf("GetResult issued (preserved secret) = (%+v, %v), want the approved bundle", r, err)
+	}
+}
+
 // TestGetResultConcurrentOneTime proves the consume is atomic: with N readers
 // racing the same issued result, exactly one gets the bundle (no cross-process /
 // concurrent TOCTOU double-delivery).
