@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -256,6 +257,34 @@ func TestEnrollSSOResumesPendingTicket(t *testing.T) {
 	}
 	if g.gotStart != nil {
 		t.Error("resume path should not call /v1/sso/start")
+	}
+}
+
+// TestEnrollSSOEarlyExitsOnPending: a 202 pending result means Core finished processing
+// and parked the enrollment for manual approval (it only clears via a separate admin
+// decision). The client must return "pending" on the FIRST such poll, not keep polling
+// until PollTimeout. Asserts exactly one poll despite a deliberately long timeout — so a
+// regression to poll-to-timeout makes this both slow and fail.
+func TestEnrollSSOEarlyExitsOnPending(t *testing.T) {
+	g := newFakeGateway(t)
+	var polls atomic.Int32
+	g.pollBody = func() (int, []byte) {
+		polls.Add(1)
+		b, _ := json.Marshal(wire.PollResponse{Status: "pending", PollAfterMs: 1})
+		return http.StatusAccepted, b
+	}
+	p := ssoTestParams(t, g)
+	p.PollTimeout = 5 * time.Second // long: poll-to-timeout would loop thousands of times here
+
+	res, err := EnrollSSO(context.Background(), p)
+	if err != nil {
+		t.Fatalf("EnrollSSO: %v", err)
+	}
+	if res.Status != "pending" {
+		t.Fatalf("Status = %q, want pending", res.Status)
+	}
+	if n := polls.Load(); n != 1 {
+		t.Errorf("polled %d times, want exactly 1 (early-exit on the first 202 pending, not poll-to-timeout)", n)
 	}
 }
 

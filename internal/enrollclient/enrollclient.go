@@ -361,9 +361,13 @@ func (p Params) fetchNonce(ctx context.Context, binding string) (string, error) 
 }
 
 // poll waits for the result, returning the issued bundle JWS or a terminal
-// status. A not-yet-processed enrollment (404) or pending (202) keeps polling
-// until PollTimeout, after which a still-pending enrollment returns "pending"
-// (e.g. awaiting manual approval).
+// status. A not-yet-processed enrollment (404 — Core hasn't written a result row
+// yet) keeps polling until PollTimeout. A pending result (202 — Core processed it
+// and parked it for manual approval) returns "pending" IMMEDIATELY: that state
+// only clears via a separate admin approve/deny, so polling on would just burn the
+// timeout. On timeout with only 404s, it also returns "pending" (Core never got to
+// it within the window). Callers print "awaiting approval" and the operator re-runs
+// after approval (the ticket resumes the poll).
 func (p Params) poll(ctx context.Context, acc wire.EnrollAccepted) (bundleJWS []byte, status, reason string, err error) {
 	interval := time.Duration(acc.PollAfterMs) * time.Millisecond
 	if interval <= 0 {
@@ -385,8 +389,17 @@ func (p Params) poll(ctx context.Context, acc wire.EnrollAccepted) (bundleJWS []
 				return pr.Bundle, "issued", "", nil
 			}
 			return nil, pr.Status, pr.Reason, nil // denied
-		case http.StatusAccepted, http.StatusNotFound:
-			// pending or not-yet-processed: keep polling.
+		case http.StatusNotFound:
+			// Core hasn't written a result row yet (still queued / being processed): keep polling.
+		case http.StatusAccepted:
+			// Core processed this and is holding it for manual admin approval. 202 means a
+			// status="pending" result row EXISTS (a not-yet-processed candidate is the 404 above,
+			// never 202), and Core only writes that pending row at a terminal needs-approval
+			// decision — it never flips to issued/denied without a separate admin action. So don't
+			// burn PollTimeout waiting: return "pending" now; the caller reports "awaiting approval"
+			// and the operator re-runs after approval (the ticket resumes). Tradeoff: an approval
+			// that lands DURING this call no longer auto-completes — re-run to fetch the bundle.
+			return nil, "pending", "", nil
 		case http.StatusGone:
 			return nil, "", "", fmt.Errorf("enrollclient: result expired/consumed")
 		default:
