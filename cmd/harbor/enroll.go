@@ -67,22 +67,27 @@ type coreFlags struct {
 func addCoreFlags(fs *flag.FlagSet) *coreFlags {
 	cf := &coreFlags{}
 	cf.driver, cf.dsn = dbFlags(fs)
-	cf.backend = fs.String("backend", "software", "CA/config backend: software|pkcs11|kms")
-	cf.caCert = fs.String("ca-cert", "", "CA certificate PEM (required)")
-	cf.caKey = fs.String("ca-key", "", "software CA key (software backend)")
-	cf.configKey = fs.String("config-key", "", "software config-signing key (software backend)")
+	// Signing + queue + pool flag DEFAULTS come from HARBOR_* env vars when set (an explicit -flag still
+	// wins), mirroring dbFlags — so an interactive shell on the control-plane node can run a core
+	// subcommand (e.g. `harbor enroll approve <id> -approver A`) without retyping the CA/KMS/queue/pool
+	// wiring. The systemd units pass explicit flags, so they are unaffected; tests with no env keep the
+	// original defaults. /etc/profile.d/harbor-cli.sh exports these on the harbor node (bootstrap-genesis).
+	cf.backend = fs.String("backend", envOr("HARBOR_BACKEND", "software"), "CA/config backend: software|pkcs11|kms (default: $HARBOR_BACKEND, else software)")
+	cf.caCert = fs.String("ca-cert", os.Getenv("HARBOR_CA_CERT"), "CA certificate PEM (required) (default: $HARBOR_CA_CERT)")
+	cf.caKey = fs.String("ca-key", os.Getenv("HARBOR_CA_KEY"), "software CA key (software backend) (default: $HARBOR_CA_KEY)")
+	cf.configKey = fs.String("config-key", os.Getenv("HARBOR_CONFIG_KEY"), "software config-signing key (software backend) (default: $HARBOR_CONFIG_KEY)")
 	cf.module = fs.String("pkcs11-module", "/usr/lib/softhsm/libsofthsm2.so", "PKCS#11 module")
 	cf.token = fs.String("pkcs11-token", "", "PKCS#11 token label")
 	cf.pin = fs.String("pkcs11-pin", "", "PKCS#11 PIN")
 	cf.caLbl = fs.String("pkcs11-ca-key-label", "", "PKCS#11 CA key label")
 	cf.configLbl = fs.String("pkcs11-config-key-label", "", "PKCS#11 config-signing key label")
-	cf.caKmsKeyID = fs.String("kms-ca-key-id", "", "KMS CA key id/arn (kms backend)")
-	cf.cfgKmsKeyID = fs.String("kms-config-key-id", "", "KMS config-signing key id/arn (kms backend)")
-	cf.kmsRegion = fs.String("kms-region", "", "AWS region for KMS (kms backend; else the default chain)")
-	cf.hmacKey = fs.String("hmac-key", "", "nonce HMAC key (base64url, shared with gateway) (required)")
-	cf.queueDSN = fs.String("queue-dsn", "", "durable queue DSN (required)")
-	cf.queueKey = fs.String("queue-key", "", "queue HMAC key (base64url, shared with gateway) (required)")
-	cf.pool = fs.String("pool", "100.64.0.0/16", "overlay pool CIDR")
+	cf.caKmsKeyID = fs.String("kms-ca-key-id", os.Getenv("HARBOR_KMS_CA_KEY_ID"), "KMS CA key id/arn (kms backend) (default: $HARBOR_KMS_CA_KEY_ID)")
+	cf.cfgKmsKeyID = fs.String("kms-config-key-id", os.Getenv("HARBOR_KMS_CONFIG_KEY_ID"), "KMS config-signing key id/arn (kms backend) (default: $HARBOR_KMS_CONFIG_KEY_ID)")
+	cf.kmsRegion = fs.String("kms-region", os.Getenv("HARBOR_KMS_REGION"), "AWS region for KMS (kms backend; else the default chain) (default: $HARBOR_KMS_REGION)")
+	cf.hmacKey = fs.String("hmac-key", os.Getenv("HARBOR_HMAC_KEY"), "nonce HMAC key (base64url, shared with gateway) (required) (default: $HARBOR_HMAC_KEY)")
+	cf.queueDSN = fs.String("queue-dsn", os.Getenv("HARBOR_QUEUE_DSN"), "durable queue DSN (required) (default: $HARBOR_QUEUE_DSN)")
+	cf.queueKey = fs.String("queue-key", os.Getenv("HARBOR_QUEUE_KEY"), "queue HMAC key (base64url, shared with gateway) (required) (default: $HARBOR_QUEUE_KEY)")
+	cf.pool = fs.String("pool", envOr("HARBOR_POOL", "100.64.0.0/16"), "overlay pool CIDR (default: $HARBOR_POOL, else 100.64.0.0/16)")
 	cf.tunDev = fs.String("tun-dev", "nebula1", "nebula TUN device name stamped into this mesh's bundles (use a DISTINCT name per mesh on multi-mesh hosts)")
 	cf.listenPort = fs.Int("listen-port", 4242, "nebula UDP listen port stamped into this mesh's bundles (use a DISTINCT port per mesh on multi-mesh hosts)")
 	cf.nebulaVersion = fs.String("nebula-version", "", "nebula version Harbor distributes to the fleet (ADR 0003); stamped into every bundle (empty -> hosts keep their current nebula)")
@@ -535,7 +540,10 @@ func enrollApprove(args []string) {
 	id := args[0]
 	fs := flag.NewFlagSet("enroll approve", flag.ExitOnError)
 	cf := addCoreFlags(fs)
-	approver := fs.String("approver", "", "approving admin identity (required)")
+	// -approver attributes the approval in the audit trail, so it stays REQUIRED (never blank). It may
+	// default from $HARBOR_APPROVER for an operator who sets it in their OWN shell, but bootstrap does
+	// NOT export it into the shared /etc/profile.d (that would mis-attribute every approval to one id).
+	approver := fs.String("approver", os.Getenv("HARBOR_APPROVER"), "approving admin identity (required; default: $HARBOR_APPROVER)")
 	_ = fs.Parse(args[1:])
 	if *approver == "" {
 		fatalf("enroll approve: -approver is required")
