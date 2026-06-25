@@ -198,6 +198,37 @@ func TestEnrollDefaultsToPendingThenApprove(t *testing.T) {
 	}
 }
 
+// TestEnrollPersistsNetblock: the IPAM netblock chosen at enroll time (here a join
+// key's sub-range) is persisted on the pending enrollment row, so Approve allocates
+// from the SAME block by reading it — instead of re-deriving it at approve time, which
+// for SSO/cloud needs the trust config loaded in the approving process (the bug that
+// put manually-approved SSO hosts in 'default').
+func TestEnrollPersistsNetblock(t *testing.T) {
+	e := setupEnroll(t)
+	ctx := context.Background()
+	secret, _, _ := joinkey.Create(ctx, e.store, joinkey.Params{Name: "nb", Groups: []string{"web"}, MaxUses: 1, SubRange: "special-block"}, time.Now())
+	res, err := e.cons.Process(ctx, e.candidate(t, secret, "host-nb"))
+	if err != nil {
+		t.Fatalf("Process: %v", err)
+	}
+	if res.Status != enrollment.StatusPending {
+		t.Fatalf("status = %q, want pending", res.Status)
+	}
+	pend, _ := e.cons.Pending(ctx)
+	var row *enrollment.Enrollment
+	for i := range pend {
+		if pend[i].EnrollmentID == "eid-host-nb" {
+			row = &pend[i]
+		}
+	}
+	if row == nil {
+		t.Fatal("pending enrollment eid-host-nb not found")
+	}
+	if row.SubRange != "special-block" {
+		t.Errorf("persisted SubRange = %q, want special-block (the netblock captured at enroll time)", row.SubRange)
+	}
+}
+
 func TestEnrollAutoIssue(t *testing.T) {
 	e := setupEnroll(t)
 	ctx := context.Background()
