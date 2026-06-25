@@ -865,7 +865,10 @@ $LH_REGISTER_BLOCK
   # (7.1) — matches core-api's renew path so a revocation propagates on both enroll and renew.
   # -lighthouse-db: bundles read the DB lighthouse registry (above) as the source of truth; the
   # static -lighthouse flag is kept as the fallback if that registry read ever errors.
-  sudo systemd-run --uid=$SSH_USER --gid=$SSH_USER --unit ncp-collect --collect /usr/local/bin/harbor collect -pool '$POOL' \
+  # -interval 1s: pull pending candidates from the gateway every 1s (vs the 5s default) so an
+  # auto-issued enrollment's result comes back in ~1s instead of ~3s avg; cheap at POC enrollment
+  # volume (just 5x idle gateway polls/min). Does NOT affect pending-approval waits (client-side timeout).
+  sudo systemd-run --uid=$SSH_USER --gid=$SSH_USER --unit ncp-collect --collect /usr/local/bin/harbor collect -interval 1s -pool '$POOL' \
     $HARBOR_DB_FLAGS -ca-cert \$G/ca.crt $SIGN_BACKEND \
     -hmac-key ~/ncp/hmac.b64 -lighthouse '$LH' -lighthouse-db -cloudtrust-db -blocklist-db -obs-addr $HARBOR_OVERLAY:$COLLECT_OBS_PORT \
     -client-cert ~/ncp/harbor-collect.crt -client-key ~/ncp/harbor-collect.key $CORE_SSO_FLAGS >/dev/null
