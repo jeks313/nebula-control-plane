@@ -4,6 +4,7 @@ import { usePermissions } from '../api/perms'
 import { isApiError, isCentrallyHandled, isForbidden } from '../api/errors'
 import { useToast } from '../components/Toast'
 import { Card, Page, StateBlock, ErrorState, Button, Chip, cx } from '../components/ui'
+import { InstallCommand } from '../components/InstallCommand'
 
 // Cloud Trust — the declarative cloud-attestation config (ADR 0011 Phase 1): which cloud
 // principals (AWS accounts/roles today) may attest into the mesh, and the groups +
@@ -50,6 +51,8 @@ export function CloudTrust() {
           />
         ) : (
           <div className="flex flex-col gap-4">
+            <InstallCommand method="cloud" title="Enroll a cloud instance" />
+
             <Card className="px-4 py-3 text-[13px] text-ink-dim">
               Active config v<span className="nums text-ink">{cfg.version}</span>. Default groups granted to every
               attested host:{' '}

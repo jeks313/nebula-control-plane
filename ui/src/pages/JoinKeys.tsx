@@ -14,6 +14,7 @@ import { usePermissions } from '../api/perms'
 import { isApiError, isForbidden, isCentrallyHandled } from '../api/errors'
 import { useToast } from '../components/Toast'
 import { Card, Page, StateBlock, ErrorState, Button, Chip, cx } from '../components/ui'
+import { InstallCommand } from '../components/InstallCommand'
 import { Dialog } from '../components/Dialog'
 import { fmtDateTime, usesLabel, downloadText } from '../lib/format'
 
@@ -30,6 +31,10 @@ export function JoinKeys() {
       subtitle="Bootstrap secrets for host enrollment — the secret is shown once at creation"
       actions={mayManage ? <Button variant="primary" onClick={() => setCreateOpen(true)}>Create join key</Button> : undefined}
     >
+      <div className="mb-5">
+        <InstallCommand method="joinkey" title="Enroll a host with a join key" />
+      </div>
+
       {q.isPending && <StateBlock kind="loading" message="Loading join keys…" />}
       {q.isError && <ErrorState error={q.error} fallback="Couldn't load join keys." />}
       {q.data &&
@@ -340,6 +345,13 @@ function SecretModal({ created, onClose }: { created: JoinKeyCreated; onClose: (
           Copy
         </Button>
         <Button onClick={() => downloadText(`joinkey-${created.joinkey.name}.txt`, secretFile(created))}>Download</Button>
+      </div>
+      <div className="mt-3">
+        <InstallCommand
+          method="joinkey"
+          env={{ NCP_JOIN_KEY: created.secret }}
+          title="Ready-to-run install command (secret inlined)"
+        />
       </div>
       <label className="mt-4 flex items-center gap-2 text-[13px] text-ink-dim">
         <input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} /> I&rsquo;ve saved this secret

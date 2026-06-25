@@ -233,6 +233,11 @@ fi
 # that hostname (operators must resolve it to Harbor's overlay IP for mesh members). Empty =
 # plain HTTP on the overlay IP (unchanged default).
 HARBOR_DOMAIN="$(val '.harbor_domain.value')"
+# Public artifact-bucket base URL (where install-{joinkey,sso,cloud}.sh live). The console
+# renders its node "Copy install command" widgets from it (-installer-base-url). Empty when
+# the artifacts layer isn't applied — the console then shows a generic hint instead.
+ARTIFACTS_BASE_URL="$(val '.artifacts_base_url.value')"
+INSTALLER_FLAG=""; [[ -n "$ARTIFACTS_BASE_URL" ]] && INSTALLER_FLAG="-installer-base-url $ARTIFACTS_BASE_URL"
 ACME_EMAIL="$(val '.acme_email.value')"
 ACME_STAGING="$(val '.acme_staging.value')"          # "true" when staging; else "" (jq's // collapses bool false to empty)
 CF_SECRET_ARN="$(val '.cloudflare_token_secret_arn.value')"
@@ -1127,7 +1132,7 @@ rsh "$HB_ID" "set -e
     $HARBOR_DB_FLAGS -ca-cert \$G/ca.crt $SIGN_BACKEND \
     -hmac-key ~/ncp/hmac.b64 -queue-dsn \$QDSN -queue-key ~/ncp/queue.b64 -pool '$POOL' \
     -addr $HARBOR_OVERLAY:$ADMIN_PORT -base-url $ADMIN_URL \
-    $IDP_FLAGS${CORE_SSO_FLAGS:+ $CORE_SSO_FLAGS}${ACME_FLAGS:+ $ACME_FLAGS} >/dev/null
+    $IDP_FLAGS${INSTALLER_FLAG:+ $INSTALLER_FLAG}${CORE_SSO_FLAGS:+ $CORE_SSO_FLAGS}${ACME_FLAGS:+ $ACME_FLAGS} >/dev/null
   echo ok"
 cp "$WORK/config-signing.pub" "$ROOT/deploy/prod/terraform/app/config-signing.pub"  # gitignored; the pin for clients
 echo "    core-api + admin console up"

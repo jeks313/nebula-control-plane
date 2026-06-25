@@ -81,7 +81,7 @@ func usage() {
 	fmt.Fprint(os.Stderr, `pilot — Nebula Control Plane host agent
 
 usage:
-  pilot install -gateway <url> -core <url> -config-pub <pem> (-join-key <secret> | -aws-sigv4) [-mesh <id>] [-name N] [-groups a,b]
+  pilot install -gateway <url> -core <url> -config-pub <pem> (-join-key <secret> | -aws-sigv4 | --sso) [-mesh <id>] [-name N] [-groups a,b]
   pilot status [-mesh <id>]
   pilot info [--json] [-mesh <id>] [-dir <path>]
   pilot uninstall [-mesh <id>] [-purge] | -all
@@ -686,6 +686,8 @@ func cmdInstall(args []string) {
 	joinKey := fs.String("join-key", "", "join key secret (required unless -aws-sigv4)")
 	awsSigV4 := fs.Bool("aws-sigv4", false, "attest via this instance's IAM role (IMDS) instead of a join key")
 	region := fs.String("region", "", "STS region for -aws-sigv4 (default: IMDS-derived)")
+	sso := fs.Bool("sso", false, "enroll via browser SSO (loopback authorization-code; opens your browser to the IdP)")
+	ssoWait := fs.Duration("sso-wait", 3*time.Minute, "max time to wait for the browser SSO sign-in (--sso)")
 	name := fs.String("name", "", "requested device name (cosmetic)")
 	groups := fs.String("groups", "", "requested groups (advisory; cloud-trust / join key decides)")
 	nebulaPath := fs.String("nebula", defaultNebulaPath, "path to the nebula binary the service runs")
@@ -725,8 +727,14 @@ func cmdInstall(args []string) {
 		fmt.Fprintln(os.Stderr, "pilot install: -gateway and -config-pub are required")
 		os.Exit(2)
 	}
-	if *awsSigV4 == (*joinKey != "") { // exactly one credential source
-		fatalf("install: provide either -join-key or -aws-sigv4 (not both, not neither)")
+	sources := 0
+	for _, on := range []bool{*joinKey != "", *awsSigV4, *sso} {
+		if on {
+			sources++
+		}
+	}
+	if sources != 1 { // exactly one credential source
+		fatalf("install: provide exactly one credential source: -join-key, -aws-sigv4, or --sso")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -759,10 +767,19 @@ func cmdInstall(args []string) {
 	if fileExists(layout.HostCert()) {
 		fmt.Printf("install: mesh %q already enrolled (%s present) — ensuring the service\n", *mesh, layout.HostCert())
 	} else {
-		res, err := enrollclient.Enroll(ctx, enrollclient.Params{
-			GatewayURL: *gateway, JoinKey: *joinKey, AWSSigV4: *awsSigV4, Region: *region, Layout: layout,
-			RequestedName: *name, RequestedGroups: splitCSV(*groups), PinnedConfigPub: pinned, PollTimeout: *timeout,
-		})
+		var res enrollclient.Result
+		if *sso {
+			res, err = enrollclient.EnrollSSO(ctx, enrollclient.SSOParams{
+				GatewayURL: *gateway, Layout: layout,
+				RequestedName: *name, RequestedGroups: splitCSV(*groups),
+				PinnedConfigPub: pinned, PollTimeout: *timeout, SSOWait: *ssoWait,
+			})
+		} else {
+			res, err = enrollclient.Enroll(ctx, enrollclient.Params{
+				GatewayURL: *gateway, JoinKey: *joinKey, AWSSigV4: *awsSigV4, Region: *region, Layout: layout,
+				RequestedName: *name, RequestedGroups: splitCSV(*groups), PinnedConfigPub: pinned, PollTimeout: *timeout,
+			})
+		}
 		if err != nil {
 			fatalf("install: enroll: %v", err)
 		}
@@ -770,6 +787,13 @@ func cmdInstall(args []string) {
 		case "issued":
 			fmt.Printf("install: enrolled mesh %q — overlay IP %s\n", *mesh, res.OverlayIP)
 		case "pending":
+			if *sso {
+				// SSO admission defaults to PENDING (S8): sign-in accepted, queued for an
+				// admin to approve. Re-run after approval to fetch the bundle (no second sign-in).
+				fmt.Println("install --sso: submitted — awaiting admin approval.")
+				fmt.Printf("  Re-run `pilot install -mesh %s --sso ...` after approval to finish; the service is NOT yet started.\n", *mesh)
+				return
+			}
 			fmt.Println("install: enrollment submitted — awaiting manual approval.")
 			fmt.Printf("  Re-run `pilot install -mesh %s ...` after approval to finish; the service is NOT yet started.\n", *mesh)
 			return

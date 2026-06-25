@@ -35,15 +35,43 @@ for plat in "${SAFE_PLATFORMS[@]}"; do
   GOOS="${plat%/*}" GOARCH="${plat#*/}" "$ROOT/deploy/prod/artifacts/publish.sh" pilot "$VER"
 done
 
-# Sync the bucket's off-cloud installer (install.sh, curl|bash) to this version NOW — BEFORE the
-# failure-prone Windows lane — so a Windows hiccup can never leave a stale install.sh (the installer
-# is POSIX-only and unaffected by Windows anyway).
-BUCKET="$(terraform -chdir="$ROOT/deploy/prod/terraform/app" output -raw artifacts_bucket 2>/dev/null || true)"
-REGION="$(terraform -chdir="$ROOT/deploy/prod/terraform/app" output -raw region 2>/dev/null || echo ca-central-1)"
+# Sync the bucket's installers (curl|sudo bash) to this version NOW — BEFORE the failure-prone
+# Windows lane — so a Windows hiccup can never leave them stale (they're POSIX-only and unaffected
+# by Windows anyway). We publish ONE template (install.sh, METHOD=auto) plus three per-method
+# variants — install-{joinkey,sso,cloud}.sh — derived from it by baking METHOD + this harbor's
+# gateway/core URLs (from terraform), so a node operator never has to supply an address.
+TF=(terraform -chdir="$ROOT/deploy/prod/terraform/app" output -raw)
+BUCKET="$("${TF[@]}" artifacts_bucket 2>/dev/null || true)"
+REGION="$("${TF[@]}" region 2>/dev/null || echo ca-central-1)"
+GATEWAY_URL="$("${TF[@]}" gateway_url 2>/dev/null || true)"; [[ "$GATEWAY_URL" == "null" ]] && GATEWAY_URL=""
+# gateway_url is taken verbatim from terraform; reject a malformed empty-host shape
+# (http(s)://:PORT — only possible mid-apply on the EC2 gateway before its EIP is in state)
+# rather than baking a broken address into every installer. Empty => install.sh's built-in default.
+[[ "$GATEWAY_URL" =~ ^https?://:[0-9]+ ]] && { echo "WARN: terraform gateway_url is malformed ($GATEWAY_URL) — leaving installers on their built-in default" >&2; GATEWAY_URL=""; }
+HARBOR_DOMAIN="$("${TF[@]}" harbor_domain 2>/dev/null || true)"
+CORE_URL=""; [[ -n "$HARBOR_DOMAIN" && "$HARBOR_DOMAIN" != "null" ]] && CORE_URL="https://${HARBOR_DOMAIN}:${CORE_PORT:-8444}"
+
 if [[ -n "$BUCKET" && "$BUCKET" != "null" ]]; then
-  sed -E "s/^PILOT_VER=.*/PILOT_VER=\"\${NCP_PILOT_VERSION:-$VER}\"/" "$ROOT/deploy/prod/artifacts/install.sh" \
-    | aws s3 cp - "s3://$BUCKET/install.sh" --region "$REGION" --content-type text/x-shellscript --only-show-errors
-  echo "synced install.sh -> s3://$BUCKET/install.sh (pilot default $VER)"
+  # Common substitutions: pin the pilot default to $VER and bake the gateway/core URLs (only when
+  # terraform resolved them — else leave install.sh's built-in defaults). Use '|' as the sed
+  # delimiter since the URLs contain '/'.
+  SED_COMMON=(-E -e "s|^PILOT_VER=.*|PILOT_VER=\"\${NCP_PILOT_VERSION:-$VER}\"|")
+  [[ -n "$GATEWAY_URL" ]] && SED_COMMON+=(-e "s|^GATEWAY_URL=.*|GATEWAY_URL=\"\${NCP_GATEWAY_URL:-$GATEWAY_URL}\"|")
+  [[ -n "$CORE_URL"    ]] && SED_COMMON+=(-e "s|^CORE_URL=.*|CORE_URL=\"\${NCP_CORE_URL:-$CORE_URL}\"|")
+
+  gen_installer() { # gen_installer <method> <s3-key> — bake METHOD + common subs, upload
+    local method="$1" key="$2"
+    sed "${SED_COMMON[@]}" -e "s|^METHOD=.*|METHOD=\"\${NCP_METHOD:-$method}\"|" \
+      "$ROOT/deploy/prod/artifacts/install.sh" \
+      | aws s3 cp - "s3://$BUCKET/$key" --region "$REGION" --content-type text/x-shellscript --only-show-errors
+    echo "synced $key (method=$method)"
+  }
+
+  gen_installer auto    install.sh
+  gen_installer joinkey install-joinkey.sh
+  gen_installer sso     install-sso.sh
+  gen_installer cloud   install-cloud.sh
+  echo "installers -> s3://$BUCKET/  (pilot default $VER; gateway ${GATEWAY_URL:-<built-in default>}, core ${CORE_URL:-<built-in default>})"
 fi
 
 # Windows lane: embedded, non-fatal. Collect failures and report; never abort the run after the

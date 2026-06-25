@@ -307,6 +307,7 @@ func cmdAdminAPI(args []string) {
 	devRole := fs.String("dev-role", "admin", "role granted to the dev actor")
 	mfaFreshness := fs.Duration("mfa-freshness", 15*time.Minute, "require MFA within this window for privileged actions (dual-control approve, policy publish); 0 disables step-up")
 	environment := fs.String("environment", "development", "deployment posture shown in the console banner (e.g. production, staging); anything but production is tinted non-production")
+	installerBase := fs.String("installer-base-url", "", "public base URL of the artifact bucket the installer scripts live under (e.g. https://<bucket>.s3.<region>.amazonaws.com); the console renders node 'Copy install command' widgets from it")
 	af := addAdminAuthFlags(fs) // OIDC / GitHub / mock-IdP session auth (2.11)
 	expiryWithin := fs.Duration("expiry-within", 7*24*time.Hour, "cert-expiry health window")
 	staleAfter := fs.Duration("stale-after", 5*time.Minute, "stale-host health window")
@@ -469,7 +470,7 @@ func cmdAdminAPI(args []string) {
 	}
 	obs.Mount(top, obs.Cache(time.Second, obs.Check{Name: "database", Probe: s.Ping})) // /metrics + /healthz + /readyz (unauthenticated)
 	top.Handle("/admin/v1/", apiHandler)                                               // the JSON API
-	top.Handle("/", adminui.Handler(adminui.Config{Environment: *environment}))        // the React console (or a "not built" stub)
+	top.Handle("/", adminui.Handler(adminui.Config{Environment: *environment, InstallerBaseURL: *installerBase})) // the React console (or a "not built" stub)
 	handler := http.Handler(top)
 	if adminui.Embedded() {
 		log.Info("admin-api: web console enabled (embedded SPA at /)")

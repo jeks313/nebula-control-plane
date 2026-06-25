@@ -24,6 +24,11 @@ type Config struct {
 	// is the source of truth; the client must not infer it). Anything other than
 	// "production" is treated by the SPA as non-production (fail-closed).
 	Environment string
+	// InstallerBaseURL is the public base URL of the artifact bucket the per-method
+	// installer scripts live under (e.g. https://<bucket>.s3.<region>.amazonaws.com).
+	// The console renders the node "Copy install command" widgets from it. Empty =
+	// the widgets fall back to a generic, copy-the-URL-yourself hint.
+	InstallerBaseURL string
 }
 
 // spaHandler serves the embedded SPA: real files by path, with a fallback to
@@ -31,9 +36,14 @@ type Config struct {
 // index.html is patched ONCE with the server-provided environment.
 func spaHandler(dist fs.FS, cfg Config) http.Handler {
 	raw, _ := fs.ReadFile(dist, "index.html")
-	// ReplaceAll (not the first match): the env token may appear more than once
-	// (e.g. in a comment), and every occurrence must reflect the real environment.
-	index := []byte(strings.ReplaceAll(string(raw), "__HARBOR_ENV__", safeEnv(cfg.Environment)))
+	// ReplaceAll (not the first match): the tokens may appear more than once (e.g. in
+	// a comment), and every occurrence must reflect the real value. Both substitutions
+	// land inside the inline runtime-config <script>, so each value is sanitized to a
+	// benign token before injection (the CSP sha256 is computed AFTER, but a value that
+	// broke out of the JS string would still execute — sanitize, don't rely on the pin).
+	s := strings.ReplaceAll(string(raw), "__HARBOR_ENV__", safeEnv(cfg.Environment))
+	s = strings.ReplaceAll(s, "__HARBOR_INSTALLER_BASE__", safeURL(cfg.InstallerBaseURL))
+	index := []byte(s)
 	// The CSP must authorize the one inline runtime-config <script> we ship. Pin it by
 	// the sha256 of its post-injection body (the env is already substituted), so it runs
 	// without granting scripts 'unsafe-inline' — injected <script> still can't execute.
@@ -68,6 +78,25 @@ func safeEnv(env string) string {
 		}
 	}
 	return env
+}
+
+// safeURL constrains the injected installer base URL to a benign token: it lands
+// inside the inline runtime-config script, so reject anything that could break out of
+// the JS string literal or open a tag. Allow only the characters a plain https URL
+// origin needs ([A-Za-z0-9._:/-]); anything else → "" (the SPA falls back to a generic
+// hint). Empty in / empty out (the common dev + no-bucket case).
+func safeURL(u string) string {
+	if u == "" {
+		return ""
+	}
+	for _, r := range u {
+		ok := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') ||
+			r == '.' || r == '_' || r == ':' || r == '/' || r == '-'
+		if !ok {
+			return ""
+		}
+	}
+	return u
 }
 
 func serveIndex(w http.ResponseWriter, index []byte) {

@@ -5,9 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark" />
     <title>Harbor</title>
-    <!-- Server-injected runtime config: Core fills in the environment token below at
-         serve time (the source of truth for environment posture; dev leaves it). -->
-    <script>window.__HARBOR__ = { environment: "__HARBOR_ENV__" };</script>
+    <!-- Server-injected runtime config: Core fills in the tokens below at serve time
+         (the source of truth for environment posture + the public installer base URL;
+         dev leaves them un-substituted). -->
+    <script>window.__HARBOR__ = { environment: "__HARBOR_ENV__", installerBaseURL: "__HARBOR_INSTALLER_BASE__" };</script>
   </head>
   <body>
     <div id="root"></div>

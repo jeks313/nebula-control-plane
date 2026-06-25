@@ -12,14 +12,16 @@ import (
 )
 
 const idx = `<!doctype html><html><head>` +
-	`<script>window.__HARBOR__ = { environment: "__HARBOR_ENV__" };</script>` +
+	`<script>window.__HARBOR__ = { environment: "__HARBOR_ENV__", installerBaseURL: "__HARBOR_INSTALLER_BASE__" };</script>` +
 	`</head><body><div id="root"></div></body></html>`
 
-func newSPA(env string) http.Handler {
+func newSPA(env string) http.Handler { return newSPACfg(Config{Environment: env}) }
+
+func newSPACfg(cfg Config) http.Handler {
 	return spaHandler(fstest.MapFS{
 		"index.html":           {Data: []byte(idx)},
 		"assets/app-abc123.js": {Data: []byte("console.log(1)")},
-	}, Config{Environment: env})
+	}, cfg)
 }
 
 func get(t *testing.T, h http.Handler, path string) *httptest.ResponseRecorder {
@@ -52,6 +54,28 @@ func TestEnvSanitized(t *testing.T) {
 	}
 	if !strings.Contains(body, `environment: "development"`) {
 		t.Fatalf("unsafe env should fall back to development: %s", body)
+	}
+}
+
+// TestInstallerBaseInjection: the server injects a valid installer base URL, and a
+// hostile value can't break out of the inline script (falls back to empty).
+func TestInstallerBaseInjection(t *testing.T) {
+	const base = "https://ncp-artifacts-123456789012.s3.ca-central-1.amazonaws.com"
+	body := get(t, newSPACfg(Config{Environment: "production", InstallerBaseURL: base}), "/").Body.String()
+	if strings.Contains(body, "__HARBOR_INSTALLER_BASE__") {
+		t.Errorf("installer-base placeholder not replaced: %s", body)
+	}
+	if !strings.Contains(body, `installerBaseURL: "`+base+`"`) {
+		t.Errorf("installer base not injected: %s", body)
+	}
+
+	// A value with characters that could escape the JS string is rejected → empty.
+	hostile := get(t, newSPACfg(Config{InstallerBaseURL: `https://x"};alert(1);//`}), "/").Body.String()
+	if strings.Contains(hostile, "alert(1)") {
+		t.Fatalf("installer base injection not sanitized: %s", hostile)
+	}
+	if !strings.Contains(hostile, `installerBaseURL: ""`) {
+		t.Fatalf("unsafe installer base should fall back to empty: %s", hostile)
 	}
 }
 
