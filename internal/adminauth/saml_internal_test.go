@@ -57,3 +57,33 @@ func TestSAMLMFA(t *testing.T) {
 		t.Error("PasswordProtectedTransport must not count as MFA")
 	}
 }
+
+// TestSAMLMFAFromAMR: Entra leaves AuthnContextClassRef as plain Password even after MFA and
+// records the multi-factor signal in the authnmethodsreferences (amr) attribute instead — the real
+// live shape (MFA via Duo). samlMFA must honor it, else step-up can never be satisfied.
+func TestSAMLMFAFromAMR(t *testing.T) {
+	withAMR := func(vals ...string) *saml.Assertion {
+		return &saml.Assertion{
+			IssueInstant: time.Unix(1_700_000_000, 0),
+			AuthnStatements: []saml.AuthnStatement{{
+				AuthnInstant: time.Unix(1_700_000_000, 0),
+				AuthnContext: saml.AuthnContext{AuthnContextClassRef: &saml.AuthnContextClassRef{
+					Value: "urn:oasis:names:tc:SAML:2.0:ac:classes:Password"}},
+			}},
+			AttributeStatements: []saml.AttributeStatement{{Attributes: []saml.Attribute{
+				attr("http://schemas.microsoft.com/claims/authnmethodsreferences", vals...),
+			}}},
+		}
+	}
+	// password + multipleauthn (the live Entra+Duo shape) -> MFA even though the class-ref is Password.
+	if samlMFA(withAMR(
+		"http://schemas.microsoft.com/ws/2008/06/identity/authenticationmethod/password",
+		"http://schemas.microsoft.com/claims/multipleauthn",
+	)) == nil {
+		t.Error("amr containing multipleauthn must count as MFA")
+	}
+	// password only (no second factor) -> NOT MFA.
+	if samlMFA(withAMR("http://schemas.microsoft.com/ws/2008/06/identity/authenticationmethod/password")) != nil {
+		t.Error("amr with only password must NOT count as MFA")
+	}
+}

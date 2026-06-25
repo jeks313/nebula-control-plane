@@ -282,21 +282,56 @@ func matchAttr(attr saml.Attribute, names ...string) bool {
 	return false
 }
 
-// samlMFA reports MFA satisfaction when the assertion's AuthnContextClassRef
-// signals multi-factor (AD FS multipleauthn, SAML MultiFactor/MobileTwoFactor).
+// samlMFA reports MFA satisfaction and when it happened. It accepts MFA signalled two ways,
+// because Entra records it inconsistently:
+//   - the AuthnContextClassRef element (AD FS multipleauthn, SAML MultiFactor/MobileTwoFactor); and
+//   - the authnmethodsreferences (amr) ATTRIBUTE, which carries .../claims/multipleauthn even when
+//     Entra leaves AuthnContextClassRef as plain "Password" — e.g. MFA satisfied via Conditional
+//     Access or an external provider (Duo). Entra puts the real MFA signal in the amr claim; without
+//     this check a genuine MFA login reads as no-MFA and step-up can never be satisfied.
 func samlMFA(as *saml.Assertion) *time.Time {
 	for _, st := range as.AuthnStatements {
-		ref := st.AuthnContext.AuthnContextClassRef
-		if ref == nil {
-			continue
-		}
-		v := strings.ToLower(ref.Value)
-		if strings.Contains(v, "multifactor") || strings.Contains(v, "multipleauthn") || strings.Contains(v, "mobiletwofactor") {
+		if ref := st.AuthnContext.AuthnContextClassRef; ref != nil && isMFAClaim(ref.Value) {
 			t := st.AuthnInstant.UTC()
 			return &t
 		}
 	}
+	for _, stmt := range as.AttributeStatements {
+		for _, attr := range stmt.Attributes {
+			if !attrIsAMR(attr) {
+				continue
+			}
+			for _, v := range attrValues(attr) {
+				if isMFAClaim(v) {
+					return authnInstant(as)
+				}
+			}
+		}
+	}
 	return nil
+}
+
+// isMFAClaim reports whether a SAML AuthnContextClassRef or amr value denotes multi-factor auth.
+func isMFAClaim(v string) bool {
+	v = strings.ToLower(v)
+	return strings.Contains(v, "multifactor") || strings.Contains(v, "multipleauthn") || strings.Contains(v, "mobiletwofactor")
+}
+
+// attrIsAMR matches the authnmethodsreferences (amr) attribute by name or friendly name.
+func attrIsAMR(attr saml.Attribute) bool {
+	return strings.Contains(strings.ToLower(attr.Name), "authnmethodsreferences") ||
+		strings.Contains(strings.ToLower(attr.FriendlyName), "authnmethodsreferences")
+}
+
+// authnInstant returns when authentication happened (the amr MFA instant), falling back to the
+// assertion's IssueInstant if there's no AuthnStatement.
+func authnInstant(as *saml.Assertion) *time.Time {
+	for _, st := range as.AuthnStatements {
+		t := st.AuthnInstant.UTC()
+		return &t
+	}
+	t := as.IssueInstant.UTC()
+	return &t
 }
 
 // ── cookie helpers (SameSite=None so the cross-site IdP POST to the ACS carries
