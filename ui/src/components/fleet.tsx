@@ -20,9 +20,11 @@ import {
   soonestExpiring,
   convergence,
   laggingHosts,
+  splitByLiveness,
   targetBundleVersion,
   totalWaves,
 } from '../lib/fleet'
+import type { Device } from '../api/hooks'
 
 // A titled dashboard card with a uniform header.
 function Tile({ title, hint, children }: { title: string; hint?: string; children: ReactNode }) {
@@ -106,7 +108,10 @@ export function ActiveOps() {
   )
 }
 
-// Convergence gauge (§3.3 #6) — % of fleet on the target bundle version.
+// Convergence gauge (§3.3 #6) — % of CHECKING-IN hosts on the target bundle version. Stale
+// hosts (silent past the heartbeat window — down, gone, or a ghost row left by a same-named
+// rebuild) are excluded from the gauge and listed separately: a stale record can never
+// converge, and lumping it in both drags the % down and is indistinguishable from a live host.
 export function ConvergenceCard() {
   const devices = useDevices()
   const rollout = useCurrentRollout()
@@ -118,41 +123,75 @@ export function ConvergenceCard() {
         (() => {
           const ds = devices.data.pages[0].devices
           if (ds.length === 0) return <StateBlock kind="empty" message="No hosts reporting yet." />
-          const target = targetBundleVersion(ds, rollout.data?.active ? rollout.data.rollout?.target_version : undefined)
-          const c = convergence(ds, target)
+          const { live, stale } = splitByLiveness(ds)
+          // Target = the de-facto current among CHECKING-IN hosts (so stale ghosts on an old
+          // bundle can't skew it); convergence + lagging are measured over the live set.
+          const target = targetBundleVersion(live.length ? live : ds, rollout.data?.active ? rollout.data.rollout?.target_version : undefined)
+          const c = convergence(live, target)
+          const liveLagging = laggingHosts(live, target)
           const tone = c.pct >= 100 ? 'permit' : c.pct >= 80 ? 'warn' : 'danger'
           return (
             <div className="flex flex-col gap-2">
-              <div className="flex items-baseline justify-between">
-                <span className={cx('nums text-[24px] font-semibold', tone === 'permit' ? 'text-permit' : tone === 'warn' ? 'text-warn' : 'text-danger')}>
-                  {c.pct}%
-                </span>
-                <span className="text-[12px] text-ink-dim">on bundle v{c.target}</span>
-              </div>
-              <Bar pct={c.pct} tone={tone} />
-              <div className="text-[12px] text-ink-faint">
-                <span className="nums">{c.onTarget}</span>/<span className="nums">{c.total}</span> converged
-                {c.lagging > 0 && <> · <span className="nums text-warn">{c.lagging}</span> lagging</>}
-              </div>
-              {c.lagging > 0 && (
-                <ul className="divide-y divide-edge border-t border-edge text-[12px]" aria-label="Lagging hosts">
-                  {laggingHosts(ds, target)
-                    .slice(0, 8)
-                    .map((d) => (
-                      <li key={d.overlay_ip} className="flex items-center justify-between gap-2 py-1.5">
-                        <span className="truncate text-ink" title={d.overlay_ip}>{d.name || d.overlay_ip}</span>
-                        <span className="nums shrink-0 text-warn" title={`on bundle v${d.applied_bundle_version}, target v${c.target}`}>
-                          v{d.applied_bundle_version}
-                        </span>
-                      </li>
-                    ))}
-                  {c.lagging > 8 && <li className="py-1.5 text-ink-faint">+{c.lagging - 8} more lagging</li>}
-                </ul>
+              {live.length === 0 ? (
+                <div className="text-[13px] text-warn">No hosts checking in right now.</div>
+              ) : (
+                <>
+                  <div className="flex items-baseline justify-between">
+                    <span className={cx('nums text-[24px] font-semibold', tone === 'permit' ? 'text-permit' : tone === 'warn' ? 'text-warn' : 'text-danger')}>
+                      {c.pct}%
+                    </span>
+                    <span className="text-[12px] text-ink-dim">on bundle v{c.target}</span>
+                  </div>
+                  <Bar pct={c.pct} tone={tone} />
+                  <div className="text-[12px] text-ink-faint">
+                    <span className="nums">{c.onTarget}</span>/<span className="nums">{c.total}</span> checking-in converged
+                    {liveLagging.length > 0 && <> · <span className="nums text-warn">{liveLagging.length}</span> lagging</>}
+                  </div>
+                  {liveLagging.length > 0 && (
+                    <ul className="divide-y divide-edge border-t border-edge text-[12px]" aria-label="Lagging hosts">
+                      {liveLagging.slice(0, 8).map((d) => <HostBundleRow key={d.overlay_ip} d={d} target={target} />)}
+                      {liveLagging.length > 8 && <li className="py-1.5 text-ink-faint">+{liveLagging.length - 8} more lagging</li>}
+                    </ul>
+                  )}
+                </>
+              )}
+              {stale.length > 0 && (
+                <div className="flex flex-col gap-1 border-t border-edge pt-2">
+                  <div className="text-[12px] text-ink-faint">
+                    <span className="nums text-ink-dim">{stale.length}</span> not checking in{' '}
+                    <span className="text-ink-faint">(stale — excluded from convergence)</span>
+                  </div>
+                  <ul className="divide-y divide-edge text-[12px]" aria-label="Stale hosts">
+                    {stale.slice(0, 8).map((d) => <HostBundleRow key={d.overlay_ip} d={d} target={target} />)}
+                    {stale.length > 8 && <li className="py-1.5 text-ink-faint">+{stale.length - 8} more stale</li>}
+                  </ul>
+                </div>
               )}
             </div>
           )
         })()}
     </Tile>
+  )
+}
+
+// HostBundleRow — one host in a convergence breakdown list: name + overlay_ip (so same-named
+// rebuilds are distinguishable) on the left, its applied bundle version on the right (warn
+// when behind target, faint when on-target-but-silent). Used for both lagging and stale lists.
+function HostBundleRow({ d, target }: { d: Device; target: number }) {
+  const behind = d.applied_bundle_version !== target
+  return (
+    <li className="flex items-center justify-between gap-2 py-1.5">
+      <span className="flex min-w-0 items-baseline gap-1.5">
+        <span className="truncate text-ink">{d.name || '—'}</span>
+        <span className="shrink-0 font-mono text-[11px] text-ink-faint">{d.overlay_ip}</span>
+      </span>
+      <span
+        className={cx('nums shrink-0', behind ? 'text-warn' : 'text-ink-faint')}
+        title={`bundle v${d.applied_bundle_version}, target v${target}${d.last_seen ? ` · last seen ${fmtDateTime(d.last_seen)}` : ''}`}
+      >
+        v{d.applied_bundle_version}
+      </span>
+    </li>
   )
 }
 

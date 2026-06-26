@@ -5,6 +5,7 @@ import {
   soonestExpiring,
   convergence,
   laggingHosts,
+  splitByLiveness,
   targetBundleVersion,
   totalWaves,
 } from './fleet'
@@ -81,6 +82,15 @@ describe('laggingHosts', () => {
   })
   it('is empty when the whole fleet is on target', () => {
     expect(laggingHosts([dev({ applied_bundle_version: 5 })], 5)).toEqual([])
+  })
+})
+
+describe('splitByLiveness', () => {
+  it('partitions checking-in vs server-flagged stale hosts', () => {
+    const ds = [dev({ name: 'a' }), dev({ name: 'ghost', stale: true }), dev({ name: 'c', stale: false })]
+    const { live, stale } = splitByLiveness(ds)
+    expect(live.map((d) => d.name)).toEqual(['a', 'c'])
+    expect(stale.map((d) => d.name)).toEqual(['ghost'])
   })
 })
 

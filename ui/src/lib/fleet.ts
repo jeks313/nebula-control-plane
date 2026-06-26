@@ -91,6 +91,23 @@ export function laggingHosts(devices: Device[], target: number): Device[] {
     .sort((a, b) => a.applied_bundle_version - b.applied_bundle_version || a.name.localeCompare(b.name))
 }
 
+export interface FleetSplit {
+  live: Device[] // currently checking in (heartbeating within the stale window)
+  stale: Device[] // server-flagged stale — silent past the window (down, gone, or a ghost re-enrollment row)
+}
+
+// splitByLiveness partitions devices into checking-in (live) vs server-flagged stale, using
+// the device's authoritative `stale` flag (computed server-side with the fleet thresholds).
+// Convergence is measured over LIVE hosts only — a stale/ghost record can never converge, so
+// counting it drags the gauge down and (with same-named rebuilds) is impossible to tell apart
+// from a live host. Stale hosts are surfaced separately instead.
+export function splitByLiveness(devices: Device[]): FleetSplit {
+  const live: Device[] = []
+  const stale: Device[] = []
+  for (const d of devices) (d.stale ? stale : live).push(d)
+  return { live, stale }
+}
+
 // targetBundleVersion: what the fleet should converge to — the active rollout's target
 // if one is running, else the most common applied_bundle_version (the de-facto current).
 export function targetBundleVersion(devices: Device[], rolloutTarget?: number): number {
