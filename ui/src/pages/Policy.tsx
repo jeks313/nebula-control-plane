@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import {
   useActivePolicy,
   useCompilePolicy,
@@ -16,19 +16,44 @@ import { usePermissions } from '../api/perms'
 import { isApiError, isCentrallyHandled, isForbidden } from '../api/errors'
 import { useToast } from '../components/Toast'
 import { Card, Page, StateBlock, ErrorState, Button, Chip, cx } from '../components/ui'
+import { Dialog } from '../components/Dialog'
+
+// A draft rule, edited via modal forms (Add / Edit) and removed locally; the draft is
+// composed, analyzed (compile / diff / tests / matrix), then applied as one config. from/to
+// are bare group names ("any" allowed); the DSL accepts bare groups so serialization round-
+// trips the parsed rules exactly.
+type Rule = { from: string; to: string; proto: string; port: string }
+const PROTOS = ['tcp', 'udp', 'icmp', 'any']
+
+function rulesToDsl(rules: Rule[]): string {
+  return rules.map((r) => `allow ${r.from} -> ${r.to} ${r.proto} ${r.port}`).join('\n')
+}
 
 export function Policy() {
   const { can } = usePermissions()
   const mayManage = can('policy:manage')
-  // The draft DSL is shared by the editor (compile/save) and the A1 analysis rail.
-  const [draft, setDraft] = useState('allow group:laptops -> group:servers tcp 22\n')
+  const active = useActivePolicy()
+  // The draft is seeded once from the active policy (edit the current policy, not a blank
+  // slate) and thereafter owned by the user; null until the active policy has loaded.
+  const [draft, setDraft] = useState<Rule[] | null>(null)
+  useEffect(() => {
+    if (draft === null && active.data) {
+      setDraft((active.data.rules ?? []).map((r) => ({ from: r.from, to: r.to, proto: r.proto, port: r.port })))
+    }
+  }, [active.data, draft])
 
   return (
-    <Page title="Policy" subtitle="The active firewall policy, with draft preview + analysis. Save applies directly.">
+    <Page title="Policy" subtitle="The active firewall policy, with a draft you compose, analyze, then apply.">
       <div className="flex flex-col gap-5">
         <ActivePolicyCard />
-        <DraftEditor draft={draft} setDraft={setDraft} mayManage={mayManage} />
-        <AnalysisRail draft={draft} />
+        {draft === null ? (
+          <Card className="px-4 py-3"><StateBlock kind="loading" message="Loading policy…" /></Card>
+        ) : (
+          <>
+            <DraftRulesCard draft={draft} setDraft={setDraft} mayManage={mayManage} active={active.data?.rules ?? []} />
+            <AnalysisRail draft={rulesToDsl(draft)} />
+          </>
+        )}
       </div>
     </Page>
   )
@@ -52,7 +77,7 @@ function ActivePolicyCard() {
         {q.isError && <ErrorState error={q.error} fallback="Couldn't load the active policy." />}
         {p &&
           (!p.published ? (
-            <StateBlock kind="empty" message="No policy published yet — default-deny. Draft one below and save it." />
+            <StateBlock kind="empty" message="No policy published yet — default-deny. Draft one below and apply it." />
           ) : (p.rules ?? []).length === 0 ? (
             <div className="text-[13px] text-ink-dim">Published, but it defines no explicit rules (baseline only).</div>
           ) : (
@@ -63,7 +88,7 @@ function ActivePolicyCard() {
   )
 }
 
-function RuleTable({ rules }: { rules: { from: string; to: string; proto: string; port: string }[] }) {
+function RuleTable({ rules }: { rules: Rule[] }) {
   return (
     <table className="w-full text-left text-[12px]">
       <thead className="text-[11px] uppercase tracking-wide text-ink-faint">
@@ -89,34 +114,41 @@ function RuleTable({ rules }: { rules: { from: string; to: string; proto: string
 
 const FIELD = 'w-full rounded-[6px] border border-edge bg-mesh-2 px-2 py-1.5 text-[13px] text-ink placeholder:text-ink-faint'
 
-function DraftEditor({ draft, setDraft, mayManage }: { draft: string; setDraft: (s: string) => void; mayManage: boolean }) {
+// DraftRulesCard — compose the draft as a list of rules (Add / Edit via modal, Remove
+// locally), preview the compiled firewall, and apply. "Apply" serializes the draft to the
+// DSL and PUTs /config/policy: a valid policy is never privileged, so it lands as 200 →
+// applied; the 202 branch is kept for the uniform PUT contract.
+function DraftRulesCard({
+  draft,
+  setDraft,
+  mayManage,
+  active,
+}: {
+  draft: Rule[]
+  setDraft: (r: Rule[]) => void
+  mayManage: boolean
+  active: Rule[]
+}) {
   const toast = useToast()
   const compile = useCompilePolicy()
   const put = usePutPolicy()
   const [groups, setGroups] = useState('servers')
-  // The exact server validation message for a refused save, rendered inline (the 400
-  // branch). Cleared on a successful save or a fresh attempt.
   const [saveError, setSaveError] = useState<string | null>(null)
+  const [addOpen, setAddOpen] = useState(false)
+  const [editAt, setEditAt] = useState<number | null>(null)
   const result = compile.data
+  const dsl = rulesToDsl(draft)
 
   function onCompile() {
     compile.mutate(
-      { policy: draft, groups: splitGroups(groups) },
+      { policy: dsl, groups: splitGroups(groups) },
       { onError: (err) => toast.notify(isApiError(err) ? err.detail || err.title : 'Compile failed.', 'error') },
     )
   }
 
-  // Save applies the policy directly via PUT /config/policy (it's now CRUD, not a
-  // proposal). A valid policy is never privileged, so this lands as 200 → applied; the
-  // 202 branch is kept for the uniform PUT contract. A 400 carries the exact validator
-  // message (surfaced inline); a 403 is the missing policy:manage permission.
-  function onSave() {
+  function onApply() {
     setSaveError(null)
-    if (!draft.trim()) {
-      setSaveError('Draft a policy first.')
-      return
-    }
-    put.mutate(draft, {
+    put.mutate(dsl, {
       onSuccess: (r) => {
         if (r.applied) {
           toast.notify(`Policy applied (v${r.row.version}).`, 'success')
@@ -133,29 +165,61 @@ function DraftEditor({ draft, setDraft, mayManage }: { draft: string; setDraft: 
           setSaveError('You lack the policy:manage permission.')
           return
         }
-        // 400 (and any other) — surface the exact server message inline.
-        setSaveError(isApiError(err) ? err.detail || err.title : 'Save failed.')
+        // 400 (and any other) — surface the exact server validator message inline.
+        setSaveError(isApiError(err) ? err.detail || err.title : 'Apply failed.')
       },
     })
   }
 
+  const dirty = rulesToDsl(active) !== dsl
+
   return (
     <Card className="overflow-hidden">
-      <div className="border-b border-edge px-4 py-2 text-[12px] font-medium text-ink">Draft &amp; preview</div>
+      <div className="flex items-center justify-between border-b border-edge px-4 py-2">
+        <span className="text-[12px] font-medium text-ink">Draft &amp; preview</span>
+        <div className="flex items-center gap-2">
+          {dirty && <span className="text-[11px] text-warn">unsaved draft</span>}
+          <Button onClick={() => setDraft(active.map((r) => ({ ...r })))} disabled={!dirty} title="Discard draft edits and reload the active policy">
+            Revert to active
+          </Button>
+          <Button variant="primary" onClick={() => setAddOpen(true)}>Add rule</Button>
+        </div>
+      </div>
       <div className="flex flex-col gap-3 px-4 py-3">
-        <label className="block">
-          <span className="mb-1 block text-[11px] uppercase tracking-wide text-ink-faint">Policy (DSL)</span>
-          <textarea
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            rows={5}
-            spellCheck={false}
-            className={cx(FIELD, 'font-mono text-[12px]')}
-            placeholder="allow group:a -> group:b tcp 443"
-          />
-        </label>
+        {draft.length === 0 ? (
+          <div className="rounded-[6px] border border-edge px-3 py-4 text-center text-[13px] text-ink-faint">
+            No rules — this draft is default-deny (every flow blocked). Add a rule to allow traffic.
+          </div>
+        ) : (
+          <table className="w-full text-left text-[12px]">
+            <thead className="text-[11px] uppercase tracking-wide text-ink-faint">
+              <tr>
+                {['From', 'To', 'Proto', 'Port'].map((h) => (
+                  <th key={h} className="py-1 pr-4 font-medium">{h}</th>
+                ))}
+                <th className="py-1 text-right font-medium">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-edge">
+              {draft.map((r, i) => (
+                <tr key={i} className="text-ink hover:bg-mesh-2">
+                  <td className="py-1.5 pr-4"><Chip>{r.from}</Chip></td>
+                  <td className="py-1.5 pr-4"><Chip tone="permit">{r.to}</Chip></td>
+                  <td className="py-1.5 pr-4 font-mono text-ink-dim">{r.proto}</td>
+                  <td className="nums py-1.5 pr-4 text-ink-dim">{r.port}</td>
+                  <td className="py-1.5">
+                    <div className="flex justify-end gap-2">
+                      <Button onClick={() => setEditAt(i)}>Edit</Button>
+                      <Button variant="danger" onClick={() => setDraft(draft.filter((_, j) => j !== i))}>Remove</Button>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
 
-        <div className="flex items-end gap-2">
+        <div className="flex items-end gap-2 border-t border-edge pt-3">
           <label className="flex-1">
             <span className="mb-1 block text-[11px] uppercase tracking-wide text-ink-faint">Preview for groups (comma-separated)</span>
             <input value={groups} onChange={(e) => setGroups(e.target.value)} placeholder="servers, db" className={FIELD} />
@@ -176,16 +240,82 @@ function DraftEditor({ draft, setDraft, mayManage }: { draft: string; setDraft: 
             )}
             <div className="flex items-center justify-between gap-2">
               <span className="text-[11px] text-ink-faint">
-                Save applies the policy directly. (A change granting privileged access would route to a second approver.)
+                Apply publishes the draft directly. (A change granting privileged access would route to a second approver.)
               </span>
-              <Button variant="primary" onClick={onSave} disabled={put.isPending}>
-                {put.isPending ? 'Saving…' : 'Save / Apply config'}
+              <Button variant="primary" onClick={onApply} disabled={put.isPending || !dirty}>
+                {put.isPending ? 'Applying…' : 'Apply config'}
               </Button>
             </div>
           </div>
         )}
       </div>
+
+      {addOpen && <RuleDialog onSubmit={(r) => { setDraft([...draft, r]); setAddOpen(false) }} onClose={() => setAddOpen(false)} />}
+      {editAt !== null && (
+        <RuleDialog
+          rule={draft[editAt]}
+          onSubmit={(r) => { setDraft(draft.map((d, j) => (j === editAt ? r : d))); setEditAt(null) }}
+          onClose={() => setEditAt(null)}
+        />
+      )}
     </Card>
+  )
+}
+
+// RuleDialog — the per-rule modal form (Add / Edit). Returns the rule to the caller, which
+// folds it into the local draft; nothing is published until Apply.
+function RuleDialog({ rule, onSubmit, onClose }: { rule?: Rule; onSubmit: (r: Rule) => void; onClose: () => void }) {
+  const edit = !!rule
+  const [f, setF] = useState<Rule>(rule ?? { from: '', to: '', proto: 'tcp', port: '' })
+  const [error, setError] = useState<string | null>(null)
+
+  function submit() {
+    setError(null)
+    const from = f.from.trim()
+    const to = f.to.trim()
+    const port = f.port.trim() || 'any'
+    if (!from || !to) {
+      setError('From and To are required (a group name, or “any”).')
+      return
+    }
+    onSubmit({ from, to, proto: f.proto, port })
+  }
+
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      title={edit ? 'Edit rule' : 'Add rule'}
+      footer={
+        <>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button variant="primary" onClick={submit}>{edit ? 'Save rule' : 'Add rule'}</Button>
+        </>
+      }
+    >
+      <div className="flex flex-col gap-3">
+        {error && <div className="rounded-[6px] border border-danger/40 bg-danger/10 px-3 py-2 text-[12px] text-danger">{error}</div>}
+        <p className="text-[12px] text-ink-faint">
+          Allow members of <span className="font-mono">From</span> to reach members of <span className="font-mono">To</span> on the given protocol/port. Use <span className="font-mono">any</span> for any source or port.
+        </p>
+        <div className="grid grid-cols-2 gap-2">
+          <Labeled label="From (source group)">
+            <input autoFocus value={f.from} onChange={(e) => setF({ ...f, from: e.target.value })} placeholder="laptops" className={cx(FIELD, 'font-mono')} />
+          </Labeled>
+          <Labeled label="To (destination group)">
+            <input value={f.to} onChange={(e) => setF({ ...f, to: e.target.value })} placeholder="servers" className={cx(FIELD, 'font-mono')} />
+          </Labeled>
+          <Labeled label="Protocol">
+            <select value={f.proto} onChange={(e) => setF({ ...f, proto: e.target.value })} className={cx(FIELD, 'font-mono')}>
+              {PROTOS.map((p) => <option key={p} value={p}>{p}</option>)}
+            </select>
+          </Labeled>
+          <Labeled label="Port (N, N-M, or any)">
+            <input value={f.port} onChange={(e) => setF({ ...f, port: e.target.value })} placeholder="443" className={cx(FIELD, 'font-mono')} />
+          </Labeled>
+        </div>
+      </div>
+    </Dialog>
   )
 }
 
@@ -402,7 +532,7 @@ function MatrixGrid({ m }: { m: ReachabilityMatrix }) {
   if (m.groups.length === 0) {
     return <div className="text-[12px] text-ink-faint">No concrete groups in the policy to chart.</div>
   }
-  const byPair = new Map(m.cells.map((c) => [`${c.from} ${c.to}`, c]))
+  const byPair = new Map(m.cells.map((c) => [`${c.from} ${c.to}`, c]))
   return (
     <div className="overflow-x-auto">
       <table className="text-[11px]">
@@ -419,7 +549,7 @@ function MatrixGrid({ m }: { m: ReachabilityMatrix }) {
             <tr key={from}>
               <td className="px-2 py-1 font-mono text-ink-dim">{from}</td>
               {m.groups.map((to) => {
-                const c = byPair.get(`${from} ${to}`)
+                const c = byPair.get(`${from} ${to}`)
                 const n = c?.flows.length ?? 0
                 const title = n > 0 ? c!.flows.map((f) => `${f.proto}/${f.port}`).join(', ') : c?.baseline ? 'baseline only' : 'default-deny'
                 return (
@@ -481,6 +611,15 @@ function RuleList({ title, rules }: { title: string; rules: { proto: string; por
         </ul>
       )}
     </div>
+  )
+}
+
+function Labeled({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <label className="block">
+      <span className="mb-1 block text-[11px] uppercase tracking-wide text-ink-faint">{label}</span>
+      {children}
+    </label>
   )
 }
 
