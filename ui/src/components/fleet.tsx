@@ -219,9 +219,12 @@ export function RenewalCliffCard() {
               {soon.length > 0 && (
                 <ul className="divide-y divide-edge border-t border-edge text-[12px]">
                   {soon.map((s) => (
-                    <li key={s.device.overlay_ip} className="flex items-center justify-between py-1.5">
-                      <span className="text-ink">{s.device.name}</span>
-                      <span className={cx('nums', s.expiresMs < Date.now() ? 'text-danger' : 'text-ink-dim')}>
+                    <li key={s.device.overlay_ip} className="flex items-center justify-between gap-2 py-1.5">
+                      <span className="flex min-w-0 items-baseline gap-1.5">
+                        <span className="truncate text-ink">{s.device.name || '—'}</span>
+                        <span className="shrink-0 font-mono text-[11px] text-ink-faint">{s.device.overlay_ip}</span>
+                      </span>
+                      <span className={cx('nums shrink-0', s.expiresMs < Date.now() ? 'text-danger' : 'text-ink-dim')}>
                         {fmtDateTime(s.device.cert_not_after)}
                       </span>
                     </li>
