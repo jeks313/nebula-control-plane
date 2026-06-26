@@ -4,6 +4,7 @@ import {
   expiryBuckets,
   soonestExpiring,
   convergence,
+  laggingHosts,
   targetBundleVersion,
   totalWaves,
 } from './fleet'
@@ -65,6 +66,21 @@ describe('convergence', () => {
   })
   it('an empty fleet is 0%', () => {
     expect(convergence([], 5)).toEqual({ target: 5, onTarget: 0, lagging: 0, total: 0, pct: 0 })
+  })
+})
+
+describe('laggingHosts', () => {
+  it('returns only off-target hosts, furthest behind first then by name', () => {
+    const ds = [
+      dev({ name: 'ontarget', applied_bundle_version: 5 }),
+      dev({ name: 'b', applied_bundle_version: 4 }),
+      dev({ name: 'a', applied_bundle_version: 4 }),
+      dev({ name: 'old', applied_bundle_version: 2 }),
+    ]
+    expect(laggingHosts(ds, 5).map((d) => d.name)).toEqual(['old', 'a', 'b'])
+  })
+  it('is empty when the whole fleet is on target', () => {
+    expect(laggingHosts([dev({ applied_bundle_version: 5 })], 5)).toEqual([])
   })
 })
 

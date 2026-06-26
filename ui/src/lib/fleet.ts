@@ -82,6 +82,15 @@ export function convergence(devices: Device[], target: number): Convergence {
   }
 }
 
+// laggingHosts returns the devices NOT on the target bundle version — the ones the
+// convergence gauge counts as "lagging" — so the dashboard can name them, furthest behind
+// first (lowest applied version), then by name. Mirrors soonestExpiring.
+export function laggingHosts(devices: Device[], target: number): Device[] {
+  return devices
+    .filter((d) => d.applied_bundle_version !== target)
+    .sort((a, b) => a.applied_bundle_version - b.applied_bundle_version || a.name.localeCompare(b.name))
+}
+
 // targetBundleVersion: what the fleet should converge to — the active rollout's target
 // if one is running, else the most common applied_bundle_version (the de-facto current).
 export function targetBundleVersion(devices: Device[], rolloutTarget?: number): number {

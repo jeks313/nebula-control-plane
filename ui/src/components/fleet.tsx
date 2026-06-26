@@ -19,6 +19,7 @@ import {
   expiryBuckets,
   soonestExpiring,
   convergence,
+  laggingHosts,
   targetBundleVersion,
   totalWaves,
 } from '../lib/fleet'
@@ -133,6 +134,21 @@ export function ConvergenceCard() {
                 <span className="nums">{c.onTarget}</span>/<span className="nums">{c.total}</span> converged
                 {c.lagging > 0 && <> · <span className="nums text-warn">{c.lagging}</span> lagging</>}
               </div>
+              {c.lagging > 0 && (
+                <ul className="divide-y divide-edge border-t border-edge text-[12px]" aria-label="Lagging hosts">
+                  {laggingHosts(ds, target)
+                    .slice(0, 8)
+                    .map((d) => (
+                      <li key={d.overlay_ip} className="flex items-center justify-between gap-2 py-1.5">
+                        <span className="truncate text-ink" title={d.overlay_ip}>{d.name || d.overlay_ip}</span>
+                        <span className="nums shrink-0 text-warn" title={`on bundle v${d.applied_bundle_version}, target v${c.target}`}>
+                          v{d.applied_bundle_version}
+                        </span>
+                      </li>
+                    ))}
+                  {c.lagging > 8 && <li className="py-1.5 text-ink-faint">+{c.lagging - 8} more lagging</li>}
+                </ul>
+              )}
             </div>
           )
         })()}
