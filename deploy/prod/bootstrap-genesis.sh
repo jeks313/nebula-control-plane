@@ -1158,10 +1158,16 @@ rsh "$HB_ID" "set -e
   # admin console: issuance mode (so it can approve enrollments) + SAML/mock IdP. $ADMIN_CAP grants
   # CAP_NET_BIND_SERVICE when the console is on a privileged port (default 443). $CORE_SSO_FLAGS
   # adds -sso-assert-pub + -usertrust-db on the approve path so a pending SSO host can be approved.
+  # -mfa-freshness 0: TEMPORARILY disables step-up MFA on privileged admin writes (config edits,
+  # IPAM carve, approve). Entra+Duo stamps a STALE AuthnInstant (the SSO-session origin, not the
+  # assertion mint time), so the 15m freshness window can never be satisfied and step-up-gated edits
+  # (e.g. cloud-trust) are wrongly blocked even for an MFA'd admin. Until step-up freshness is fixed
+  # for the Duo SSO shape, MFA-at-login (enforced by Entra Conditional Access) gates these. To
+  # re-enable: drop this flag (default 15m) once AuthnInstant/freshness handling is corrected.
   sudo systemd-run --uid=$SSH_USER --gid=$SSH_USER$ADMIN_CAP --unit ncp-admin --collect /usr/local/bin/harbor admin-api \
     $HARBOR_DB_FLAGS -ca-cert \$G/ca.crt $SIGN_BACKEND \
     -hmac-key ~/ncp/hmac.b64 -queue-dsn \$QDSN -queue-key ~/ncp/queue.b64 -pool '$POOL' \
-    -addr $HARBOR_OVERLAY:$ADMIN_PORT -base-url $ADMIN_URL \
+    -addr $HARBOR_OVERLAY:$ADMIN_PORT -base-url $ADMIN_URL -mfa-freshness 0 \
     $IDP_FLAGS${INSTALLER_FLAG:+ $INSTALLER_FLAG}${CORE_SSO_FLAGS:+ $CORE_SSO_FLAGS}${ACME_FLAGS:+ $ACME_FLAGS} >/dev/null
   echo ok"
 cp "$WORK/config-signing.pub" "$ROOT/deploy/prod/terraform/app/config-signing.pub"  # gitignored; the pin for clients
