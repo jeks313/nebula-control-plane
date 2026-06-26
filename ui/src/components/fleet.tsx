@@ -174,17 +174,25 @@ export function ConvergenceCard() {
   )
 }
 
-// HostBundleRow — one host in a convergence breakdown list: name + overlay_ip (so same-named
-// rebuilds are distinguishable) on the left, its applied bundle version on the right (warn
-// when behind target, faint when on-target-but-silent). Used for both lagging and stale lists.
+// HostLabel — name + overlay_ip (faint mono) so same-named rebuilds are distinguishable.
+// Shared by the dashboard breakdown lists (convergence, renewal cliff, version landscape).
+function HostLabel({ name, overlayIp }: { name?: string; overlayIp: string }) {
+  return (
+    <span className="flex min-w-0 items-baseline gap-1.5">
+      <span className="truncate text-ink">{name || '—'}</span>
+      <span className="shrink-0 font-mono text-[11px] text-ink-faint">{overlayIp}</span>
+    </span>
+  )
+}
+
+// HostBundleRow — one host in a convergence breakdown list: name + overlay_ip on the left, its
+// applied bundle version on the right (warn when behind target, faint when on-target-but-silent).
+// Used for both the lagging and stale lists.
 function HostBundleRow({ d, target }: { d: Device; target: number }) {
   const behind = d.applied_bundle_version !== target
   return (
     <li className="flex items-center justify-between gap-2 py-1.5">
-      <span className="flex min-w-0 items-baseline gap-1.5">
-        <span className="truncate text-ink">{d.name || '—'}</span>
-        <span className="shrink-0 font-mono text-[11px] text-ink-faint">{d.overlay_ip}</span>
-      </span>
+      <HostLabel name={d.name} overlayIp={d.overlay_ip} />
       <span
         className={cx('nums shrink-0', behind ? 'text-warn' : 'text-ink-faint')}
         title={`bundle v${d.applied_bundle_version}, target v${target}${d.last_seen ? ` · last seen ${fmtDateTime(d.last_seen)}` : ''}`}
@@ -220,10 +228,7 @@ export function RenewalCliffCard() {
                 <ul className="divide-y divide-edge border-t border-edge text-[12px]">
                   {soon.map((s) => (
                     <li key={s.device.overlay_ip} className="flex items-center justify-between gap-2 py-1.5">
-                      <span className="flex min-w-0 items-baseline gap-1.5">
-                        <span className="truncate text-ink">{s.device.name || '—'}</span>
-                        <span className="shrink-0 font-mono text-[11px] text-ink-faint">{s.device.overlay_ip}</span>
-                      </span>
+                      <HostLabel name={s.device.name} overlayIp={s.device.overlay_ip} />
                       <span className={cx('nums shrink-0', s.expiresMs < Date.now() ? 'text-danger' : 'text-ink-dim')}>
                         {fmtDateTime(s.device.cert_not_after)}
                       </span>
@@ -238,7 +243,9 @@ export function RenewalCliffCard() {
   )
 }
 
-// Version landscape — pilot + nebula version distribution across the fleet.
+// Version landscape — pilot + nebula version distribution across CHECKING-IN hosts. Stale
+// hosts are excluded from the distribution (a ghost stuck on an old version makes the
+// landscape look more fragmented than it really is) and listed separately with their versions.
 export function VersionLandscapeCard() {
   const devices = useDevices()
   return (
@@ -249,10 +256,39 @@ export function VersionLandscapeCard() {
         (() => {
           const ds = devices.data.pages[0].devices
           if (ds.length === 0) return <StateBlock kind="empty" message="No hosts reporting yet." />
+          const { live, stale } = splitByLiveness(ds)
           return (
             <div className="flex flex-col gap-4">
-              <VersionGroup label="Pilot" items={versionCounts(ds, (d) => d.pilot_version)} total={ds.length} />
-              <VersionGroup label="Nebula" items={versionCounts(ds, (d) => d.nebula_version)} total={ds.length} />
+              {live.length === 0 ? (
+                <div className="text-[13px] text-warn">No hosts checking in right now.</div>
+              ) : (
+                <>
+                  <VersionGroup label="Pilot" items={versionCounts(live, (d) => d.pilot_version)} total={live.length} />
+                  <VersionGroup label="Nebula" items={versionCounts(live, (d) => d.nebula_version)} total={live.length} />
+                </>
+              )}
+              {stale.length > 0 && (
+                <div className="flex flex-col gap-1 border-t border-edge pt-2">
+                  <div className="text-[12px] text-ink-faint">
+                    <span className="nums text-ink-dim">{stale.length}</span> not checking in{' '}
+                    <span className="text-ink-faint">(stale — excluded)</span>
+                  </div>
+                  <ul className="divide-y divide-edge text-[12px]" aria-label="Stale hosts">
+                    {stale.slice(0, 8).map((d) => (
+                      <li key={d.overlay_ip} className="flex items-center justify-between gap-2 py-1.5">
+                        <HostLabel name={d.name} overlayIp={d.overlay_ip} />
+                        <span
+                          className="shrink-0 font-mono text-[11px] text-ink-faint"
+                          title={d.last_seen ? `pilot ${d.pilot_version || '?'} · nebula ${d.nebula_version || '?'} · last seen ${fmtDateTime(d.last_seen)}` : undefined}
+                        >
+                          {d.pilot_version || '?'} · {d.nebula_version || '?'}
+                        </span>
+                      </li>
+                    ))}
+                    {stale.length > 8 && <li className="py-1.5 text-ink-faint">+{stale.length - 8} more stale</li>}
+                  </ul>
+                </div>
+              )}
             </div>
           )
         })()}
