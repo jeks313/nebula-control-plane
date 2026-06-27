@@ -419,6 +419,17 @@ export function useUpdateJoinKey() {
   })
 }
 
+// useDeviceRegroup sets a device's DESIRED groups (ADR 0002). The change takes effect on the
+// host's next heartbeat-triggered renew; the device list re-fetches so the pending badge shows.
+export function useDeviceRegroup() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ ip, groups }: { ip: string; groups: string[] }) =>
+      unwrap(api.PATCH('/admin/v1/devices/{ip}/groups', { params: { path: { ip } }, body: { groups } })),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['devices'] }),
+  })
+}
+
 // --- ADR 0010 IPAM (netblocks, allocations, growth-aware placement) ---
 
 export type Netblock = components['schemas']['Netblock']

@@ -1,7 +1,15 @@
+import { useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { useDevices, type DeviceFilters, type DeviceCondition } from '../api/hooks'
+import { useDevices, useDeviceRegroup, type DeviceFilters, type DeviceCondition, type Device } from '../api/hooks'
+import { usePermissions } from '../api/perms'
+import { isApiError, isForbidden, isCentrallyHandled } from '../api/errors'
+import { useToast } from '../components/Toast'
+import { Dialog } from '../components/Dialog'
 import { Card, Page, StateBlock, ErrorState, Button, Chip, cx } from '../components/ui'
 import { JoinedVia } from '../components/provenance'
+
+const RESERVED = ['control-plane', 'lighthouse']
+const FIELD = 'w-full rounded-[6px] border border-edge bg-mesh-2 px-2 py-1.5 text-[13px] text-ink placeholder:text-ink-faint'
 
 const CONDITION_LABEL: Record<DeviceCondition, string> = {
   expired: 'cert expired',
@@ -19,6 +27,8 @@ const FILTER_LABEL: Record<string, string> = {
 }
 
 export function Devices() {
+  const { can } = usePermissions()
+  const mayManage = can('device:manage')
   const [params, setParams] = useSearchParams()
   const filters: DeviceFilters = {
     provider: params.get('provider') ?? undefined,
@@ -77,6 +87,7 @@ export function Devices() {
                   {['Overlay IP', 'Name', 'Joined via', 'Groups', 'Pilot', 'Cert expires', 'Health', 'Last seen'].map((h) => (
                     <th key={h} className="px-4 py-2 font-medium">{h}</th>
                   ))}
+                  {mayManage && <th className="px-4 py-2 text-right font-medium">Actions</th>}
                 </tr>
               </thead>
               <tbody className="divide-y divide-edge">
@@ -85,11 +96,16 @@ export function Devices() {
                     <td className="nums px-4 py-2 text-ink">{d.overlay_ip}</td>
                     <td className="px-4 py-2 text-ink">{d.name}</td>
                     <td className="px-4 py-2"><JoinedVia p={d} onFilter={setFilter} /></td>
-                    <td className="px-4 py-2"><Groups groups={d.groups} /></td>
+                    <td className="px-4 py-2"><Groups d={d} /></td>
                     <td className="nums px-4 py-2 text-ink-dim">{d.pilot_version ?? '—'}</td>
                     <td className="nums px-4 py-2 text-ink-dim">{fmtDate(d.cert_not_after)}</td>
                     <td className={cx('px-4 py-2', healthTone(d.stale ? 'stale' : d.health))} title={d.stale && d.health ? `last reported "${d.health}" before going silent` : undefined}>{d.stale ? 'stale' : d.health ?? '—'}</td>
                     <td className="nums px-4 py-2 text-ink-faint">{fmtDate(d.last_seen)}</td>
+                    {mayManage && (
+                      <td className="px-4 py-2">
+                        <div className="flex justify-end"><EditGroupsButton d={d} /></div>
+                      </td>
+                    )}
                   </tr>
                 ))}
               </tbody>
@@ -108,14 +124,100 @@ export function Devices() {
   )
 }
 
-function Groups({ groups }: { groups?: string[] }) {
-  if (!groups || groups.length === 0) return <span className="text-ink-faint">—</span>
+function Groups({ d }: { d: Device }) {
+  const groups = d.groups ?? []
   return (
-    <span className="flex flex-wrap gap-1">
-      {groups.map((g) => (
-        <Chip key={g}>{g}</Chip>
-      ))}
+    <span className="flex flex-wrap items-center gap-1">
+      {groups.length === 0 ? <span className="text-ink-faint">—</span> : groups.map((g) => <Chip key={g}>{g}</Chip>)}
+      {d.pending && (
+        <span title={`pending re-issue → ${(d.desired_groups ?? []).join(', ') || 'none'} (applies on next heartbeat)`}>
+          <Chip tone="warn">pending</Chip>
+        </span>
+      )}
+      {d.reduction_pending_enforcement && (
+        <span title="a removed group's old cert is still valid until it expires or is revoked (advisory)">
+          <Chip tone="warn">advisory</Chip>
+        </span>
+      )}
     </span>
+  )
+}
+
+// EditGroupsButton / EditGroupsDialog — single-device group reassignment (ADR 0002). Disabled
+// for baseline-owned (control-plane/lighthouse) hosts, which the API also rejects.
+function EditGroupsButton({ d }: { d: Device }) {
+  const [open, setOpen] = useState(false)
+  const reserved = (d.groups ?? []).some((g) => RESERVED.includes(g))
+  return (
+    <>
+      <Button
+        onClick={() => setOpen(true)}
+        disabled={reserved}
+        title={reserved ? 'Baseline-owned (control-plane / lighthouse) — not editable here' : undefined}
+      >
+        Edit groups
+      </Button>
+      {open && <EditGroupsDialog d={d} onClose={() => setOpen(false)} />}
+    </>
+  )
+}
+
+function EditGroupsDialog({ d, onClose }: { d: Device; onClose: () => void }) {
+  const toast = useToast()
+  const regroup = useDeviceRegroup()
+  const [val, setVal] = useState((d.desired_groups ?? d.groups ?? []).join(', '))
+
+  function submit() {
+    const groups = val.split(',').map((g) => g.trim()).filter(Boolean)
+    if (groups.some((g) => RESERVED.includes(g))) {
+      toast.notify('control-plane / lighthouse are baseline-owned and cannot be assigned.', 'error')
+      return
+    }
+    regroup.mutate(
+      { ip: d.overlay_ip, groups },
+      {
+        onSuccess: () => {
+          toast.notify(`Groups updated for ${d.name || d.overlay_ip} — applies on the host's next heartbeat.`, 'success')
+          onClose()
+        },
+        onError: (err) => {
+          if (isCentrallyHandled(err)) return
+          if (isForbidden(err)) {
+            toast.notify('You don’t have permission (device:manage).', 'error')
+            return
+          }
+          toast.notify(isApiError(err) ? err.detail || err.title : 'Update failed.', 'error')
+        },
+      },
+    )
+  }
+
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      title={`Edit groups — ${d.name || d.overlay_ip}`}
+      footer={
+        <>
+          <Button onClick={onClose}>Cancel</Button>
+          <Button variant="primary" onClick={submit} disabled={regroup.isPending}>
+            {regroup.isPending ? 'Saving…' : 'Save'}
+          </Button>
+        </>
+      }
+    >
+      <div className="flex flex-col gap-3">
+        <label className="block">
+          <span className="mb-1 block text-[11px] uppercase tracking-wide text-ink-faint">Groups (comma-separated)</span>
+          <input autoFocus value={val} onChange={(e) => setVal(e.target.value)} placeholder="laptops, prod" className={FIELD} />
+        </label>
+        <p className="text-[12px] text-ink-faint">
+          Takes effect on the host’s next heartbeat-triggered renew (same overlay IP, hot-reload). Additions are
+          effective on re-issue; <span className="text-warn">removals are advisory until the old cert is revoked</span>.
+          control-plane / lighthouse can’t be assigned here.
+        </p>
+      </div>
+    </Dialog>
   )
 }
 

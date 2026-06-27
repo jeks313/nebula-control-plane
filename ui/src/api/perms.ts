@@ -11,6 +11,7 @@ export const PERMISSIONS = [
   'enroll:decide',
   'approval:decide',
   'ipam:manage',
+  'device:manage', // reassign a device's groups post-enrollment (ADR 0002/0013)
   // ADR 0011 Phase 1: the declarative config-manage perms gating PUT /config/{kind}.
   // They REPLACE the old policy/cloudtrust/usertrust :propose perms (the in-app
   // propose/approve flow is gone). The operator now holds these (single-operator CRUD);
@@ -33,6 +34,7 @@ const ROLE_PERMS: Record<string, readonly Permission[] | '*'> = {
     'joinkey:manage',
     'enroll:decide',
     'ipam:manage',
+    'device:manage',
     'policy:manage',
     'cloudtrust:manage',
     'usertrust:manage',
