@@ -254,11 +254,12 @@ func TestGenesisRecordsProtectedEnrollments(t *testing.T) {
 
 	// The two enrollment rows exist, issued, with the reserved groups.
 	type erow struct {
-		Fingerprint string `gorm:"column:fingerprint"`
-		Status      string `gorm:"column:status"`
-		Groups      string `gorm:"column:groups"`
-		Method      string `gorm:"column:method"`
-		OverlayIP   string `gorm:"column:overlay_ip"`
+		Fingerprint   string `gorm:"column:fingerprint"`
+		Status        string `gorm:"column:status"`
+		Groups        string `gorm:"column:groups"`
+		DesiredGroups string `gorm:"column:desired_groups"`
+		Method        string `gorm:"column:method"`
+		OverlayIP     string `gorm:"column:overlay_ip"`
 	}
 	for _, want := range []struct{ fp, group, ip string }{
 		{res.LighthouseFingerprint, "lighthouse", "10.44.0.1"},
@@ -271,6 +272,13 @@ func TestGenesisRecordsProtectedEnrollments(t *testing.T) {
 		}
 		if got.Method != "genesis" || got.OverlayIP != want.ip || got.Groups != `["`+want.group+`"]` {
 			t.Fatalf("%s enrollment = %+v, want method=genesis ip=%s groups=[%q]", want.group, got, want.ip, want.group)
+		}
+		// Regression (ADR 0013 plan P1.2): the genesis insert bypasses enrollment.record(), so it
+		// MUST seed desired_groups == groups. Otherwise the column's '[]' default + the near-expiry
+		// renew backstop re-sign this control-plane node with NO groups → its baseline-accept firewall
+		// drops → the fleet can no longer heartbeat/renew. (group-reassignment brick regression.)
+		if got.DesiredGroups != got.Groups {
+			t.Fatalf("%s desired_groups = %q, want == groups %q (genesis must seed desired_groups or it bricks the fleet)", want.group, got.DesiredGroups, got.Groups)
 		}
 	}
 
