@@ -1,6 +1,17 @@
 import { useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { useDevices, useDeviceRegroup, type DeviceFilters, type DeviceCondition, type Device } from '../api/hooks'
+import {
+  useDevices,
+  useDeviceRegroup,
+  useRegroupPreview,
+  useRegroupApply,
+  type DeviceFilters,
+  type DeviceCondition,
+  type Device,
+  type RegroupSelection,
+  type RegroupPreview,
+  type RegroupApplyEntry,
+} from '../api/hooks'
 import { usePermissions } from '../api/perms'
 import { isApiError, isForbidden, isCentrallyHandled } from '../api/errors'
 import { useToast } from '../components/Toast'
@@ -52,7 +63,11 @@ export function Devices() {
   }
 
   return (
-    <Page title="Devices" subtitle="Hosts reporting in over the mesh — with how each one joined">
+    <Page
+      title="Devices"
+      subtitle="Hosts reporting in over the mesh — with how each one joined"
+      actions={mayManage && <BulkRegroupButton pattern={params.get('name_pattern') ?? ''} />}
+    >
       {activeFilters.length > 0 && (
         <div className="mb-3 flex flex-wrap items-center gap-2">
           <span className="text-[12px] text-ink-faint">Filtered by</span>
@@ -218,6 +233,222 @@ function EditGroupsDialog({ d, onClose }: { d: Device; onClose: () => void }) {
         </p>
       </div>
     </Dialog>
+  )
+}
+
+// --- Bulk re-group (ADR 0013): name-pattern select → dry-run preview → guarded apply ---
+
+const SKIP_LABEL: Record<string, string> = {
+  reserved: 'baseline-owned',
+  stale: 'stale (not reporting)',
+  ephemeral: 'ephemeral',
+  reaped: 'reaped',
+  no_op: 'already matches',
+}
+
+type DeltaMode = 'add' | 'remove' | 'replace'
+
+function BulkRegroupButton({ pattern }: { pattern: string }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <>
+      <Button variant="primary" onClick={() => setOpen(true)}>Re-group…</Button>
+      {open && <BulkRegroupDialog initialPattern={pattern} onClose={() => setOpen(false)} />}
+    </>
+  )
+}
+
+function BulkRegroupDialog({ initialPattern, onClose }: { initialPattern: string; onClose: () => void }) {
+  const toast = useToast()
+  const preview = useRegroupPreview()
+  const apply = useRegroupApply()
+  const [pattern, setPattern] = useState(initialPattern)
+  const [mode, setMode] = useState<DeltaMode>('add')
+  const [groupsText, setGroupsText] = useState('')
+  const [includeStale, setIncludeStale] = useState(false)
+  const [result, setResult] = useState<RegroupPreview | null>(null)
+
+  const groups = groupsText.split(',').map((g) => g.trim()).filter(Boolean)
+  // editing any input invalidates a stale preview — the displayed targets must match what Apply sends.
+  const reset = () => setResult(null)
+
+  function runPreview() {
+    if (!pattern.trim()) return toast.notify('Enter a device-name pattern (e.g. db-*).', 'error')
+    if (groups.length === 0) return toast.notify('Enter at least one group.', 'error')
+    if (groups.some((g) => RESERVED.includes(g)))
+      return toast.notify('control-plane / lighthouse are baseline-owned and cannot be assigned.', 'error')
+    const sel: RegroupSelection = { name_pattern: pattern.trim(), include_stale: includeStale }
+    if (mode === 'add') sel.add = groups
+    else if (mode === 'remove') sel.remove = groups
+    else sel.replace = groups
+    preview.mutate(sel, {
+      onSuccess: setResult,
+      onError: (err) => {
+        if (isCentrallyHandled(err)) return
+        toast.notify(isApiError(err) ? err.detail || err.title : 'Preview failed.', 'error')
+      },
+    })
+  }
+
+  function runApply() {
+    if (!result || result.entries.length === 0) return
+    const entries: RegroupApplyEntry[] = result.entries.map((e) => ({
+      overlay_ip: e.overlay_ip,
+      enrollment_id: e.enrollment_id,
+      base_generation: e.base_generation,
+      target: e.target,
+    }))
+    apply.mutate(entries, {
+      onSuccess: (res) => {
+        if (res.routed) {
+          toast.notify(`Routed ${entries.length} device(s) to a second approver (change #${res.change.id}).`, 'success')
+        } else {
+          const applied = res.results.filter((r) => r.status === 'applied').length
+          const skipped = res.results.length - applied
+          toast.notify(
+            `Re-grouped ${applied} device(s)${skipped ? `, ${skipped} skipped (changed since preview)` : ''} — applies on each host's next heartbeat.`,
+            'success',
+          )
+        }
+        onClose()
+      },
+      onError: (err) => {
+        if (isCentrallyHandled(err)) return
+        if (isForbidden(err)) return toast.notify('You don’t have permission (device:manage).', 'error')
+        toast.notify(isApiError(err) ? err.detail || err.title : 'Apply failed.', 'error')
+      },
+    })
+  }
+
+  const nEntries = result?.entries.length ?? 0
+  const applyLabel = apply.isPending
+    ? 'Applying…'
+    : result?.requires_dual_control
+      ? `Submit ${nEntries} for approval`
+      : `Apply to ${nEntries} device${nEntries === 1 ? '' : 's'}`
+
+  return (
+    <Dialog
+      open
+      onClose={onClose}
+      title="Re-group devices"
+      footer={
+        <>
+          <Button onClick={onClose}>Cancel</Button>
+          {result ? (
+            <Button variant="primary" onClick={runApply} disabled={apply.isPending || nEntries === 0}>
+              {applyLabel}
+            </Button>
+          ) : (
+            <Button variant="primary" onClick={runPreview} disabled={preview.isPending}>
+              {preview.isPending ? 'Previewing…' : 'Preview'}
+            </Button>
+          )}
+        </>
+      }
+    >
+      <div className="flex flex-col gap-3">
+        <label className="block">
+          <span className="mb-1 block text-[11px] uppercase tracking-wide text-ink-faint">Device-name pattern</span>
+          <input
+            autoFocus
+            value={pattern}
+            onChange={(e) => { setPattern(e.target.value); reset() }}
+            placeholder="db-*  (use * and ? wildcards)"
+            className={FIELD}
+          />
+        </label>
+
+        <div className="flex gap-1">
+          {(['add', 'remove', 'replace'] as DeltaMode[]).map((m) => (
+            <button
+              key={m}
+              onClick={() => { setMode(m); reset() }}
+              className={cx(
+                'flex-1 rounded-[6px] border px-2 py-1 text-[12px] capitalize transition-colors',
+                mode === m ? 'border-permit/60 bg-permit/15 text-permit' : 'border-edge text-ink-dim hover:text-ink',
+              )}
+            >
+              {m === 'replace' ? 'replace with' : m}
+            </button>
+          ))}
+        </div>
+
+        <label className="block">
+          <span className="mb-1 block text-[11px] uppercase tracking-wide text-ink-faint">Groups (comma-separated)</span>
+          <input
+            value={groupsText}
+            onChange={(e) => { setGroupsText(e.target.value); reset() }}
+            placeholder="prod, db"
+            className={FIELD}
+          />
+        </label>
+
+        <label className="flex items-center gap-2 text-[12px] text-ink-dim">
+          <input type="checkbox" checked={includeStale} onChange={(e) => { setIncludeStale(e.target.checked); reset() }} />
+          Include stale (not-reporting) hosts
+        </label>
+
+        {result && <RegroupResultPanel result={result} />}
+
+        <p className="text-[12px] text-ink-faint">
+          Each change is an absolute set, applied on the host’s next heartbeat-triggered renew. Additions take effect on
+          re-issue; <span className="text-warn">removals are advisory until the old cert expires or is revoked</span>.
+          Elevating or large (&gt;25) changes route to a second approver.
+        </p>
+      </div>
+    </Dialog>
+  )
+}
+
+function RegroupResultPanel({ result }: { result: RegroupPreview }) {
+  const { entries, skipped, capped, requires_dual_control } = result
+  // collapse skips to "reason × n" for a compact summary
+  const skipCounts = skipped.reduce<Record<string, number>>((acc, s) => {
+    acc[s.reason] = (acc[s.reason] ?? 0) + 1
+    return acc
+  }, {})
+
+  return (
+    <div className="flex flex-col gap-2 rounded-md border border-edge bg-mesh-2 p-2.5">
+      {entries.length === 0 ? (
+        <p className="text-[13px] text-ink-dim">No devices would change.</p>
+      ) : (
+        <>
+          <div className="flex items-center justify-between">
+            <span className="text-[12px] text-ink-dim">{entries.length} device{entries.length === 1 ? '' : 's'} will change</span>
+            {requires_dual_control && <Chip tone="warn">needs a second approver</Chip>}
+          </div>
+          <div className="max-h-48 divide-y divide-edge overflow-y-auto rounded border border-edge">
+            {entries.map((e) => (
+              <div key={e.overlay_ip} className="px-2 py-1.5">
+                <div className="flex items-baseline justify-between gap-2">
+                  <span className="truncate text-[12px] text-ink">{e.name || e.overlay_ip}</span>
+                  <span className="nums shrink-0 text-[11px] text-ink-faint">{e.overlay_ip}</span>
+                </div>
+                <div className="mt-1 flex flex-wrap items-center gap-1 text-[11px]">
+                  {(e.from.length ? e.from : ['—']).map((g, i) => <Chip key={`f${i}`}>{g}</Chip>)}
+                  <span className="text-ink-faint">→</span>
+                  {(e.target.length ? e.target : ['—']).map((g, i) => (
+                    <Chip key={`t${i}`} tone={!e.from.includes(g) ? 'permit' : 'default'}>{g}</Chip>
+                  ))}
+                  {e.elevates && <Chip tone="warn">elevates</Chip>}
+                  {e.will_reduce && <Chip tone="warn">reduces</Chip>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+      {capped > 0 && (
+        <p className="text-[12px] text-warn">{capped} more matched but exceed the cap of 100 — narrow the pattern.</p>
+      )}
+      {Object.keys(skipCounts).length > 0 && (
+        <p className="text-[12px] text-ink-faint">
+          Skipped: {Object.entries(skipCounts).map(([r, n]) => `${n} ${SKIP_LABEL[r] ?? r}`).join(', ')}
+        </p>
+      )}
+    </div>
   )
 }
 

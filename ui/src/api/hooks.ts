@@ -430,6 +430,81 @@ export function useDeviceRegroup() {
   })
 }
 
+// --- ADR 0013 bulk device re-group (name-pattern dry-run → guarded apply / dual-control) ---
+// The endpoint is contract-generic (Record<string,never> bodies), so the shapes are typed here.
+
+export type RegroupSelection = {
+  name_pattern?: string
+  overlay_ips?: string[]
+  add?: string[]
+  remove?: string[]
+  replace?: string[]
+  include_stale?: boolean
+}
+export type RegroupDryEntry = {
+  overlay_ip: string
+  enrollment_id: number
+  name: string
+  from: string[]
+  target: string[]
+  base_generation: number
+  will_reduce: boolean
+  elevates: boolean
+}
+export type RegroupSkip = { overlay_ip: string; name: string; reason: string }
+export type RegroupPreview = {
+  entries: RegroupDryEntry[]
+  skipped: RegroupSkip[]
+  capped: number
+  requires_dual_control: boolean
+}
+export type RegroupApplyEntry = {
+  overlay_ip: string
+  enrollment_id: number
+  base_generation: number
+  target: string[]
+}
+export type RegroupResult = { overlay_ip: string; status: string }
+export type RegroupApplyResult =
+  | { routed: false; results: RegroupResult[] }
+  | { routed: true; change: Change }
+
+// useRegroupPreview — POST .../regroup?dry_run=true: resolve a selection + delta into per-device
+// absolute targets + identity tokens + skips, with NO writes. A mutation since it POSTs a draft.
+export function useRegroupPreview() {
+  return useMutation({
+    mutationFn: async (sel: RegroupSelection): Promise<RegroupPreview> => {
+      const { data, response } = await api.POST('/admin/v1/devices/regroup', {
+        params: { query: { dry_run: true } },
+        body: sel,
+      })
+      if (!response.ok) throw await parseProblem(response)
+      return data as unknown as RegroupPreview
+    },
+  })
+}
+
+// useRegroupApply — POST .../regroup: commit the confirmed entries. 200 = applied directly
+// (per-device results, generation-guarded); 202 = an elevating/large change routed to a distinct
+// second approver (the pending Change). The HTTP status is the only discriminator (both 2xx JSON),
+// so read it off the raw Response. onSettled refetches devices (pending badges) + approvals (202).
+export function useRegroupApply() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: async (entries: RegroupApplyEntry[]): Promise<RegroupApplyResult> => {
+      const { data, response } = await api.POST('/admin/v1/devices/regroup', { body: { entries } as never })
+      if (!response.ok) throw await parseProblem(response)
+      if (data === undefined) throw new ApiError(response.status, 'empty response')
+      if (response.status === 202) return { routed: true, change: data as unknown as Change }
+      return { routed: false, results: (data as unknown as { results: RegroupResult[] }).results }
+    },
+    onSettled: () => {
+      void qc.invalidateQueries({ queryKey: ['devices'] })
+      void qc.invalidateQueries({ queryKey: ['approvals'] })
+    },
+  })
+}
+
 // --- ADR 0010 IPAM (netblocks, allocations, growth-aware placement) ---
 
 export type Netblock = components['schemas']['Netblock']
