@@ -572,14 +572,11 @@ func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
 	// reserved group (control-plane/lighthouse) off a node that holds it — that drops its
 	// baseline-accept firewall and bricks the fleet. Re-add any reserved group the live cert
 	// carries and alarm; the perimeter (P1.6) should have rejected it, this is the backstop.
-	if policy.GrantsReservedGroup(issuedGroups) {
-		for _, g := range issuedGroups {
-			if policy.IsReservedGroup(g) && !containsGroup(groups, g) {
-				groups = append(groups, g)
-				_, _ = s.cfg.Store.AppendAudit(ctx, "system", "renew-reserved-strip-refused", dev.DeviceName,
-					fmt.Sprintf(`{"overlay_ip":%q,"kept_group":%q}`, dev.OverlayIP, g))
-			}
-		}
+	var keptReserved []string
+	groups, keptReserved = keepReservedGroups(issuedGroups, groups)
+	for _, g := range keptReserved {
+		_, _ = s.cfg.Store.AppendAudit(ctx, "system", "renew-reserved-strip-refused", dev.DeviceName,
+			fmt.Sprintf(`{"overlay_ip":%q,"kept_group":%q}`, dev.OverlayIP, g))
 	}
 	isReduction := groupsReduced(issuedGroups, groups) // a group the live cert carries is gone from the new set
 	overlay, err := netip.ParseAddr(dev.OverlayIP)
@@ -665,6 +662,24 @@ func containsGroup(gs []string, g string) bool {
 		}
 	}
 	return false
+}
+
+// keepReservedGroups is the renew CHOKEPOINT: the groups to actually sign are the desired set
+// PLUS any reserved group (control-plane/lighthouse) the live cert holds that desired tried to
+// drop — stripping one would brick a control-plane node by dropping its baseline-accept firewall.
+// Returns the corrected set + the reserved groups it re-added (for the caller to audit/alarm).
+func keepReservedGroups(issued, desired []string) (result, keptReserved []string) {
+	result = desired
+	if !policy.GrantsReservedGroup(issued) {
+		return result, nil
+	}
+	for _, g := range issued {
+		if policy.IsReservedGroup(g) && !containsGroup(result, g) {
+			result = append(result, g)
+			keptReserved = append(keptReserved, g)
+		}
+	}
+	return result, keptReserved
 }
 
 // groupsReduced reports whether any group the live cert carries (oldSet) is absent from the

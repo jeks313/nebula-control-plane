@@ -25,6 +25,13 @@ type provRow struct {
 	JoinKeyID       int64 // 0 for cloud-attested hosts
 	Groups          []string
 	Ephemeral       bool // joined via an ephemeral join key (shorter cert TTL; impl 2.12 foundation)
+	// Group-reassignment state (ADR 0002): DesiredGroups is the control-plane-authoritative
+	// target; Pending = a re-issue is pending (groups_generation > issued_generation), clearing
+	// on the host's next renew; ReductionPendingEnforcement = a soft removal whose old, higher-
+	// privilege cert is still valid (advisory until revoked, Phase 3).
+	DesiredGroups               []string
+	Pending                     bool
+	ReductionPendingEnforcement bool
 }
 
 // enrollProv is a narrow read view of the enrollment columns provenance needs (no
@@ -38,11 +45,16 @@ type enrollProv struct {
 	AttestPrincipal string `gorm:"column:attest_principal"`
 	AttestRegion    string `gorm:"column:attest_region"`
 	Ephemeral       bool   `gorm:"column:ephemeral"`
+
+	DesiredGroups               string `gorm:"column:desired_groups"`
+	GroupsGeneration            int64  `gorm:"column:groups_generation"`
+	IssuedGeneration            int64  `gorm:"column:issued_generation"`
+	ReductionPendingEnforcement bool   `gorm:"column:reduction_pending_enforcement"`
 }
 
 func (enrollProv) TableName() string { return "enrollments" }
 
-const provSelect = "overlay_ip, join_key_id, groups, attest_provider, attest_account, attest_principal, attest_region, ephemeral"
+const provSelect = "overlay_ip, join_key_id, groups, attest_provider, attest_account, attest_principal, attest_region, ephemeral, desired_groups, groups_generation, issued_generation, reduction_pending_enforcement"
 
 // deviceProvenance resolves the authoritative enrollment for each overlay IP and
 // returns it keyed by overlay_ip. A device with no issued enrollment (e.g. a legacy
@@ -66,12 +78,16 @@ func (s *Server) deviceProvenance(ctx context.Context, ips []string) (map[string
 		if _, seen := out[r.OverlayIP]; seen {
 			continue
 		}
-		var groups []string
+		var groups, desired []string
 		_ = json.Unmarshal([]byte(r.Groups), &groups)
+		_ = json.Unmarshal([]byte(r.DesiredGroups), &desired)
 		out[r.OverlayIP] = provRow{
 			AttestProvider: r.AttestProvider, AttestAccount: r.AttestAccount,
 			AttestPrincipal: r.AttestPrincipal, AttestRegion: r.AttestRegion,
 			JoinKeyID: r.JoinKeyID, Groups: groups, Ephemeral: r.Ephemeral,
+			DesiredGroups:               desired,
+			Pending:                     r.GroupsGeneration > r.IssuedGeneration,
+			ReductionPendingEnforcement: r.ReductionPendingEnforcement,
 		}
 	}
 	return out, nil

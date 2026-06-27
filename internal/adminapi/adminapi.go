@@ -489,6 +489,14 @@ type Device struct {
 	AttestRegion    string   `json:"attest_region,omitempty"`
 	JoinKeyName     string   `json:"join_key_name,omitempty"`
 	Groups          []string `json:"groups,omitempty"`
+	// DesiredGroups / Pending / ReductionPendingEnforcement — post-enrollment group reassignment
+	// (ADR 0002). DesiredGroups is the control-plane target set (equals Groups unless a change is
+	// in flight). Pending is true while the host hasn't re-issued yet (groups_generation >
+	// issued_generation), clearing on its next renew. ReductionPendingEnforcement marks a soft
+	// group REMOVAL whose old, higher-privilege cert is still valid (advisory until revoked, Phase 3).
+	DesiredGroups               []string `json:"desired_groups,omitempty"`
+	Pending                     bool     `json:"pending,omitempty"`
+	ReductionPendingEnforcement bool     `json:"reduction_pending_enforcement,omitempty"`
 	// Ephemeral marks a host that joined via an ephemeral join key (shorter cert TTL;
 	// foundation for the auto-reaping lifecycle, impl 2.12). From the authoritative enrollment.
 	Ephemeral bool `json:"ephemeral,omitempty"`
@@ -650,6 +658,9 @@ func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
 		if p, ok := prov[h.OverlayIP]; ok {
 			d.Groups = p.Groups
 			d.Ephemeral = p.Ephemeral
+			d.DesiredGroups = p.DesiredGroups
+			d.Pending = p.Pending
+			d.ReductionPendingEnforcement = p.ReductionPendingEnforcement
 			switch {
 			case p.AttestProvider != "":
 				d.AttestProvider, d.AttestAccount = p.AttestProvider, p.AttestAccount

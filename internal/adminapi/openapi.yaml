@@ -867,6 +867,9 @@ components:
         attest_region: { type: string }
         join_key_name: { type: string, description: "provenance: join-key name for token-enrolled hosts" }
         groups: { type: array, items: { type: string }, description: "groups the host was issued (from its authoritative enrollment)" }
+        desired_groups: { type: array, items: { type: string }, description: "control-plane target group set (ADR 0002); equals groups unless a re-issue is pending" }
+        pending: { type: boolean, description: "a group re-issue is pending — the host re-issues on its next heartbeat (groups_generation > issued_generation)" }
+        reduction_pending_enforcement: { type: boolean, description: "a soft group removal whose old, higher-privilege cert is still valid (advisory until revoked, Phase 3)" }
         ephemeral: { type: boolean, description: "host joined via an ephemeral join key (shorter cert TTL; foundation for auto-reaping, impl 2.12)" }
         reaped_at: { type: string, format: date-time, description: "when the reaper soft-reclaimed this device (impl 2.12); absent for live hosts. A reaped host's heartbeat is deleted, so it normally leaves the heartbeat-driven list — present for completeness / a future include-reaped view" }
         reap_reason: { type: string, description: "why the device was reaped: cert-expired | silent (impl 2.12); absent for live hosts" }

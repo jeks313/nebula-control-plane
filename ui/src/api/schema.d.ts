@@ -58,6 +58,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/v1/devices/{ip}/groups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Set a device's desired groups (ADR 0002). Takes effect on the host's next heartbeat-triggered renew.
+         * @description Server-side group reassignment: sets desired_groups and bumps the generation so the host re-issues on its next heartbeat. Reserved groups (control-plane/lighthouse) can be neither assigned nor stripped, and a device currently holding one is not manageable here. device:manage + step-up. Additions are effective on re-issue; removals are advisory until the old cert is revoked (Phase 3).
+         */
+        patch: operations["setDeviceGroups"];
+        trace?: never;
+    };
     "/admin/v1/audit": {
         parameters: {
             query?: never;
@@ -712,6 +732,12 @@ export interface components {
             join_key_name?: string;
             /** @description groups the host was issued (from its authoritative enrollment) */
             groups?: string[];
+            /** @description control-plane target group set (ADR 0002); equals groups unless a re-issue is pending */
+            desired_groups?: string[];
+            /** @description a group re-issue is pending — the host re-issues on its next heartbeat (groups_generation > issued_generation) */
+            pending?: boolean;
+            /** @description a soft group removal whose old, higher-privilege cert is still valid (advisory until revoked, Phase 3) */
+            reduction_pending_enforcement?: boolean;
             /** @description host joined via an ephemeral join key (shorter cert TTL; foundation for auto-reaping, impl 2.12) */
             ephemeral?: boolean;
             /**
@@ -1327,6 +1353,45 @@ export interface operations {
             };
             400: components["responses"]["Problem"];
             401: components["responses"]["Unauthorized"];
+        };
+    };
+    setDeviceGroups: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description the device's overlay IP */
+                ip: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    groups: string[];
+                };
+            };
+        };
+        responses: {
+            /** @description The updated desired-groups state. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        overlay_ip: string;
+                        desired_groups: string[];
+                        /** Format: int64 */
+                        generation: number;
+                        pending: boolean;
+                    };
+                };
+            };
+            400: components["responses"]["Problem"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Problem"];
+            404: components["responses"]["Problem"];
         };
     };
     listAudit: {
