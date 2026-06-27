@@ -78,6 +78,26 @@ export interface paths {
         patch: operations["setDeviceGroups"];
         trace?: never;
     };
+    "/admin/v1/devices/regroup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Bulk re-group devices (ADR 0013). ?dry_run=true previews; otherwise applies the confirmed entries.
+         * @description Dry run (?dry_run=true) resolves a name_pattern / overlay_ips selection + an add/remove/replace delta into per-device absolute targets + identity tokens, excluding reserved/stale/ephemeral/ reaped hosts (no writes). Apply commits the explicit dry-run entries under optimistic concurrency; an elevating or large change routes through dual-control (202 + Change). device:manage + step-up.
+         */
+        post: operations["regroupDevices"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/admin/v1/audit": {
         parameters: {
             query?: never;
@@ -1392,6 +1412,52 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Problem"];
             404: components["responses"]["Problem"];
+        };
+    };
+    regroupDevices: {
+        parameters: {
+            query?: {
+                dry_run?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    name_pattern?: string;
+                    overlay_ips?: string[];
+                    add?: string[];
+                    remove?: string[];
+                    replace?: string[];
+                    include_stale?: boolean;
+                    entries?: Record<string, never>[];
+                };
+            };
+        };
+        responses: {
+            /** @description Dry-run preview (entries + skipped + requires_dual_control), or apply results. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Record<string, never>;
+                };
+            };
+            /** @description Elevating/large change routed to dual-control — the pending Change. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": Record<string, never>;
+                };
+            };
+            400: components["responses"]["Problem"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Problem"];
         };
     };
     listAudit: {

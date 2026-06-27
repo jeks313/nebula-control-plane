@@ -105,6 +105,45 @@ paths:
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
+  /admin/v1/devices/regroup:
+    post:
+      summary: Bulk re-group devices (ADR 0013). ?dry_run=true previews; otherwise applies the confirmed entries.
+      description: >-
+        Dry run (?dry_run=true) resolves a name_pattern / overlay_ips selection + an add/remove/replace
+        delta into per-device absolute targets + identity tokens, excluding reserved/stale/ephemeral/
+        reaped hosts (no writes). Apply commits the explicit dry-run entries under optimistic concurrency;
+        an elevating or large change routes through dual-control (202 + Change). device:manage + step-up.
+      operationId: regroupDevices
+      parameters:
+        - { name: dry_run, in: query, required: false, schema: { type: boolean } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name_pattern: { type: string }
+                overlay_ips: { type: array, items: { type: string } }
+                add: { type: array, items: { type: string } }
+                remove: { type: array, items: { type: string } }
+                replace: { type: array, items: { type: string } }
+                include_stale: { type: boolean }
+                entries: { type: array, items: { type: object } }
+      responses:
+        "200":
+          description: Dry-run preview (entries + skipped + requires_dual_control), or apply results.
+          content:
+            application/json:
+              schema: { type: object }
+        "202":
+          description: Elevating/large change routed to dual-control — the pending Change.
+          content:
+            application/json:
+              schema: { type: object }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Problem" }
   /admin/v1/audit:
     get:
       summary: Audit log, newest first, cursor-paginated.

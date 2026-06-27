@@ -229,6 +229,9 @@ func New(cfg Config) *Server {
 			_, err := usertrust.Parse(b)
 			return err
 		})
+		// Bulk device re-group (ADR 0013): an elevating/large bulk routes through dual-control;
+		// the committer re-resolves + applies the frozen entry set at approval time.
+		s.dc.Register(regroupKind, s.commitDeviceRegroup)
 	}
 	return s
 }
@@ -275,6 +278,7 @@ func (s *Server) routeTable() []route {
 		{"GET", "/admin/v1/fleet/health", s.handleFleetHealth},
 		{"GET", "/admin/v1/devices", s.handleDevices},
 		{"PATCH", "/admin/v1/devices/{ip}/groups", s.handleDeviceGroupSet},
+		{"POST", "/admin/v1/devices/regroup", s.handleDeviceRegroup},
 		{"GET", "/admin/v1/audit", s.handleAudit},
 		{"GET", "/admin/v1/audit/verify", s.handleAuditVerify},
 		{"GET", "/admin/v1/lighthouses", s.handleLighthouses},
@@ -528,6 +532,7 @@ func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
 	account := r.URL.Query().Get("attest_account")
 	joinKey := r.URL.Query().Get("join_key")
 	condition := r.URL.Query().Get("condition")
+	namePattern := r.URL.Query().Get("name_pattern") // glob (*, ?) -> SQL LIKE, applied in SQL like `condition`
 	scoped := provider != "" || account != "" || joinKey != ""
 
 	var condSQL string
@@ -593,6 +598,9 @@ func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
 		}
 		if condSQL != "" {
 			q = q.Where(condSQL, condArgs...)
+		}
+		if namePattern != "" {
+			q = q.Where("device_name LIKE ? ESCAPE '\\'", globToLike(namePattern))
 		}
 		var rows []deviceHB
 		if err := q.Find(&rows).Error; err != nil {
