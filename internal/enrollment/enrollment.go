@@ -82,6 +82,19 @@ type Enrollment struct {
 	Method       string `gorm:"column:method"`
 	JoinKeyID    int64  `gorm:"column:join_key_id"`
 	Groups       string `gorm:"column:groups"`
+	// Desired-vs-issued group reassignment (ADR 0002 / ADR 0013). DesiredGroups is the
+	// control-plane-authoritative target set; Groups (above) stays "what the live cert was
+	// signed with". GroupsGeneration bumps on every desired change; IssuedGeneration records
+	// the generation the live cert was issued at. GroupsGeneration > IssuedGeneration means the
+	// host is pending a re-issue (it renews on its next heartbeat). ReductionPendingEnforcement
+	// + ReductionOldNotAfter mark a soft (advisory) group REMOVAL: the old, higher-privilege
+	// cert stays valid until that unix-seconds expiry (or it is revoked in Phase 3). Seeded
+	// DesiredGroups == Groups at enrollment (see record() AND the genesis direct-insert).
+	DesiredGroups               string `gorm:"column:desired_groups;default:'[]'"`
+	GroupsGeneration            int64  `gorm:"column:groups_generation"`
+	IssuedGeneration            int64  `gorm:"column:issued_generation"`
+	ReductionPendingEnforcement bool   `gorm:"column:reduction_pending_enforcement"`
+	ReductionOldNotAfter        int64  `gorm:"column:reduction_old_not_after"`
 	// SubRange is the IPAM netblock NAME this enrollment is bound to, resolved at enroll
 	// time (the join key's sub-range, or the matched cloud-trust / user-trust scope; ADR
 	// 0010 Phase 2). Persisted like Groups so Approve allocates from the SAME block the
@@ -1111,6 +1124,7 @@ func (c *Consumer) record(ctx context.Context, enrollmentID string, req wire.Enr
 		Method:          req.Method,
 		JoinKeyID:       joinKeyID,
 		Groups:          groups,
+		DesiredGroups:   groups, // desired == issued at enrollment; generations stay 0 (not pending re-issue)
 		SubRange:        subRange,
 		Status:          status,
 		CertPEM:         certPEM,

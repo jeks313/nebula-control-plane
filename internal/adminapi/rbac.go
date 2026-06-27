@@ -30,6 +30,7 @@ const (
 	PermEnrollDecide     Permission = "enroll:decide"     // approve/deny enrollments
 	PermApprovalDecide   Permission = "approval:decide"   // approve/deny a dual-control change
 	PermIPAMManage       Permission = "ipam:manage"       // carve/edit/remove netblocks (ADR 0010)
+	PermDeviceManage     Permission = "device:manage"     // reassign a device's groups post-enrollment (ADR 0002/0013)
 	// ADR 0011 Phase 1 config-manage permissions: authorize the declarative
 	// PUT /admin/v1/config/{kind}. They REPLACE the old policy/cloudtrust/usertrust
 	// :propose permissions (the in-app propose/approve flow these gated is deleted in
@@ -61,6 +62,7 @@ var rolePerms = map[string]map[Permission]bool{
 		PermJoinKeyManage:    true,
 		PermEnrollDecide:     true,
 		PermIPAMManage:       true,
+		PermDeviceManage:     true,
 		// ADR 0011 Phase 1: the operator writes declarative config directly via the
 		// PUT (single-operator CRUD). A privileged change still requires a distinct
 		// second sign-off (approval:decide, which the operator does NOT hold).

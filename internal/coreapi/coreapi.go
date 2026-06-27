@@ -474,19 +474,22 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 
 	wire.WriteJSON(w, http.StatusOK, wire.HeartbeatResponse{
 		ProtocolVersion: wire.ProtocolVersion,
-		Commands:        s.commandsFor(ctx, dev.OverlayIP, req.AppliedBundleVersion, req.AppliedBlocklistVersion, appliedNebula, appliedPilot, certNotAfter),
+		Commands:        s.commandsFor(ctx, dev.OverlayIP, req.AppliedBundleVersion, req.AppliedBlocklistVersion, appliedNebula, appliedPilot, certNotAfter, dev.GroupsGeneration, dev.IssuedGeneration),
 	})
 }
 
 // commandsFor decides the typed commands to return: the near-expiry renew
 // backstop (4.6) plus, for 6.6, an apply_bundle that drives the host toward its
 // rollout target version (or back to prev after a rollback).
-func (s *Server) commandsFor(ctx context.Context, overlayIP string, appliedVersion, appliedBlocklist, appliedNebula, appliedPilot int, certNotAfter int64) []wire.Command {
+func (s *Server) commandsFor(ctx context.Context, overlayIP string, appliedVersion, appliedBlocklist, appliedNebula, appliedPilot int, certNotAfter, groupsGen, issuedGen int64) []wire.Command {
 	var cmds []wire.Command
-	if s.cfg.RenewCommandThreshold > 0 && certNotAfter > 0 {
-		if time.Unix(0, certNotAfter).Sub(s.now()) < s.cfg.RenewCommandThreshold {
-			cmds = append(cmds, wire.Command{Type: wire.CmdRenew})
-		}
+	// Renew backstop: near cert expiry (4.6) OR a pending group reassignment
+	// (groups_generation > issued_generation — ADR 0002). One CmdRenew covers both (renew
+	// re-keys AND re-signs from desired_groups), so emit at most one even if both fire.
+	nearExpiry := s.cfg.RenewCommandThreshold > 0 && certNotAfter > 0 &&
+		time.Unix(0, certNotAfter).Sub(s.now()) < s.cfg.RenewCommandThreshold
+	if nearExpiry || groupsGen > issuedGen {
+		cmds = append(cmds, wire.Command{Type: wire.CmdRenew})
 	}
 	if s.cfg.Rollout != nil {
 		// A single apply_bundle refetches the host's CURRENT bundle (the latest of
@@ -555,9 +558,30 @@ func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 4.3 — re-sign the SAME identity (IP + groups from the device record).
-	var groups []string
-	_ = json.Unmarshal([]byte(dev.Groups), &groups)
+	// 4.3 — re-sign the SAME identity (IP), with the DESIRED groups (ADR 0002). The control
+	// plane is the authority: the host supplies only a CSR, never groups. desired_groups is what
+	// we sign; the existing `groups` column is what the LIVE cert carries (used for the reserved
+	// guard + reduction detection below). capturedGen is the generation we are issuing for; the
+	// write-back is guarded by it so a concurrent operator bump / racing renew can't clobber.
+	capturedGen := dev.GroupsGeneration
+	var issuedGroups, groups []string
+	_ = json.Unmarshal([]byte(dev.Groups), &issuedGroups)
+	_ = json.Unmarshal([]byte(dev.DesiredGroups), &groups)
+	// CHOKEPOINT reserved-group guard (defense in depth, independent of the admin perimeter):
+	// the signer is the only place groups become authority, so a reduction must NEVER strip a
+	// reserved group (control-plane/lighthouse) off a node that holds it — that drops its
+	// baseline-accept firewall and bricks the fleet. Re-add any reserved group the live cert
+	// carries and alarm; the perimeter (P1.6) should have rejected it, this is the backstop.
+	if policy.GrantsReservedGroup(issuedGroups) {
+		for _, g := range issuedGroups {
+			if policy.IsReservedGroup(g) && !containsGroup(groups, g) {
+				groups = append(groups, g)
+				_, _ = s.cfg.Store.AppendAudit(ctx, "system", "renew-reserved-strip-refused", dev.DeviceName,
+					fmt.Sprintf(`{"overlay_ip":%q,"kept_group":%q}`, dev.OverlayIP, g))
+			}
+		}
+	}
+	isReduction := groupsReduced(issuedGroups, groups) // a group the live cert carries is gone from the new set
 	overlay, err := netip.ParseAddr(dev.OverlayIP)
 	if err != nil {
 		wire.WriteError(w, wire.CodeInternal, "bad device record")
@@ -595,6 +619,27 @@ func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
 		wire.WriteError(w, wire.CodeInternal, "renew bookkeeping failed")
 		return
 	}
+	// Advance issued groups + generation to what we just signed, GUARDED by the captured
+	// generation: a concurrent operator bump (newer desired) or a slower racing renew must not
+	// clobber a newer issue nor mark a stale issue converged. A near-expiry renew with no pending
+	// change has capturedGen == issued_generation, so this 0-row-matches (no-op; the fingerprint
+	// write above is unconditional and already persisted). On a reduction, record the DURABLE
+	// advisory flag + the OLD cert's expiry (the heartbeat still holds it here, pre-update below);
+	// it is cleared in Phase 3 once the old cert is revoked. (AppendAuditTx for atomic write+audit
+	// is plan item P1.4b, still TODO — this keeps today's write-then-append convention.)
+	signedGroupsJSON, _ := json.Marshal(groups)
+	upd := map[string]any{"groups": string(signedGroupsJSON), "issued_generation": capturedGen}
+	if isReduction {
+		var oldNotAfter int64
+		_ = s.cfg.Store.DB.WithContext(ctx).Raw(
+			"SELECT cert_not_after FROM heartbeats WHERE overlay_ip = ?", dev.OverlayIP).Scan(&oldNotAfter).Error
+		upd["reduction_pending_enforcement"] = true
+		upd["reduction_old_not_after"] = oldNotAfter
+	}
+	if err := s.cfg.Store.DB.WithContext(ctx).Model(&enrollment.Enrollment{}).
+		Where("id = ? AND issued_generation < ?", dev.ID, capturedGen).Updates(upd).Error; err != nil {
+		_, _ = s.cfg.Store.AppendAudit(ctx, "system", "renew-groups-writeback-error", dev.OverlayIP, err.Error())
+	}
 	// Advance the heartbeat row's recorded cert_not_after to the freshly-issued expiry so the reaper
 	// sees the new validity immediately, instead of lagging (and possibly mis-judging the host
 	// cert-expired) until the host's next heartbeat re-reports it. Best-effort: a host that has never
@@ -604,10 +649,33 @@ func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
 		"UPDATE heartbeats SET cert_not_after = ? WHERE overlay_ip = ?", notAfter.UnixNano(), dev.OverlayIP); res.Error != nil {
 		_, _ = s.cfg.Store.AppendAudit(ctx, "system", "renew-heartbeat-cert-update-error", dev.OverlayIP, res.Error.Error())
 	}
+	// Authority audit: the cert-issue is where groups become authority, so record the groups
+	// signed + the generation issued (groups is valid JSON — a string array — embedded raw).
 	_, _ = s.cfg.Store.AppendAudit(ctx, "renew:"+dev.DeviceName, "cert-renewed", dev.DeviceName,
-		fmt.Sprintf(`{"overlay_ip":%q,"fingerprint":%q}`, dev.OverlayIP, fp))
+		fmt.Sprintf(`{"overlay_ip":%q,"fingerprint":%q,"groups":%s,"issued_generation":%d}`, dev.OverlayIP, fp, string(signedGroupsJSON), capturedGen))
 
 	wire.WriteJSON(w, http.StatusOK, wire.RenewResponse{ProtocolVersion: wire.ProtocolVersion, Bundle: bundleJWS})
+}
+
+// containsGroup reports whether g is in gs.
+func containsGroup(gs []string, g string) bool {
+	for _, x := range gs {
+		if x == g {
+			return true
+		}
+	}
+	return false
+}
+
+// groupsReduced reports whether any group the live cert carries (oldSet) is absent from the
+// newly-signed set (newSet) — i.e. the change is a reduction (soft until the old cert is revoked).
+func groupsReduced(oldSet, newSet []string) bool {
+	for _, o := range oldSet {
+		if !containsGroup(newSet, o) {
+			return true
+		}
+	}
+	return false
 }
 
 // assembleBundle builds the host's current signed-config bundle payload: its

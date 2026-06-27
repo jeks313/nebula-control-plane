@@ -67,6 +67,44 @@ paths:
               schema: { $ref: "#/components/schemas/DeviceList" }
         "400": { $ref: "#/components/responses/Problem" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+  /admin/v1/devices/{ip}/groups:
+    patch:
+      summary: Set a device's desired groups (ADR 0002). Takes effect on the host's next heartbeat-triggered renew.
+      description: >-
+        Server-side group reassignment: sets desired_groups and bumps the generation so the
+        host re-issues on its next heartbeat. Reserved groups (control-plane/lighthouse) can be
+        neither assigned nor stripped, and a device currently holding one is not manageable
+        here. device:manage + step-up. Additions are effective on re-issue; removals are
+        advisory until the old cert is revoked (Phase 3).
+      operationId: setDeviceGroups
+      parameters:
+        - { name: ip, in: path, required: true, description: "the device's overlay IP", schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [groups]
+              properties:
+                groups: { type: array, items: { type: string } }
+      responses:
+        "200":
+          description: The updated desired-groups state.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [overlay_ip, desired_groups, generation, pending]
+                properties:
+                  overlay_ip: { type: string }
+                  desired_groups: { type: array, items: { type: string } }
+                  generation: { type: integer, format: int64 }
+                  pending: { type: boolean }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "404": { $ref: "#/components/responses/Problem" }
   /admin/v1/audit:
     get:
       summary: Audit log, newest first, cursor-paginated.

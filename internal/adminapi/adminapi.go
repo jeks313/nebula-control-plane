@@ -274,6 +274,7 @@ func (s *Server) routeTable() []route {
 		{"GET", "/admin/v1/me", s.handleMe},
 		{"GET", "/admin/v1/fleet/health", s.handleFleetHealth},
 		{"GET", "/admin/v1/devices", s.handleDevices},
+		{"PATCH", "/admin/v1/devices/{ip}/groups", s.handleDeviceGroupSet},
 		{"GET", "/admin/v1/audit", s.handleAudit},
 		{"GET", "/admin/v1/audit/verify", s.handleAuditVerify},
 		{"GET", "/admin/v1/lighthouses", s.handleLighthouses},

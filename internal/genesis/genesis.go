@@ -524,7 +524,13 @@ func RecordControlPlaneEnrollment(ctx context.Context, db *gorm.DB, fingerprint 
 		"pubkey":        pub,
 		"method":        "genesis",
 		"groups":        string(groupsJSON),
-		"status":        "issued",
+		// desired_groups MUST equal groups here: this raw-map insert bypasses enrollment.record(),
+		// so an omitted desired_groups would take the column's '[]' DEFAULT — and the near-expiry
+		// renew backstop (which fires regardless of generation) would then re-sign this control-plane
+		// node with NO groups, dropping its baseline-accept firewall and bricking the fleet. Generations
+		// default to 0 == 0 (not pending). (ADR 0013 / group-reassignment plan P1.2.)
+		"desired_groups": string(groupsJSON),
+		"status":         "issued",
 		"cert_pem":      certPEM,
 		"overlay_ip":    overlayIP,
 		"fingerprint":   fp,
