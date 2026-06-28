@@ -274,13 +274,13 @@ resource "aws_lb" "gateway_internal" {
 
 # enroll on the public NLB (off-cloud) and on the internal NLB (in-VPC) are separate
 # target groups — an NLB target group binds to a single load balancer.
-# TCP health check (NLB default): "is :8443 accepting connections". NOTE — an HTTPS /healthz
-# check would NOT work here: the gateway serves its cert via ACME autocert keyed on SNI, but NLB
-# HTTPS health checks connect by IP WITHOUT SNI, so autocert can't select a cert and EVERY task
-# fails the handshake (proven: a no-SNI probe gets 0 bytes while a real SNI client gets 200).
-# Detecting a wedged-but-listening gateway therefore needs a different probe (gateway-side cert
-# fallback on empty SNI, or an ECS container health check that self-probes with SNI) — see the
-# gateway self-heal follow-up. Until then this stays TCP.
+# HTTPS /healthz health check (self-heal): a wedged TLS listener accepts TCP but fails the
+# handshake/response, so only an HTTPS probe of /healthz catches it — then the target deregisters
+# AND the ECS service replaces the task. This is safe ONLY because the gateway now serves its cert
+# on missing/unknown SNI (internal/autotls withSNIFallback): NLB health checks connect by IP with
+# NO SNI, which otherwise fails certmagic's SNI-keyed cert selection (the 2026-06-28 outage —
+# verified fixed: a no-SNI probe to :8443/healthz returns 200). The 5m ECS
+# health_check_grace_period covers a cold task's cert load before the check counts.
 resource "aws_lb_target_group" "enroll" {
   count              = local.gw_fargate
   name_prefix        = "ncpen-"
@@ -289,6 +289,15 @@ resource "aws_lb_target_group" "enroll" {
   vpc_id             = aws_vpc.main.id
   target_type        = "ip"
   preserve_client_ip = false
+  health_check {
+    protocol            = "HTTPS"
+    path                = "/healthz"
+    port                = "traffic-port"
+    matcher             = "200"
+    interval            = 10
+    healthy_threshold   = 2
+    unhealthy_threshold = 3 # ~30s of failed probes before the task is marked unhealthy
+  }
 }
 
 resource "aws_lb_target_group" "enroll_internal" {
@@ -299,6 +308,15 @@ resource "aws_lb_target_group" "enroll_internal" {
   vpc_id             = aws_vpc.main.id
   target_type        = "ip"
   preserve_client_ip = false
+  health_check {
+    protocol            = "HTTPS"
+    path                = "/healthz"
+    port                = "traffic-port"
+    matcher             = "200"
+    interval            = 10
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+  }
 }
 
 resource "aws_lb_target_group" "collect" {
@@ -509,10 +527,10 @@ resource "aws_ecs_service" "gateway" {
   #    give NLB health checks room before ECS recycles the task (default grace is 0).
   health_check_grace_period_seconds = local.gateway_acme == 1 ? 300 : null
 
-  # Auto-roll-back a DEPLOY whose new tasks never reach healthy (e.g. a bad image that can't open
-  # the port), so a broken push reverts to the last-good task set instead of stranding the service.
-  # (This does NOT catch a wedged-but-listening gateway under the TCP health check — that needs the
-  # SNI-aware probe in the gateway self-heal follow-up.)
+  # Auto-roll-back a DEPLOY whose new tasks never reach healthy (a bad image), so a broken push
+  # reverts to the last-good task set instead of stranding the service. Steady-state self-heal of a
+  # wedged-but-listening task comes from the enroll TGs' HTTPS /healthz check above (ECS replaces an
+  # unhealthy target); this breaker is the deploy-time complement.
   deployment_circuit_breaker {
     enable   = true
     rollback = true
