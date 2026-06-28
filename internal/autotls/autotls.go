@@ -198,5 +198,29 @@ func TLSConfig(ctx context.Context, cfg Config) (*tls.Config, error) {
 
 	tlsCfg := magic.TLSConfig()
 	tlsCfg.MinVersion = tls.VersionTLS12
+	// certmagic selects the cert by SNI and fails the handshake on a missing/unknown ServerName.
+	// An NLB HTTPS health check connects to the target by IP and sends NO SNI, so without this it
+	// could never handshake (it broke every gateway task on 2026-06-28). Fall back to the primary
+	// domain's cert so a no-SNI probe completes the handshake; real clients (which send SNI) are
+	// unaffected. Safe for a single-domain origin — there is only one cert to serve.
+	if base := tlsCfg.GetCertificate; base != nil {
+		tlsCfg.GetCertificate = withSNIFallback(base, cfg.Domains[0])
+	}
 	return tlsCfg, nil
+}
+
+// withSNIFallback wraps a cert selector so a missing/unknown SNI gets the primary domain's cert
+// (and the TLS handshake completes) instead of failing the way certmagic does on an unknown
+// ServerName — see TLSConfig for why (no-SNI load-balancer health checks).
+func withSNIFallback(base func(*tls.ClientHelloInfo) (*tls.Certificate, error), primary string) func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+	return func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+		if hello.ServerName != "" {
+			if cert, err := base(hello); err == nil {
+				return cert, nil
+			}
+		}
+		h := *hello
+		h.ServerName = primary
+		return base(&h)
+	}
 }
