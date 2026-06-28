@@ -320,7 +320,7 @@ function BulkRegroupDialog({ initialPattern, onClose }: { initialPattern: string
     })
   }
 
-  const nEntries = result?.entries.length ?? 0
+  const nEntries = result?.entries?.length ?? 0
   const applyLabel = apply.isPending
     ? 'Applying…'
     : result?.requires_dual_control
@@ -402,7 +402,11 @@ function BulkRegroupDialog({ initialPattern, onClose }: { initialPattern: string
 }
 
 function RegroupResultPanel({ result }: { result: RegroupPreview }) {
-  const { entries, skipped, capped, requires_dual_control } = result
+  // The API can return null for empty slices (Go marshals nil → null), so coalesce everything.
+  const entries = result.entries ?? []
+  const skipped = result.skipped ?? []
+  const capped = result.capped ?? 0
+  const requires_dual_control = result.requires_dual_control ?? false
   // collapse skips to "reason × n" for a compact summary
   const skipCounts = skipped.reduce<Record<string, number>>((acc, s) => {
     acc[s.reason] = (acc[s.reason] ?? 0) + 1
@@ -420,23 +424,27 @@ function RegroupResultPanel({ result }: { result: RegroupPreview }) {
             {requires_dual_control && <Chip tone="warn">needs a second approver</Chip>}
           </div>
           <div className="max-h-48 divide-y divide-edge overflow-y-auto rounded border border-edge">
-            {entries.map((e) => (
-              <div key={e.overlay_ip} className="px-2 py-1.5">
-                <div className="flex items-baseline justify-between gap-2">
-                  <span className="truncate text-[12px] text-ink">{e.name || e.overlay_ip}</span>
-                  <span className="nums shrink-0 text-[11px] text-ink-faint">{e.overlay_ip}</span>
+            {entries.map((e) => {
+              const from = e.from ?? []
+              const target = e.target ?? []
+              return (
+                <div key={e.overlay_ip} className="px-2 py-1.5">
+                  <div className="flex items-baseline justify-between gap-2">
+                    <span className="truncate text-[12px] text-ink">{e.name || e.overlay_ip}</span>
+                    <span className="nums shrink-0 text-[11px] text-ink-faint">{e.overlay_ip}</span>
+                  </div>
+                  <div className="mt-1 flex flex-wrap items-center gap-1 text-[11px]">
+                    {(from.length ? from : ['—']).map((g, i) => <Chip key={`f${i}`}>{g}</Chip>)}
+                    <span className="text-ink-faint">→</span>
+                    {(target.length ? target : ['—']).map((g, i) => (
+                      <Chip key={`t${i}`} tone={!from.includes(g) ? 'permit' : 'default'}>{g}</Chip>
+                    ))}
+                    {e.elevates && <Chip tone="warn">elevates</Chip>}
+                    {e.will_reduce && <Chip tone="warn">reduces</Chip>}
+                  </div>
                 </div>
-                <div className="mt-1 flex flex-wrap items-center gap-1 text-[11px]">
-                  {(e.from.length ? e.from : ['—']).map((g, i) => <Chip key={`f${i}`}>{g}</Chip>)}
-                  <span className="text-ink-faint">→</span>
-                  {(e.target.length ? e.target : ['—']).map((g, i) => (
-                    <Chip key={`t${i}`} tone={!e.from.includes(g) ? 'permit' : 'default'}>{g}</Chip>
-                  ))}
-                  {e.elevates && <Chip tone="warn">elevates</Chip>}
-                  {e.will_reduce && <Chip tone="warn">reduces</Chip>}
-                </div>
-              </div>
-            ))}
+              )
+            })}
           </div>
         </>
       )}

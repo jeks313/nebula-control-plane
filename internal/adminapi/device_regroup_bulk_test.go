@@ -83,6 +83,20 @@ func TestRegroupDryRun(t *testing.T) {
 	}
 }
 
+// TestRegroupDryRunEmptyArrays: a pattern matching nothing must serialize entries/skipped as JSON
+// arrays, not null — a nil slice (Go) marshals to null and crashes the console's render.
+func TestRegroupDryRunEmptyArrays(t *testing.T) {
+	_, h := newServer(t)
+	rr := postJSON(t, h, "/admin/v1/devices/regroup?dry_run=true", "alice", `{"name_pattern":"nope-*","add":["prod"]}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("dry-run: status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, `"entries":[]`) || !strings.Contains(body, `"skipped":[]`) {
+		t.Fatalf("empty dry-run must emit arrays, not null: %s", body)
+	}
+}
+
 // TestRegroupApplyDirectAndGuard: a small pure-removal applies directly (200); re-applying with a
 // stale base_generation is skipped by the optimistic-concurrency guard (no clobber).
 func TestRegroupApplyDirectAndGuard(t *testing.T) {

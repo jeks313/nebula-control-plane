@@ -139,11 +139,13 @@ func (s *Server) regroupDryRun(w http.ResponseWriter, r *http.Request, req regro
 	staleNs := s.cfg.Thresholds.StaleAfter.Nanoseconds()
 	nowNs := s.now().UnixNano()
 
-	var entries []dryEntry
-	var skipped []regroupSkip
+	// Non-nil so they always marshal as JSON arrays (a nil slice → `null`, which the
+	// console treats as a crashable shape). Same for each entry's from/target below.
+	entries := []dryEntry{}
+	skipped := []regroupSkip{}
 	capped := 0
 	for _, c := range cands {
-		var current []string
+		current := []string{}
 		_ = json.Unmarshal([]byte(c.DesiredGroups), &current)
 		skip := func(reason string) { skipped = append(skipped, regroupSkip{c.OverlayIP, c.DeviceName, reason}) }
 		switch {
