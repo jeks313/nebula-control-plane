@@ -67,6 +67,7 @@ func TestRegroupDryRun(t *testing.T) {
 		Entries []struct {
 			OverlayIP string   `json:"overlay_ip"`
 			Target    []string `json:"target"`
+			Elevates  bool     `json:"elevates"`
 		} `json:"entries"`
 		Skipped []struct {
 			OverlayIP string `json:"overlay_ip"`
@@ -80,8 +81,11 @@ func TestRegroupDryRun(t *testing.T) {
 	if len(out.Entries) != 1 || out.Entries[0].OverlayIP != "10.44.0.10" {
 		t.Fatalf("entries=%+v, want only db-1 (10.44.0.10)", out.Entries)
 	}
-	if !out.RequiresDualControl {
-		t.Fatalf("adding a group is an elevation — should require dual-control")
+	if !out.Entries[0].Elevates {
+		t.Fatalf("adding a group should flag the entry as elevating")
+	}
+	if out.RequiresDualControl {
+		t.Fatalf("dual-control is disabled by default — requires_dual_control must be false")
 	}
 	reasons := map[string]string{}
 	for _, sk := range out.Skipped {
@@ -192,15 +196,32 @@ func TestRegroupMatch(t *testing.T) {
 	}
 }
 
-// TestRegroupApplyElevationDualControl: an elevating apply routes to dual-control (202), not a write.
-func TestRegroupApplyElevationDualControl(t *testing.T) {
+// TestRegroupApplyElevationDirectByDefault: with dual-control OFF (the default), an elevating apply
+// writes directly (200) — no second approver.
+func TestRegroupApplyElevationDirectByDefault(t *testing.T) {
 	s, h := newServer(t)
 	liveDevice(t, s.DB, "10.44.0.30", "api-1", `["laptops"]`)
 	id := enrollID(t, s.DB, "10.44.0.30")
 	body := fmt.Sprintf(`{"entries":[{"overlay_ip":"10.44.0.30","enrollment_id":%d,"base_generation":0,"target":["laptops","prod"]}]}`, id)
 	rr := postJSON(t, h, "/admin/v1/devices/regroup", "alice", body)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("elevation apply (dc off): status=%d, want 200 (direct); body=%s", rr.Code, rr.Body.String())
+	}
+	if desired, gen := readEnroll(t, s.DB, "10.44.0.30"); !strings.Contains(desired, "prod") || gen != 1 {
+		t.Fatalf("elevation should have applied directly: desired=%q gen=%d", desired, gen)
+	}
+}
+
+// TestRegroupApplyElevationDualControl: with dual-control ENABLED, an elevating apply routes to a
+// second approver (202), not a write.
+func TestRegroupApplyElevationDualControl(t *testing.T) {
+	s, h := newServerDC(t)
+	liveDevice(t, s.DB, "10.44.0.30", "api-1", `["laptops"]`)
+	id := enrollID(t, s.DB, "10.44.0.30")
+	body := fmt.Sprintf(`{"entries":[{"overlay_ip":"10.44.0.30","enrollment_id":%d,"base_generation":0,"target":["laptops","prod"]}]}`, id)
+	rr := postJSON(t, h, "/admin/v1/devices/regroup", "alice", body)
 	if rr.Code != http.StatusAccepted {
-		t.Fatalf("elevation apply: status=%d, want 202 (dual-control); body=%s", rr.Code, rr.Body.String())
+		t.Fatalf("elevation apply (dc on): status=%d, want 202 (dual-control); body=%s", rr.Code, rr.Body.String())
 	}
 	// the elevation must NOT have written desired yet (awaiting the second approver).
 	if desired, _ := readEnroll(t, s.DB, "10.44.0.30"); strings.Contains(desired, "prod") {

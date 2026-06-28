@@ -133,8 +133,12 @@ type Config struct {
 	// publish) on recent MFA: the session's mfa_satisfied_at must be within this
 	// window. Zero disables step-up enforcement (dev / no-IdP).
 	MFAFreshness time.Duration
-	Now          func() time.Time
-	Logger       *slog.Logger // server-side error log (default slog.Default())
+	// RegroupDualControl gates the bulk device re-group (ADR 0013) on a distinct second
+	// approver for elevating/large changes. Off by default — bulk re-group applies directly
+	// (still bounded by the per-op cap). Flip on to require two-person review later.
+	RegroupDualControl bool
+	Now                func() time.Time
+	Logger             *slog.Logger // server-side error log (default slog.Default())
 }
 
 // Server is the admin API.

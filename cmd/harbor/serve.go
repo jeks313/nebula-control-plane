@@ -306,6 +306,7 @@ func cmdAdminAPI(args []string) {
 	devAuth := fs.Bool("dev-auth", false, "DEV ONLY: trust the X-Harbor-Dev-Actor header for identity (never in prod)")
 	devRole := fs.String("dev-role", "admin", "role granted to the dev actor")
 	mfaFreshness := fs.Duration("mfa-freshness", 15*time.Minute, "require MFA within this window for privileged actions (dual-control approve, policy publish); 0 disables step-up")
+	regroupDualControl := fs.Bool("regroup-dual-control", false, "require a distinct second approver for elevating/large bulk device re-group ops (ADR 0013); default off — re-group applies directly, bounded by the per-op cap")
 	environment := fs.String("environment", "development", "deployment posture shown in the console banner (e.g. production, staging); anything but production is tinted non-production")
 	installerBase := fs.String("installer-base-url", "", "public base URL of the artifact bucket the installer scripts live under (e.g. https://<bucket>.s3.<region>.amazonaws.com); the console renders node 'Copy install command' widgets from it")
 	af := addAdminAuthFlags(fs) // OIDC / GitHub / mock-IdP session auth (2.11)
@@ -454,8 +455,9 @@ func cmdAdminAPI(args []string) {
 		Rollout: rollout.New(s.DB, audit), Lighthouses: lighthouse.New(s.DB, audit),
 		Enrollment: consumer, CanIssue: canIssue,
 		Netblocks: nbReg, Allocator: alloc, Pool: pool,
-		Thresholds:   fleet.Thresholds{ExpiryWindow: *expiryWithin, StaleAfter: *staleAfter, ClockSkewMs: *clockSkew},
-		MFAFreshness: *mfaFreshness,
+		Thresholds:         fleet.Thresholds{ExpiryWindow: *expiryWithin, StaleAfter: *staleAfter, ClockSkewMs: *clockSkew},
+		MFAFreshness:       *mfaFreshness,
+		RegroupDualControl: *regroupDualControl,
 	})
 
 	// Compose: auth routes (unauthenticated) + the CSRF-guarded JSON API + the web

@@ -41,6 +41,33 @@ func newServer(t *testing.T) (*store.Store, http.Handler) {
 	return s, api.Handler()
 }
 
+// newServerDC is newServer with bulk re-group dual-control ENABLED (off by default), for the
+// two-person-review tests.
+func newServerDC(t *testing.T) (*store.Store, http.Handler) {
+	t.Helper()
+	s, err := store.Open(store.Config{Driver: "sqlite", DSN: store.DefaultSQLiteDSN(t.TempDir() + "/a.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	if err := migrate.Up(s.DB); err != nil {
+		t.Fatal(err)
+	}
+	audit := func(ctx context.Context, a, ac, tgt, d string) error {
+		_, e := s.AppendAudit(ctx, a, ac, tgt, d)
+		return e
+	}
+	api := adminapi.New(adminapi.Config{
+		Store:              s,
+		Identity:           adminapi.DevHeaderProvider{},
+		Rollout:            rollout.New(s.DB, audit),
+		Lighthouses:        lighthouse.New(s.DB, audit),
+		RegroupDualControl: true,
+		Now:                func() time.Time { return time.Unix(1_700_000_000, 0).UTC() },
+	})
+	return s, api.Handler()
+}
+
 // hbInsert writes a heartbeat row the way coreapi would.
 func hbInsert(t *testing.T, db *gorm.DB, ip, name string, certNotAfter, lastSeen time.Time, health string) {
 	t.Helper()

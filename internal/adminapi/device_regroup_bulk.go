@@ -230,7 +230,7 @@ func (s *Server) regroupDryRun(w http.ResponseWriter, r *http.Request, req regro
 		"entries":               entries,
 		"skipped":               skipped,
 		"capped":                capped,
-		"requires_dual_control": dcRequired(entries),
+		"requires_dual_control": s.cfg.RegroupDualControl && dcRequired(entries),
 	})
 }
 
@@ -252,8 +252,10 @@ func (s *Server) regroupApply(w http.ResponseWriter, r *http.Request, id Identit
 			return
 		}
 	}
-	// Routing: any elevation, or a set over the threshold, needs a distinct second approver.
-	if s.dc != nil && applyNeedsDualControl(ctx, s, req.Entries) {
+	// Routing: when enabled, any elevation or a set over the threshold needs a distinct second
+	// approver. Off by default (RegroupDualControl=false) — bulk re-group applies directly,
+	// bounded by the per-op cap.
+	if s.cfg.RegroupDualControl && s.dc != nil && applyNeedsDualControl(ctx, s, req.Entries) {
 		payload, _ := json.Marshal(req.Entries)
 		ch, derr := s.dc.Propose(ctx, regroupKind,
 			fmt.Sprintf("re-group %d device(s) (elevating/large — needs a distinct second approver)", len(req.Entries)),

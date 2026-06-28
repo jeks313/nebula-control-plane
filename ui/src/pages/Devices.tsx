@@ -432,7 +432,6 @@ function BulkRegroupDialog({ initialPattern, onClose }: { initialPattern: string
         <p className="text-[12px] text-ink-faint">
           Each change is an absolute set, applied on the host’s next heartbeat-triggered renew. Additions take effect on
           re-issue; <span className="text-warn">removals are advisory until the old cert expires or is revoked</span>.
-          Elevating or large (&gt;25) changes route to a second approver.
         </p>
       </div>
     </Dialog>
