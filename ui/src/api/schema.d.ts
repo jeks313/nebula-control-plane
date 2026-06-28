@@ -41,6 +41,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/v1/gateways": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Pull-based enrollment gateways (ADR 0005) + their collect-loop health.
+         * @description Lists the active enrollment gateways joined with their harbor-collect cycle health. A gateway whose collect cycle hasn't succeeded recently shows status=down (the signal that was invisible during the 2026-06-28 gateway TLS-wedge). Drives the console's Gateways dashboard pane. Read-only; authenticated, no special permission.
+         */
+        get: operations["getGateways"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/admin/v1/fleet/health": {
         parameters: {
             query?: never;
@@ -758,6 +778,28 @@ export interface components {
             build_time: string;
             days: components["schemas"]["ChangelogDay"][];
         };
+        GatewayStatus: {
+            name: string;
+            url: string;
+            /** @enum {string} */
+            status: "healthy" | "degraded" | "down" | "unknown";
+            /** Format: date-time */
+            last_success_at?: string;
+            /** @description -1 if never succeeded */
+            seconds_since_success: number;
+            consecutive_failures: number;
+            last_error?: string;
+        };
+        GatewaysResponse: {
+            gateways: components["schemas"]["GatewayStatus"][];
+            summary: {
+                total: number;
+                healthy: number;
+                degraded: number;
+                down: number;
+                unknown: number;
+            };
+        };
         /** @enum {string} */
         Severity: "info" | "degraded" | "critical";
         Reason: {
@@ -1391,6 +1433,27 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["VersionInfo"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    getGateways: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Gateways + health + a status rollup. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GatewaysResponse"];
                 };
             };
             401: components["responses"]["Unauthorized"];

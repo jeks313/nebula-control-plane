@@ -281,6 +281,7 @@ func (s *Server) routeTable() []route {
 		{"GET", "/admin/v1/me", s.handleMe},
 		{"GET", "/admin/v1/version", s.handleVersion},
 		{"GET", "/admin/v1/fleet/health", s.handleFleetHealth},
+		{"GET", "/admin/v1/gateways", s.handleGateways},
 		{"GET", "/admin/v1/devices", s.handleDevices},
 		{"PATCH", "/admin/v1/devices/{ip}/groups", s.handleDeviceGroupSet},
 		{"POST", "/admin/v1/devices/regroup", s.handleDeviceRegroup},

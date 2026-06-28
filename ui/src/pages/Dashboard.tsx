@@ -9,6 +9,7 @@ import {
   VersionLandscapeCard,
   TrustIntegrityCard,
   LighthousesCard,
+  GatewaysCard,
   IPAMHealthCard,
   RecentReapsCard,
   RecentActivityCard,
@@ -47,6 +48,7 @@ export function Dashboard() {
         <VersionLandscapeCard />
         <TrustIntegrityCard />
         <LighthousesCard />
+        <GatewaysCard />
         <IPAMHealthCard />
         <RecentReapsCard />
         <RecentActivityCard />

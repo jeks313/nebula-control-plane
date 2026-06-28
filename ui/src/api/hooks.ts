@@ -4,6 +4,8 @@ import { api, unwrap } from './client'
 import { ApiError, parseProblem } from './errors'
 
 export type FleetHealth = components['schemas']['FleetHealth']
+export type GatewayStatus = components['schemas']['GatewayStatus']
+export type GatewaysResponse = components['schemas']['GatewaysResponse']
 export type Identity = components['schemas']['Identity']
 export type Device = components['schemas']['Device']
 export type AuditRow = components['schemas']['AuditRow']
@@ -60,6 +62,16 @@ export function useFleetHealth() {
     queryKey: ['fleet-health'],
     queryFn: () => unwrap(api.GET('/admin/v1/fleet/health')),
     refetchInterval: 15_000, // the rollup is one cheap server call; keep it fresh
+  })
+}
+
+// useGateways — the pull-based enrollment gateways (ADR 0005) + their collect-loop health,
+// for the dashboard Gateways pane. Polled like the fleet rollup so an outage surfaces fast.
+export function useGateways() {
+  return useQuery({
+    queryKey: ['gateways'],
+    queryFn: () => unwrap(api.GET('/admin/v1/gateways')),
+    refetchInterval: 15_000,
   })
 }
 

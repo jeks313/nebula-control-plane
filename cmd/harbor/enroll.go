@@ -16,6 +16,7 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/cloudtrust"
 	"github.com/jeks313/nebula-control-plane/internal/collect"
 	"github.com/jeks313/nebula-control-plane/internal/enrollment"
+	"github.com/jeks313/nebula-control-plane/internal/gatewayhealth"
 	"github.com/jeks313/nebula-control-plane/internal/gatewayreg"
 	"github.com/jeks313/nebula-control-plane/internal/ipam"
 	"github.com/jeks313/nebula-control-plane/internal/lighthouse"
@@ -449,7 +450,9 @@ func cmdCollect(args []string) {
 	// cons is also the delivery-reconcile Resolver (it re-derives a decided enrollment's
 	// signed result via BuildDeliverable), so an admin approval reaches the gateway on the
 	// next OUTBOUND poll — the gateway never calls Harbor.
-	coll := collect.New(collect.Config{Processor: cons, Sink: sink, ClientCert: clientCert, Batch: *batch, Resolver: cons, DeliveryTTL: *deliveryTTL, Logger: log})
+	// Health sink: persist each gateway's collect-cycle outcome so admin-api/the console
+	// can show gateway health (a wedged gateway = stale last-success + climbing failures).
+	coll := collect.New(collect.Config{Processor: cons, Sink: sink, ClientCert: clientCert, Batch: *batch, Resolver: cons, DeliveryTTL: *deliveryTTL, Logger: log, Health: gatewayhealth.New(s.DB)})
 
 	// Gateways to poll: a single ad-hoc gateway from flags (Phase-1 override), or —
 	// the default — every ACTIVE gateway in the registry (Phase 2), re-read each

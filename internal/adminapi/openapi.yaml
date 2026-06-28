@@ -46,6 +46,22 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/VersionInfo" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+  /admin/v1/gateways:
+    get:
+      summary: Pull-based enrollment gateways (ADR 0005) + their collect-loop health.
+      description: >-
+        Lists the active enrollment gateways joined with their harbor-collect cycle health.
+        A gateway whose collect cycle hasn't succeeded recently shows status=down (the signal
+        that was invisible during the 2026-06-28 gateway TLS-wedge). Drives the console's
+        Gateways dashboard pane. Read-only; authenticated, no special permission.
+      operationId: getGateways
+      responses:
+        "200":
+          description: Gateways + health + a status rollup.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GatewaysResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
   /admin/v1/fleet/health:
     get:
       summary: Server-computed fleet health rollup.
@@ -907,6 +923,31 @@ components:
         commit: { type: string }
         build_time: { type: string }
         days: { type: array, items: { $ref: "#/components/schemas/ChangelogDay" } }
+    GatewayStatus:
+      type: object
+      required: [name, url, status, seconds_since_success, consecutive_failures]
+      properties:
+        name: { type: string }
+        url: { type: string }
+        status: { type: string, enum: [healthy, degraded, down, unknown] }
+        last_success_at: { type: string, format: date-time }
+        seconds_since_success: { type: integer, description: "-1 if never succeeded" }
+        consecutive_failures: { type: integer }
+        last_error: { type: string }
+    GatewaysResponse:
+      type: object
+      required: [gateways, summary]
+      properties:
+        gateways: { type: array, items: { $ref: "#/components/schemas/GatewayStatus" } }
+        summary:
+          type: object
+          required: [total, healthy, degraded, down, unknown]
+          properties:
+            total: { type: integer }
+            healthy: { type: integer }
+            degraded: { type: integer }
+            down: { type: integer }
+            unknown: { type: integer }
     Severity:
       type: string
       enum: [info, degraded, critical]

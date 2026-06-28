@@ -9,6 +9,7 @@ import {
   useApprovals,
   useActivePolicy,
   useNetblocks,
+  useGateways,
   type Netblock,
 } from '../api/hooks'
 import { Card, StateBlock, ErrorState, Chip, cx } from './ui'
@@ -365,6 +366,54 @@ export function LighthousesCard() {
               <li key={l.overlay_ip} className="flex items-center justify-between">
                 <span className="nums font-mono text-ink">{l.overlay_ip}</span>
                 <span className="text-ink-faint">{l.hostname || l.public_addrs[0] || '—'}</span>
+              </li>
+            ))}
+          </ul>
+        ))}
+    </Tile>
+  )
+}
+
+// Gateways (ADR 0005) — the pull-based enrollment gateways + their harbor-collect health.
+// A wedged gateway (no successful collect cycle within the window) shows red here: this is
+// the pane that was missing when the gateway TLS-wedge outage went unnoticed.
+const GW_TONE: Record<string, 'permit' | 'warn' | 'danger' | 'default'> = {
+  healthy: 'permit',
+  degraded: 'warn',
+  down: 'danger',
+  unknown: 'default',
+}
+
+function fmtSince(secs: number): string {
+  if (secs < 0) return 'never'
+  if (secs < 90) return `${secs}s ago`
+  if (secs < 5400) return `${Math.round(secs / 60)}m ago`
+  return `${Math.round(secs / 3600)}h ago`
+}
+
+export function GatewaysCard() {
+  const q = useGateways()
+  const gws = q.data?.gateways ?? []
+  const summary = q.data?.summary
+  const hint = summary ? `${summary.healthy}/${summary.total} healthy` : 'enrollment gateways'
+  return (
+    <Tile title="Gateways" hint={hint}>
+      {q.isPending && <StateBlock kind="loading" message="…" />}
+      {q.isError && <ErrorState error={q.error} fallback="Couldn't load gateways." />}
+      {q.data &&
+        (gws.length === 0 ? (
+          <StateBlock kind="empty" message="No gateways registered." />
+        ) : (
+          <ul className="flex flex-col gap-1.5 text-[12px]">
+            {gws.map((g) => (
+              <li key={g.name} className="flex items-center justify-between gap-2">
+                <span className="truncate text-ink" title={`${g.url}${g.last_error ? ` — ${g.last_error}` : ''}`}>{g.name}</span>
+                <span className="flex shrink-0 items-center gap-2">
+                  {g.status !== 'healthy' && (
+                    <span className="text-ink-faint">{g.status === 'unknown' ? 'no data' : fmtSince(g.seconds_since_success)}</span>
+                  )}
+                  <Chip tone={GW_TONE[g.status] ?? 'default'}>{g.status}</Chip>
+                </span>
               </li>
             ))}
           </ul>
