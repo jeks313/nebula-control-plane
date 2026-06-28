@@ -41,6 +41,15 @@ func liveDevice(t *testing.T, db *gorm.DB, ip, name, groups string) {
 	hbInsert(t, db, ip, name, regroupNow.Add(time.Hour), regroupNow, "ok")
 }
 
+// staleDevice: an issued device WITH a heartbeat but an old last_seen (> StaleAfter ago). Candidates
+// are heartbeat-driven, so a stale device must still have a heartbeat row — it's "stale" by age, not
+// by absence.
+func staleDevice(t *testing.T, db *gorm.DB, ip, name, groups string) {
+	t.Helper()
+	seedIssuedDevice(t, db, ip, name, groups)
+	hbInsert(t, db, ip, name, regroupNow.Add(time.Hour), regroupNow.Add(-time.Hour), "ok")
+}
+
 // TestRegroupDryRun: a pattern + delta resolves to per-device targets, excluding reserved / stale /
 // no-op hosts, and flags dual-control when the change elevates.
 func TestRegroupDryRun(t *testing.T) {
@@ -48,7 +57,7 @@ func TestRegroupDryRun(t *testing.T) {
 	liveDevice(t, s.DB, "10.44.0.10", "db-1", `["laptops"]`)             // add prod -> elevation entry
 	liveDevice(t, s.DB, "10.44.0.11", "db-2", `["laptops","prod"]`)      // already has prod -> no_op
 	liveDevice(t, s.DB, "10.44.0.12", "db-cp", `["control-plane"]`)      // reserved -> skip
-	seedIssuedDevice(t, s.DB, "10.44.0.13", "db-stale", `["laptops"]`)   // no heartbeat -> stale
+	staleDevice(t, s.DB, "10.44.0.13", "db-stale", `["laptops"]`)        // old heartbeat -> stale
 
 	rr := postJSON(t, h, "/admin/v1/devices/regroup?dry_run=true", "alice", `{"name_pattern":"db-*","add":["prod"]}`)
 	if rr.Code != http.StatusOK {
@@ -139,8 +148,8 @@ func TestRegroupMatch(t *testing.T) {
 	s, h := newServer(t)
 	liveDevice(t, s.DB, "10.44.0.40", "node-1", `["laptops"]`)
 	liveDevice(t, s.DB, "10.44.0.41", "node-2", `["laptops"]`)
-	liveDevice(t, s.DB, "10.44.0.42", "node-cp", `["control-plane"]`) // reserved -> ineligible
-	seedIssuedDevice(t, s.DB, "10.44.0.43", "node-stale", `["laptops"]`) // no heartbeat -> stale
+	liveDevice(t, s.DB, "10.44.0.42", "node-cp", `["control-plane"]`)  // reserved -> ineligible
+	staleDevice(t, s.DB, "10.44.0.43", "node-stale", `["laptops"]`)    // old heartbeat -> stale
 
 	get := func(t *testing.T, url string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest("GET", url, nil)

@@ -398,25 +398,32 @@ func (s *Server) classifyRegroup(ctx context.Context, namePattern string, overla
 	return out, nil
 }
 
-// regroupCandidates resolves the authoritative (latest issued) enrollment per overlay_ip for the
-// name pattern and/or explicit IP set, joined with the heartbeat last_seen (for staleness).
+// regroupCandidates resolves selectable devices for a name pattern and/or explicit IP set.
+//
+// HEARTBEAT-DRIVEN to mirror the Devices view (handleDevices lists heartbeats — one row per
+// reporting overlay_ip): only overlay_ips that are actually present in the fleet are candidates,
+// each joined to its authoritative (latest issued) enrollment for the identity tokens. An
+// enrollment-driven query over-counts superseded stale-rebuild records that never heartbeated (or
+// whose heartbeat the reaper deleted) — e.g. a re-imaged host showing up 3× when the Devices table
+// shows it twice. You can't meaningfully re-group a record with no live device behind it anyway.
 func (s *Server) regroupCandidates(ctx context.Context, namePattern string, overlayIPs []string) ([]candidate, error) {
-	q := s.cfg.Store.DB.WithContext(ctx).Table("enrollments AS e").
-		Select("e.id, e.device_name, e.overlay_ip, e.groups, e.desired_groups, e.groups_generation, e.ephemeral, COALESCE(h.last_seen, 0) AS last_seen").
-		Joins("LEFT JOIN heartbeats h ON h.overlay_ip = e.overlay_ip").
-		Where("e.status = ? AND e.overlay_ip <> ''", enrollment.StatusIssued).
+	q := s.cfg.Store.DB.WithContext(ctx).Table("heartbeats AS h").
+		Select("e.id, e.device_name, e.overlay_ip, e.groups, e.desired_groups, e.groups_generation, e.ephemeral, h.last_seen").
+		Joins("JOIN enrollments e ON e.overlay_ip = h.overlay_ip").
+		Where("e.status = ? AND h.overlay_ip <> ''", enrollment.StatusIssued).
 		Order("e.id DESC")
 	if namePattern != "" {
-		q = q.Where("e.device_name LIKE ? ESCAPE '\\'", globToLike(namePattern))
+		q = q.Where("h.device_name LIKE ? ESCAPE '\\'", globToLike(namePattern))
 	}
 	if len(overlayIPs) > 0 {
-		q = q.Where("e.overlay_ip IN ?", overlayIPs)
+		q = q.Where("h.overlay_ip IN ?", overlayIPs)
 	}
 	var rows []candidate
 	if err := q.Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	// dedup: keep the latest issued (highest id, first seen) per overlay_ip.
+	// dedup: one row per overlay_ip, keeping the latest issued enrollment (highest id) — the
+	// heartbeat is unique per overlay_ip, but an IP reused across re-enrollments has several.
 	seen := make(map[string]bool, len(rows))
 	out := rows[:0]
 	for _, r := range rows {
