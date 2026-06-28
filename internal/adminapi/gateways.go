@@ -9,8 +9,11 @@ import (
 )
 
 // gatewayDownAfter: a gateway with no successful collect cycle within this window is "down".
-// harbor-collect polls every ~1s, so a minute of silence is ~60 missed cycles — well past
-// any transient blip, and exactly the state the 2026-06-28 TLS-wedge sat in unnoticed.
+// It MUST stay comfortably larger than collect's healthHeartbeat (15s) AND the collect poll
+// interval: a healthy gateway only re-stamps last_success_at on an ok/fail transition or every
+// heartbeat (writes are throttled, not per-cycle), so too small a window would false-flap a
+// healthy gateway to "down" between writes. 60s tolerates ~4 missed heartbeats — well past any
+// transient blip, and exactly the silent state the 2026-06-28 TLS-wedge sat in unnoticed.
 const gatewayDownAfter = 60 * time.Second
 
 type gatewayView struct {
