@@ -38,6 +38,26 @@ const FILTER_LABEL: Record<string, string> = {
   condition: 'condition',
 }
 
+// Recency tabs (client-side, like Join Keys' state tabs): filter the loaded rows by how recently
+// each host last checked in, so the default view hides long-stale ghosts. "All" applies no filter.
+type RecencyTab = 'day' | 'week' | 'all'
+const RECENCY_TABS: { key: RecencyTab; label: string }[] = [
+  { key: 'day', label: 'Active (24h)' },
+  { key: 'week', label: 'Active (last week)' },
+  { key: 'all', label: 'All devices' },
+]
+const DAY_MS = 24 * 60 * 60 * 1000
+const RECENCY_MAX_AGE: Record<RecencyTab, number | null> = {
+  day: DAY_MS,
+  week: 7 * DAY_MS,
+  all: null,
+}
+const RECENCY_EMPTY: Record<RecencyTab, string> = {
+  day: 'No devices have checked in within the last 24 hours.',
+  week: 'No devices have checked in within the last week.',
+  all: 'No devices yet.',
+}
+
 export function Devices() {
   const { can } = usePermissions()
   const mayManage = can('device:manage')
@@ -50,7 +70,14 @@ export function Devices() {
   }
   const activeFilters = Object.entries(filters).filter(([, v]) => v) as [string, string][]
   const q = useDevices(filters)
-  const rows = q.data?.pages.flatMap((p) => p.devices) ?? []
+  const allRows = q.data?.pages.flatMap((p) => p.devices) ?? []
+  const [tab, setTab] = useState<RecencyTab>('day')
+  // Recency tabs are for normal browsing. A condition drill-down (the dashboard's stale / renewal
+  // panes) deliberately targets older hosts, so while one is active we suppress the recency filter
+  // AND hide the tab bar — otherwise the default 24h view would hide exactly what was drilled into.
+  const recencyActive = !params.get('condition')
+  const maxAge = recencyActive ? RECENCY_MAX_AGE[tab] : null
+  const rows = maxAge == null ? allRows : allRows.filter((d) => deviceAgeMs(d.last_seen) <= maxAge)
 
   function setFilter(key: string, value: string) {
     const next = new URLSearchParams(params)
@@ -90,11 +117,28 @@ export function Devices() {
         </div>
       )}
 
+      {recencyActive && (
+        <div className="mb-4 flex gap-1">
+          {RECENCY_TABS.map((t) => (
+            <button
+              key={t.key}
+              onClick={() => setTab(t.key)}
+              className={cx(
+                'rounded-[6px] px-3 py-1 text-[13px] transition-colors',
+                tab === t.key ? 'bg-mesh-2 text-ink' : 'text-ink-dim hover:bg-mesh-2',
+              )}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+      )}
+
       {q.isPending && <StateBlock kind="loading" message="Loading devices…" />}
       {q.isError && <ErrorState error={q.error} fallback="Couldn't load devices." />}
       {q.data &&
         (rows.length === 0 ? (
-          <StateBlock kind="empty" message={activeFilters.length > 0 ? 'No devices match this filter.' : 'No devices yet.'} />
+          <StateBlock kind="empty" message={activeFilters.length > 0 && allRows.length === 0 ? 'No devices match this filter.' : RECENCY_EMPTY[tab]} />
         ) : (
           <Card className="overflow-hidden">
             <table className="w-full text-left">
@@ -115,7 +159,12 @@ export function Devices() {
                     <td className="px-4 py-2"><Groups d={d} /></td>
                     <td className="nums px-4 py-2 text-ink-dim">{d.pilot_version ?? '—'}</td>
                     <td className="nums px-4 py-2 text-ink-dim">{fmtDate(d.cert_not_after)}</td>
-                    <td className={cx('px-4 py-2', healthTone(d.stale ? 'stale' : d.health))} title={d.stale && d.health ? `last reported "${d.health}" before going silent` : undefined}>{d.stale ? 'stale' : d.health ?? '—'}</td>
+                    <td
+                      className={cx('px-4 py-2', d.stale ? staleTone(d.last_seen) : healthTone(d.health))}
+                      title={d.stale ? `silent for ${fmtAge(d.last_seen)}${d.health ? ` — last reported "${d.health}"` : ''}` : undefined}
+                    >
+                      {d.stale ? 'stale' : d.health ?? '—'}
+                    </td>
                     <td className="nums px-4 py-2 text-ink-faint">{fmtDate(d.last_seen)}</td>
                     {mayManage && (
                       <td className="px-4 py-2">
@@ -495,6 +544,28 @@ function RegroupResultPanel({ result }: { result: RegroupPreview }) {
       )}
     </div>
   )
+}
+
+// deviceAgeMs is how long since the host last checked in (Infinity if never / unparseable).
+function deviceAgeMs(lastSeen?: string): number {
+  if (!lastSeen) return Infinity
+  const t = new Date(lastSeen).getTime()
+  return Number.isNaN(t) ? Infinity : Date.now() - t
+}
+
+// staleTone colors a stale host by how late it is: yellow under 24h, red at/over 24h.
+function staleTone(lastSeen?: string): string {
+  return deviceAgeMs(lastSeen) >= DAY_MS ? 'text-danger' : 'text-warn'
+}
+
+// fmtAge is a coarse human duration for the stale tooltip (< 1h / Nh / Nd).
+function fmtAge(lastSeen?: string): string {
+  const ms = deviceAgeMs(lastSeen)
+  if (!Number.isFinite(ms)) return 'an unknown time'
+  const h = Math.floor(ms / (60 * 60 * 1000))
+  if (h < 1) return '< 1h'
+  if (h < 48) return `${h}h`
+  return `${Math.floor(h / 24)}d`
 }
 
 function healthTone(h?: string): string {
