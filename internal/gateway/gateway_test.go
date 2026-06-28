@@ -29,6 +29,20 @@ func newTest(t *testing.T) (http.Handler, *nonce.Keyring, *queue.Memory) {
 	return h, ring, q
 }
 
+// --- healthz endpoint (NLB self-heal probe) ---
+
+func TestHealthz(t *testing.T) {
+	h, _, _ := newTest(t)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body)
+	}
+	if got := rec.Body.String(); got != "ok\n" {
+		t.Fatalf("body = %q, want %q", got, "ok\n")
+	}
+}
+
 // --- nonce endpoint ---
 
 func TestNonceHappyPath(t *testing.T) {

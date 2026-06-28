@@ -103,6 +103,13 @@ func New(cfg Config) *Server {
 // Handler returns the gateway's HTTP routes.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	// /healthz on the PUBLIC enroll listener (:8443) — unauthenticated, no rate limit, no deps.
+	// The NLB target group HTTPS-probes this so a wedged TLS listener (the 2026-06-28 outage:
+	// handshake returned 0 bytes) fails the check and ECS replaces the task. A trivial 200 is
+	// enough: the check only passes if the TLS handshake completes AND the server responds, which
+	// is exactly what was broken. (Distinct from the internal :9091 obs /healthz, which only
+	// proves the process is alive and so stayed green through the wedge.)
+	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /v1/nonce", s.handleNonce)
 	mux.HandleFunc("POST /v1/enroll", s.handleEnroll)
 	mux.HandleFunc("GET /v1/enroll/{id}", s.handlePoll)
@@ -112,6 +119,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/sso/start", s.handleSSOStart)
 	mux.HandleFunc("POST /v1/sso/acs", s.handleSSOACS)
 	return mux
+}
+
+// handleHealth implements GET /healthz on the public enroll listener — a cheap liveness probe
+// for the NLB target group (reaching it proves the :8443 TLS listener is actually serving).
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("ok\n"))
 }
 
 // handleNonce implements GET /v1/nonce?binding=<pubkey_hash> (spec §4.3).

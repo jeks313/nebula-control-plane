@@ -274,6 +274,10 @@ resource "aws_lb" "gateway_internal" {
 
 # enroll on the public NLB (off-cloud) and on the internal NLB (in-VPC) are separate
 # target groups — an NLB target group binds to a single load balancer.
+# HTTPS /healthz health checks (not the NLB default TCP "is the port open"): a wedged TLS
+# listener still accepts TCP but fails the handshake, so only an HTTPS probe of /healthz detects
+# it. An unhealthy target deregisters AND the ECS service replaces the task (self-heal). The 5m
+# ECS health_check_grace_period covers a cold task's ACME cert provisioning before the check counts.
 resource "aws_lb_target_group" "enroll" {
   count              = local.gw_fargate
   name_prefix        = "ncpen-"
@@ -282,6 +286,15 @@ resource "aws_lb_target_group" "enroll" {
   vpc_id             = aws_vpc.main.id
   target_type        = "ip"
   preserve_client_ip = false
+  health_check {
+    protocol            = "HTTPS"
+    path                = "/healthz"
+    port                = "traffic-port"
+    matcher             = "200"
+    interval            = 10
+    healthy_threshold   = 2
+    unhealthy_threshold = 3 # ~30s of failed probes before the task is marked unhealthy
+  }
 }
 
 resource "aws_lb_target_group" "enroll_internal" {
@@ -292,6 +305,15 @@ resource "aws_lb_target_group" "enroll_internal" {
   vpc_id             = aws_vpc.main.id
   target_type        = "ip"
   preserve_client_ip = false
+  health_check {
+    protocol            = "HTTPS"
+    path                = "/healthz"
+    port                = "traffic-port"
+    matcher             = "200"
+    interval            = 10
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+  }
 }
 
 resource "aws_lb_target_group" "collect" {
@@ -501,6 +523,15 @@ resource "aws_ecs_service" "gateway" {
   #    validation — tens of seconds on a cold EFS cache) before it opens the enroll port, so
   #    give NLB health checks room before ECS recycles the task (default grace is 0).
   health_check_grace_period_seconds = local.gateway_acme == 1 ? 300 : null
+
+  # Self-heal: with the enroll target groups now HTTPS-probing /healthz, a wedged task fails the
+  # check and ECS stops+replaces it. The circuit breaker additionally auto-rolls-back a DEPLOY
+  # whose new tasks never go healthy (e.g. a bad image), so a broken push can't take the gateway
+  # down — it reverts to the last-good task set.
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
 
   network_configuration {
     subnets          = [aws_subnet.tier["edge"].id]
