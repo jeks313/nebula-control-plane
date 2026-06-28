@@ -279,6 +279,7 @@ type route struct {
 func (s *Server) routeTable() []route {
 	return []route{
 		{"GET", "/admin/v1/me", s.handleMe},
+		{"GET", "/admin/v1/version", s.handleVersion},
 		{"GET", "/admin/v1/fleet/health", s.handleFleetHealth},
 		{"GET", "/admin/v1/devices", s.handleDevices},
 		{"PATCH", "/admin/v1/devices/{ip}/groups", s.handleDeviceGroupSet},

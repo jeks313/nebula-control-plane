@@ -31,6 +31,14 @@ help:
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -X main.version=$(VERSION)
 
+# Harbor console build identity (CalVer date + short commit + build time), embedded so
+# GET /admin/v1/version reports exactly what's deployed. Used by harbor-ui (below) + the deploy.
+VPKG       := github.com/jeks313/nebula-control-plane/internal/version
+CALVER     := $(shell date -u +%Y.%m.%d)
+GITSHA     := $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
+BUILDTIME  := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+HARBOR_LDFLAGS := $(LDFLAGS) -X $(VPKG).Version=$(CALVER) -X $(VPKG).Commit=$(GITSHA) -X $(VPKG).BuildTime=$(BUILDTIME)
+
 # Lint/format. Pinned so devs + CI run the SAME version; override
 # GOLANGCI_LINT=golangci-lint to use a PATH-installed binary instead of go run.
 GOLANGCI_VERSION ?= v2.12.2
@@ -86,7 +94,13 @@ ui:
 .PHONY: harbor-ui
 harbor-ui: ui
 	@mkdir -p bin
-	go build -trimpath -tags ui -ldflags "$(LDFLAGS)" -o bin/harbor ./cmd/harbor
+	go build -trimpath -tags ui -ldflags "$(HARBOR_LDFLAGS)" -o bin/harbor ./cmd/harbor
+
+# Regenerate the embedded console changelog from git log (commit before a deploy so the new
+# binary embeds it). harbor-ui intentionally does NOT auto-run this — it uses the committed file.
+.PHONY: changelog
+changelog:
+	bash deploy/scripts/gen-changelog.sh
 
 .PHONY: test
 test:

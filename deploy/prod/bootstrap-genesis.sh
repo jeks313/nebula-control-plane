@@ -300,13 +300,22 @@ LH="$LH_OVERLAY=$LH_ADDR"
 # ── 0. build + distribute binaries ──────────────────────────────────────────
 if [[ "$SKIP_BUILD" -eq 0 ]]; then
   VER="$(cat "$ROOT/VERSION" 2>/dev/null || echo dev)" # stamp main.version (else binaries report "dev")
+  # Console build identity (CalVer + commit + build time), embedded so GET /admin/v1/version + the
+  # console version badge report this build. VPKG matches internal/version's import path.
+  VPKG="github.com/jeks313/nebula-control-plane/internal/version"
+  CALVER="$(date -u +%Y.%m.%d)"
+  GITSHA="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo none)"
+  BUILDTIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  HARBOR_LDFLAGS="-X main.version=$VER -X $VPKG.Version=$CALVER -X $VPKG.Commit=$GITSHA -X $VPKG.BuildTime=$BUILDTIME"
+  # Refresh the embedded changelog from git log (tolerant of missing jq/git).
+  bash "$ROOT/deploy/scripts/gen-changelog.sh" || true
   # Build the React admin console bundle FIRST so harbor can embed it via `-tags ui`
   # (//go:embed all:dist in internal/adminui). The poc serves the full console at :443;
   # without this, harbor's console is the "not bundled" 501 stub. pilot/gateway have no UI.
   echo "==> building the admin console UI bundle (npm) -> internal/adminui/dist"
   ( npm --prefix "$ROOT/ui" install --no-audit --no-fund && npm --prefix "$ROOT/ui" run build )
-  echo "==> building harbor (-tags ui)/pilot/gateway $VER (linux/amd64, cgo-free)"
-  ( cd "$ROOT" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -tags ui -ldflags "-X main.version=$VER" -o "$WORK/harbor" ./cmd/harbor \
+  echo "==> building harbor (-tags ui)/pilot/gateway $VER ($CALVER · $GITSHA) (linux/amd64, cgo-free)"
+  ( cd "$ROOT" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -tags ui -ldflags "$HARBOR_LDFLAGS" -o "$WORK/harbor" ./cmd/harbor \
     && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "-X main.version=$VER" -o "$WORK/pilot" ./cmd/pilot \
     && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "-X main.version=$VER" -o "$WORK/gateway" ./cmd/gateway )
   # harbor/client are always EC2; the lighthouse + gateway are EC2 nodes only under their

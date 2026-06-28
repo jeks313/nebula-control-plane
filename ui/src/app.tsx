@@ -12,6 +12,7 @@ import { Policy } from './pages/Policy'
 import { Releases } from './pages/Releases'
 import { Approvals } from './pages/Approvals'
 import { Audit } from './pages/Audit'
+import { Changelog } from './pages/Changelog'
 
 export function App() {
   // AuthGate renders the authed chrome (Shell + routes) only for a live session;
@@ -31,6 +32,7 @@ export function App() {
           <Route path="/releases" element={<Releases />} />
           <Route path="/approvals" element={<Approvals />} />
           <Route path="/audit" element={<Audit />} />
+          <Route path="/changelog" element={<Changelog />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </Shell>

@@ -35,6 +35,26 @@ export function useMe() {
   })
 }
 
+// --- build version + changelog (GET /admin/v1/version) ---
+
+export type ChangelogCommit = { hash: string; subject: string; date: string }
+export type ChangelogDay = { date: string; commits: ChangelogCommit[] }
+export type VersionInfo = { version: string; commit: string; build_time: string; days: ChangelogDay[] }
+
+// useVersion reads this Harbor's build identity + embedded changelog. The values are fixed for the
+// life of the page (baked into the binary), so it never needs to refetch.
+export function useVersion() {
+  return useQuery({
+    queryKey: ['version'],
+    queryFn: async (): Promise<VersionInfo> => {
+      const { data, response } = await api.GET('/admin/v1/version')
+      if (!response.ok) throw await parseProblem(response)
+      return data as unknown as VersionInfo
+    },
+    staleTime: Infinity,
+  })
+}
+
 export function useFleetHealth() {
   return useQuery({
     queryKey: ['fleet-health'],

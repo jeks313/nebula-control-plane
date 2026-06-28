@@ -31,6 +31,21 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Identity" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+  /admin/v1/version:
+    get:
+      summary: Build identity (CalVer + commit + build time) and the embedded git changelog.
+      description: >-
+        Returns the version/commit/build_time stamped into this Harbor binary plus the embedded
+        commit log grouped by date (newest first). Drives the console version badge + changelog page;
+        the response always describes the build actually running.
+      operationId: getVersion
+      responses:
+        "200":
+          description: Build identity + changelog grouped by date.
+          content:
+            application/json:
+              schema: { type: object }
+        "401": { $ref: "#/components/responses/Unauthorized" }
   /admin/v1/fleet/health:
     get:
       summary: Server-computed fleet health rollup.

@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
 import { NavLink } from 'react-router-dom'
-import { useMe } from '../api/hooks'
+import { useMe, useVersion } from '../api/hooks'
 import { logout } from '../api/auth'
 import { harborEnvironment, isProduction } from '../api/config'
 import { cx } from './ui'
@@ -18,6 +18,29 @@ const NAV = [
   { to: '/approvals', label: 'Approvals', end: false },
   { to: '/audit', label: 'Audit', end: false },
 ]
+
+// VersionBadge shows this Harbor's deployed build (CalVer · commit) in the sidebar footer and links
+// to the full changelog. The value is baked into the binary, so it always reflects what's running.
+function VersionBadge() {
+  const v = useVersion()
+  return (
+    <NavLink
+      to="/changelog"
+      title={v.data ? `Deployed ${v.data.version} · ${v.data.commit} — full changelog` : 'changelog'}
+      className={({ isActive }) =>
+        cx(
+          'flex items-baseline gap-1.5 rounded-[4px] px-2 py-1 text-[11px] transition-colors',
+          isActive ? 'bg-mesh-2 text-ink' : 'text-ink-dim hover:bg-mesh-2 hover:text-ink',
+        )
+      }
+    >
+      <span className="font-mono">{v.data ? v.data.version : '…'}</span>
+      {v.data?.commit && v.data.commit !== 'none' && (
+        <span className="font-mono text-ink-faint">· {v.data.commit}</span>
+      )}
+    </NavLink>
+  )
+}
 
 export function Shell({ children }: { children: ReactNode }) {
   const me = useMe()
@@ -50,7 +73,10 @@ export function Shell({ children }: { children: ReactNode }) {
             </NavLink>
           ))}
         </nav>
-        <div className="mt-auto p-3 text-[11px] text-ink-faint">mesh-only console</div>
+        <div className="mt-auto p-3">
+          <VersionBadge />
+          <div className="mt-1 px-2 text-[11px] text-ink-faint">mesh-only console</div>
+        </div>
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col">
