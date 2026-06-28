@@ -484,6 +484,27 @@ export function useRegroupPreview() {
   })
 }
 
+export type RegroupMatchSample = { name: string; overlay_ip: string; eligible: boolean; reason?: string }
+export type RegroupMatch = { matched: number; eligible: number; sample: RegroupMatchSample[]; skipped: Record<string, number> }
+
+// useRegroupMatch — live "N devices match" hint for the bulk dialog (GET .../regroup/match). Read-only;
+// keyed on the (already-debounced) pattern + include_stale, disabled for an empty pattern. Keeps the
+// prior result while a new pattern is in flight so the hint doesn't flicker as you type.
+export function useRegroupMatch(namePattern: string, includeStale: boolean) {
+  return useQuery({
+    queryKey: ['regroup-match', namePattern, includeStale],
+    queryFn: async (): Promise<RegroupMatch> => {
+      const { data, response } = await api.GET('/admin/v1/devices/regroup/match', {
+        params: { query: { name_pattern: namePattern, include_stale: includeStale } },
+      })
+      if (!response.ok) throw await parseProblem(response)
+      return data as unknown as RegroupMatch
+    },
+    enabled: namePattern.trim().length > 0,
+    placeholderData: (prev) => prev,
+  })
+}
+
 // useRegroupApply — POST .../regroup: commit the confirmed entries. 200 = applied directly
 // (per-device results, generation-guarded); 202 = an elevating/large change routed to a distinct
 // second approver (the pending Change). The HTTP status is the only discriminator (both 2xx JSON),

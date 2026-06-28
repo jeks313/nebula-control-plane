@@ -1,10 +1,11 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import {
   useDevices,
   useDeviceRegroup,
   useRegroupPreview,
   useRegroupApply,
+  useRegroupMatch,
   type DeviceFilters,
   type DeviceCondition,
   type Device,
@@ -248,6 +249,42 @@ const SKIP_LABEL: Record<string, string> = {
 
 type DeltaMode = 'add' | 'remove' | 'replace'
 
+function useDebounced<T>(value: T, ms: number): T {
+  const [v, setV] = useState(value)
+  useEffect(() => {
+    const t = setTimeout(() => setV(value), ms)
+    return () => clearTimeout(t)
+  }, [value, ms])
+  return v
+}
+
+// MatchHint — live "N devices match" affordance under the pattern input, before Preview. Shows the
+// matched/eligible split (most of the fleet may be stale ghosts) + up to 4 names. Debounced; respects
+// the include-stale toggle so the count reflects what apply would actually touch. A fixed min-height
+// reserves space so the dialog doesn't jump as the line appears.
+function MatchHint({ pattern, includeStale }: { pattern: string; includeStale: boolean }) {
+  const debounced = useDebounced(pattern.trim(), 300)
+  const q = useRegroupMatch(debounced, includeStale)
+  const base = 'mt-1 block min-h-[15px] text-[11px]'
+  if (!debounced) return <span className={cx(base, 'text-ink-faint')} />
+  if (q.isPending) return <span className={cx(base, 'text-ink-faint')}>matching…</span>
+  const m = q.data
+  if (!m || m.matched === 0) return <span className={cx(base, 'text-ink-faint')}>No devices match this pattern.</span>
+  const names = m.sample.slice(0, 4).map((s) => s.name || s.overlay_ip)
+  const more = m.matched - names.length
+  return (
+    <span className={base}>
+      <span className="text-ink-dim">
+        {m.matched} device{m.matched === 1 ? '' : 's'} match
+        {m.eligible !== m.matched && <span className="text-ink-faint"> · {m.eligible} eligible</span>}
+      </span>
+      {names.length > 0 && (
+        <span className="text-ink-faint"> — {names.join(', ')}{more > 0 ? `, +${more} more` : ''}</span>
+      )}
+    </span>
+  )
+}
+
 function BulkRegroupButton({ pattern }: { pattern: string }) {
   const [open, setOpen] = useState(false)
   return (
@@ -357,6 +394,7 @@ function BulkRegroupDialog({ initialPattern, onClose }: { initialPattern: string
             placeholder="db-*  (use * and ? wildcards)"
             className={FIELD}
           />
+          <MatchHint pattern={pattern} includeStale={includeStale} />
         </label>
 
         <div className="flex gap-1">

@@ -133,6 +133,56 @@ func TestRegroupApplyDirectAndGuard(t *testing.T) {
 	}
 }
 
+// TestRegroupMatch: the live hint endpoint counts matched vs eligible (same exclusions as the
+// dry-run), breaks down skips, samples eligible-first, and emits arrays for an empty pattern.
+func TestRegroupMatch(t *testing.T) {
+	s, h := newServer(t)
+	liveDevice(t, s.DB, "10.44.0.40", "node-1", `["laptops"]`)
+	liveDevice(t, s.DB, "10.44.0.41", "node-2", `["laptops"]`)
+	liveDevice(t, s.DB, "10.44.0.42", "node-cp", `["control-plane"]`) // reserved -> ineligible
+	seedIssuedDevice(t, s.DB, "10.44.0.43", "node-stale", `["laptops"]`) // no heartbeat -> stale
+
+	get := func(t *testing.T, url string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET", url, nil)
+		req.Header.Set("X-Harbor-Dev-Actor", "alice")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		return rr
+	}
+
+	rr := get(t, "/admin/v1/devices/regroup/match?name_pattern=node-*")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("match: status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var out struct {
+		Matched  int `json:"matched"`
+		Eligible int `json:"eligible"`
+		Sample   []struct {
+			Name     string `json:"name"`
+			Eligible bool   `json:"eligible"`
+		} `json:"sample"`
+		Skipped map[string]int `json:"skipped"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Matched != 4 || out.Eligible != 2 {
+		t.Fatalf("matched=%d eligible=%d, want 4/2", out.Matched, out.Eligible)
+	}
+	if out.Skipped["reserved"] != 1 || out.Skipped["stale"] != 1 {
+		t.Fatalf("skipped=%v, want reserved=1 stale=1", out.Skipped)
+	}
+	if len(out.Sample) == 0 || !out.Sample[0].Eligible {
+		t.Fatalf("sample must lead with an eligible device: %+v", out.Sample)
+	}
+
+	// empty pattern -> zero + arrays (no crash shape)
+	rr = get(t, "/admin/v1/devices/regroup/match")
+	if !strings.Contains(rr.Body.String(), `"sample":[]`) {
+		t.Fatalf("empty pattern must emit a sample array: %s", rr.Body.String())
+	}
+}
+
 // TestRegroupApplyElevationDualControl: an elevating apply routes to dual-control (202), not a write.
 func TestRegroupApplyElevationDualControl(t *testing.T) {
 	s, h := newServer(t)

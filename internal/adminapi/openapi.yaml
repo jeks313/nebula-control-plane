@@ -144,6 +144,25 @@ paths:
         "400": { $ref: "#/components/responses/Problem" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "403": { $ref: "#/components/responses/Problem" }
+  /admin/v1/devices/regroup/match:
+    get:
+      summary: Live match count for a re-group name_pattern (read-only preview-of-the-preview).
+      description: >-
+        Resolves a name_pattern to candidate devices and classifies each by the same
+        reserved/stale/ephemeral/reaped exclusions the dry-run uses, returning matched/eligible
+        counts + a small name sample. Powers the console's "N devices match" hint. device:manage.
+      operationId: regroupMatch
+      parameters:
+        - { name: name_pattern, in: query, required: false, schema: { type: string } }
+        - { name: include_stale, in: query, required: false, schema: { type: boolean } }
+      responses:
+        "200":
+          description: Matched/eligible counts + skip breakdown + a name sample.
+          content:
+            application/json:
+              schema: { type: object }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Problem" }
   /admin/v1/audit:
     get:
       summary: Audit log, newest first, cursor-paginated.

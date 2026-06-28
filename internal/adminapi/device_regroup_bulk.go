@@ -108,6 +108,72 @@ func (s *Server) handleDeviceRegroup(w http.ResponseWriter, r *http.Request) {
 	s.regroupApply(w, r, id, req)
 }
 
+type regroupSample struct {
+	Name      string `json:"name"`
+	OverlayIP string `json:"overlay_ip"`
+	Eligible  bool   `json:"eligible"`
+	Reason    string `json:"reason,omitempty"` // skip reason when !eligible
+}
+
+type regroupMatchResp struct {
+	Matched  int             `json:"matched"`  // name-matched candidates (deduped per overlay_ip)
+	Eligible int             `json:"eligible"` // would be acted on (after state exclusions)
+	Sample   []regroupSample `json:"sample"`   // up to regroupSampleMax, eligible first
+	Skipped  map[string]int  `json:"skipped"`  // reason -> count
+}
+
+const regroupSampleMax = 8 // server sample cap; the console shows the first ~4
+
+// handleDeviceRegroupMatch implements GET /admin/v1/devices/regroup/match — a cheap, read-only
+// preview-of-the-preview: how many devices a name_pattern resolves to, how many are eligible (after
+// the SAME reserved/stale/ephemeral/reaped exclusions the dry-run uses), plus a small name sample.
+// Powers the live "N devices match" hint as the operator types. device:manage, NO step-up (read).
+func (s *Server) handleDeviceRegroupMatch(w http.ResponseWriter, r *http.Request) {
+	id := identityFrom(r.Context())
+	if !s.requirePerm(w, id, PermDeviceManage) {
+		return
+	}
+	namePattern := r.URL.Query().Get("name_pattern")
+	includeStale := r.URL.Query().Get("include_stale") == "true"
+	resp := regroupMatchResp{Sample: []regroupSample{}, Skipped: map[string]int{}}
+	if strings.TrimSpace(namePattern) == "" {
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	cls, err := s.classifyRegroup(r.Context(), namePattern, nil, includeStale)
+	if err != nil {
+		s.fail(w, r, "resolve devices failed", err)
+		return
+	}
+	resp.Matched = len(cls)
+	for _, cc := range cls {
+		if cc.reason == "" {
+			resp.Eligible++
+		} else {
+			resp.Skipped[cc.reason]++
+		}
+	}
+	// Sample eligible first, then ineligible, up to the cap — prefer showing the names that
+	// would actually change.
+	take := func(wantEligible bool) {
+		for _, cc := range cls {
+			if len(resp.Sample) >= regroupSampleMax {
+				return
+			}
+			if (cc.reason == "") != wantEligible {
+				continue
+			}
+			resp.Sample = append(resp.Sample, regroupSample{
+				Name: cc.cand.DeviceName, OverlayIP: cc.cand.OverlayIP,
+				Eligible: cc.reason == "", Reason: cc.reason,
+			})
+		}
+	}
+	take(true)
+	take(false)
+	writeJSON(w, http.StatusOK, resp)
+}
+
 // regroupDryRun resolves the selection + delta into per-device entries and skips, with no writes.
 func (s *Server) regroupDryRun(w http.ResponseWriter, r *http.Request, req regroupReq) {
 	ctx := r.Context()
@@ -126,45 +192,28 @@ func (s *Server) regroupDryRun(w http.ResponseWriter, r *http.Request, req regro
 		return
 	}
 
-	cands, err := s.regroupCandidates(ctx, req.NamePattern, req.OverlayIPs)
+	cls, err := s.classifyRegroup(ctx, req.NamePattern, req.OverlayIPs, req.IncludeStale)
 	if err != nil {
 		s.fail(w, r, "resolve devices failed", err)
 		return
 	}
-	reaped, err := s.reapedNameSet(ctx, cands)
-	if err != nil {
-		s.fail(w, r, "reaped lookup failed", err)
-		return
-	}
-	staleNs := s.cfg.Thresholds.StaleAfter.Nanoseconds()
-	nowNs := s.now().UnixNano()
 
 	// Non-nil so they always marshal as JSON arrays (a nil slice → `null`, which the
 	// console treats as a crashable shape). Same for each entry's from/target below.
 	entries := []dryEntry{}
 	skipped := []regroupSkip{}
 	capped := 0
-	for _, c := range cands {
-		current := []string{}
-		_ = json.Unmarshal([]byte(c.DesiredGroups), &current)
-		skip := func(reason string) { skipped = append(skipped, regroupSkip{c.OverlayIP, c.DeviceName, reason}) }
-		switch {
-		case policy.GrantsReservedGroup(current):
-			skip("reserved") // baseline-owned (control-plane/lighthouse) — not manageable here
-			continue
-		case reaped[c.DeviceName]:
-			skip("reaped")
-			continue
-		case c.Ephemeral:
-			skip("ephemeral")
-			continue
-		case (c.LastSeen == 0 || (staleNs > 0 && c.LastSeen < nowNs-staleNs)) && !req.IncludeStale:
-			skip("stale")
+	for _, cc := range cls {
+		c := cc.cand
+		if cc.reason != "" { // state-excluded (reserved/stale/ephemeral/reaped)
+			skipped = append(skipped, regroupSkip{c.OverlayIP, c.DeviceName, cc.reason})
 			continue
 		}
+		current := []string{}
+		_ = json.Unmarshal([]byte(c.DesiredGroups), &current)
 		target := applyDelta(current, add, remove, replace, hasReplace)
 		if sameGroupSet(current, target) {
-			skip("no_op")
+			skipped = append(skipped, regroupSkip{c.OverlayIP, c.DeviceName, "no_op"})
 			continue
 		}
 		if len(entries) >= regroupMaxSet {
@@ -307,6 +356,46 @@ func dcRequired(entries []dryEntry) bool {
 		}
 	}
 	return false
+}
+
+// classifiedCand is a resolved candidate plus its state-based skip reason ("" = eligible). The
+// reason set (reserved/reaped/ephemeral/stale) is shared by the dry-run and the live match hint, so
+// the count a user sees while typing matches what apply will act on. It does NOT include the
+// delta-dependent no_op exclusion (that needs an add/remove/replace, which the hint doesn't have).
+type classifiedCand struct {
+	cand   candidate
+	reason string
+}
+
+func (s *Server) classifyRegroup(ctx context.Context, namePattern string, overlayIPs []string, includeStale bool) ([]classifiedCand, error) {
+	cands, err := s.regroupCandidates(ctx, namePattern, overlayIPs)
+	if err != nil {
+		return nil, err
+	}
+	reaped, err := s.reapedNameSet(ctx, cands)
+	if err != nil {
+		return nil, err
+	}
+	staleNs := s.cfg.Thresholds.StaleAfter.Nanoseconds()
+	nowNs := s.now().UnixNano()
+	out := make([]classifiedCand, 0, len(cands))
+	for _, c := range cands {
+		current := []string{}
+		_ = json.Unmarshal([]byte(c.DesiredGroups), &current)
+		reason := ""
+		switch {
+		case policy.GrantsReservedGroup(current):
+			reason = "reserved" // baseline-owned (control-plane/lighthouse) — not manageable here
+		case reaped[c.DeviceName]:
+			reason = "reaped"
+		case c.Ephemeral:
+			reason = "ephemeral"
+		case (c.LastSeen == 0 || (staleNs > 0 && c.LastSeen < nowNs-staleNs)) && !includeStale:
+			reason = "stale"
+		}
+		out = append(out, classifiedCand{cand: c, reason: reason})
+	}
+	return out, nil
 }
 
 // regroupCandidates resolves the authoritative (latest issued) enrollment per overlay_ip for the
