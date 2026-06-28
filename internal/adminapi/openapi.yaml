@@ -44,7 +44,7 @@ paths:
           description: Build identity + changelog grouped by date.
           content:
             application/json:
-              schema: { type: object }
+              schema: { $ref: "#/components/schemas/VersionInfo" }
         "401": { $ref: "#/components/responses/Unauthorized" }
   /admin/v1/fleet/health:
     get:
@@ -886,6 +886,27 @@ components:
         principal: { type: string }
         roles: { type: array, items: { type: string } }
         mfa_satisfied_at: { type: string, format: date-time }
+    ChangelogChange:
+      type: object
+      required: [hash, date, subject]
+      properties:
+        hash: { type: string }
+        date: { type: string }
+        subject: { type: string }
+    ChangelogDay:
+      type: object
+      required: [date, commits]
+      properties:
+        date: { type: string }
+        commits: { type: array, items: { $ref: "#/components/schemas/ChangelogChange" } }
+    VersionInfo:
+      type: object
+      required: [version, commit, build_time, days]
+      properties:
+        version: { type: string }
+        commit: { type: string }
+        build_time: { type: string }
+        days: { type: array, items: { $ref: "#/components/schemas/ChangelogDay" } }
     Severity:
       type: string
       enum: [info, degraded, critical]

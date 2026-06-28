@@ -1,5 +1,10 @@
 [
   {
+    "hash": "9641225",
+    "date": "2026-06-28",
+    "subject": "feat(console): version badge + changelog page (CalVer + commit, grouped by date)"
+  },
+  {
     "hash": "63fde48",
     "date": "2026-06-27",
     "subject": "feat(ui): Devices recency tabs + age-based stale coloring"

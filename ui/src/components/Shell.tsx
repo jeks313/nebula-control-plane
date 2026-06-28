@@ -23,10 +23,12 @@ const NAV = [
 // to the full changelog. The value is baked into the binary, so it always reflects what's running.
 function VersionBadge() {
   const v = useVersion()
+  const hasCommit = !!v.data?.commit && v.data.commit !== 'none'
+  const label = v.data ? v.data.version : v.isError ? 'changelog' : '…'
   return (
     <NavLink
       to="/changelog"
-      title={v.data ? `Deployed ${v.data.version} · ${v.data.commit} — full changelog` : 'changelog'}
+      title={v.data ? `Deployed ${v.data.version}${hasCommit ? ` · ${v.data.commit}` : ''} — full changelog` : 'changelog'}
       className={({ isActive }) =>
         cx(
           'flex items-baseline gap-1.5 rounded-[4px] px-2 py-1 text-[11px] transition-colors',
@@ -34,10 +36,8 @@ function VersionBadge() {
         )
       }
     >
-      <span className="font-mono">{v.data ? v.data.version : '…'}</span>
-      {v.data?.commit && v.data.commit !== 'none' && (
-        <span className="font-mono text-ink-faint">· {v.data.commit}</span>
-      )}
+      <span className="font-mono">{label}</span>
+      {hasCommit && <span className="font-mono text-ink-faint">· {v.data!.commit}</span>}
     </NavLink>
   )
 }

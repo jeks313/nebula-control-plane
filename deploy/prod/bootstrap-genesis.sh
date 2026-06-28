@@ -303,7 +303,7 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
   # Console build identity (CalVer + commit + build time), embedded so GET /admin/v1/version + the
   # console version badge report this build. VPKG matches internal/version's import path.
   VPKG="github.com/jeks313/nebula-control-plane/internal/version"
-  CALVER="$(date -u +%Y.%m.%d)"
+  CALVER="$(date +%Y.%m.%d)" # local TZ to match git committer dates (%cs) the changelog groups by
   GITSHA="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo none)"
   BUILDTIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   HARBOR_LDFLAGS="-X main.version=$VER -X $VPKG.Version=$CALVER -X $VPKG.Commit=$GITSHA -X $VPKG.BuildTime=$BUILDTIME"

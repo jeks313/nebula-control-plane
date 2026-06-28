@@ -33,8 +33,10 @@ LDFLAGS := -X main.version=$(VERSION)
 
 # Harbor console build identity (CalVer date + short commit + build time), embedded so
 # GET /admin/v1/version reports exactly what's deployed. Used by harbor-ui (below) + the deploy.
+# CALVER is LOCAL-time (not -u) to line up with the git committer dates (%cs) the changelog groups
+# by, so the console's "deployed" day highlight reliably matches a day group.
 VPKG       := github.com/jeks313/nebula-control-plane/internal/version
-CALVER     := $(shell date -u +%Y.%m.%d)
+CALVER     := $(shell date +%Y.%m.%d)
 GITSHA     := $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 BUILDTIME  := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 HARBOR_LDFLAGS := $(LDFLAGS) -X $(VPKG).Version=$(CALVER) -X $(VPKG).Commit=$(GITSHA) -X $(VPKG).BuildTime=$(BUILDTIME)

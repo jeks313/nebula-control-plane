@@ -19,8 +19,10 @@ fi
 
 # %h short hash, %cs committer date (YYYY-MM-DD), %s subject. Split on the unit separator (0x1f)
 # and let jq do the JSON escaping of subjects.
+TMP="$OUT.tmp"
 git -C "$ROOT" log -n "$LIMIT" --no-merges --pretty=format:'%h%x1f%cs%x1f%s' \
   | jq -R -s 'split("\n") | map(select(length>0) | split("") | {hash: .[0], date: .[1], subject: .[2]})' \
-  > "$OUT"
+  > "$TMP"
+mv "$TMP" "$OUT"
 
 echo "gen-changelog: wrote $(jq length "$OUT") commits to ${OUT#"$ROOT"/}"

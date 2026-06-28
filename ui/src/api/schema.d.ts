@@ -743,6 +743,21 @@ export interface components {
             /** Format: date-time */
             mfa_satisfied_at?: string;
         };
+        ChangelogChange: {
+            hash: string;
+            date: string;
+            subject: string;
+        };
+        ChangelogDay: {
+            date: string;
+            commits: components["schemas"]["ChangelogChange"][];
+        };
+        VersionInfo: {
+            version: string;
+            commit: string;
+            build_time: string;
+            days: components["schemas"]["ChangelogDay"][];
+        };
         /** @enum {string} */
         Severity: "info" | "degraded" | "critical";
         Reason: {
@@ -1375,7 +1390,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": Record<string, never>;
+                    "application/json": components["schemas"]["VersionInfo"];
                 };
             };
             401: components["responses"]["Unauthorized"];
