@@ -18,12 +18,22 @@ import { InstallCommand } from '../components/InstallCommand'
 import { Dialog } from '../components/Dialog'
 import { fmtDateTime, usesLabel, downloadText } from '../lib/format'
 
+type KeyTab = 'active' | 'revoked'
+
+const EMPTY: Record<KeyTab, string> = {
+  active: 'No active join keys. Create one to let hosts enroll.',
+  revoked: 'No revoked join keys.',
+}
+
 export function JoinKeys() {
   const { can } = usePermissions()
   const mayManage = can('joinkey:manage')
   const q = useJoinKeys()
   const [createOpen, setCreateOpen] = useState(false)
-  const keys = q.data?.joinkeys ?? []
+  const [tab, setTab] = useState<KeyTab>('active')
+  // One query returns every key with a `state`; filter client-side so tab switches are instant.
+  const keys = (q.data?.joinkeys ?? []).filter((k) => k.state === tab)
+  const showActions = tab === 'active' && mayManage
 
   return (
     <Page
@@ -35,20 +45,35 @@ export function JoinKeys() {
         <InstallCommand method="joinkey" title="Enroll a host with a join key" />
       </div>
 
+      <div className="mb-4 flex gap-1">
+        {(['active', 'revoked'] as KeyTab[]).map((t) => (
+          <button
+            key={t}
+            onClick={() => setTab(t)}
+            className={cx(
+              'rounded-[6px] px-3 py-1 text-[13px] capitalize transition-colors',
+              tab === t ? 'bg-mesh-2 text-ink' : 'text-ink-dim hover:bg-mesh-2',
+            )}
+          >
+            {t}
+          </button>
+        ))}
+      </div>
+
       {q.isPending && <StateBlock kind="loading" message="Loading join keys…" />}
       {q.isError && <ErrorState error={q.error} fallback="Couldn't load join keys." />}
       {q.data &&
         (keys.length === 0 ? (
-          <StateBlock kind="empty" message="No join keys yet. Create one to let hosts enroll." />
+          <StateBlock kind="empty" message={EMPTY[tab]} />
         ) : (
           <Card className="overflow-hidden">
             <table className="w-full text-left">
               <thead className="border-b border-edge text-[11px] uppercase tracking-wide text-ink-faint">
                 <tr>
-                  {['Name', 'Groups', 'Netblock', 'Mode', 'Uses', 'Rate/hr', 'Expires', 'State', 'Created'].map((h) => (
+                  {['Name', 'Groups', 'Netblock', 'Mode', 'Uses', 'Rate/hr', 'Expires', 'Created'].map((h) => (
                     <th key={h} className="px-4 py-2 font-medium">{h}</th>
                   ))}
-                  {mayManage && <th className="px-4 py-2 text-right font-medium">Actions</th>}
+                  {showActions && <th className="px-4 py-2 text-right font-medium">Actions</th>}
                 </tr>
               </thead>
               <tbody className="divide-y divide-edge">
@@ -70,21 +95,12 @@ export function JoinKeys() {
                     <td className="nums px-4 py-2 text-ink-dim">{usesLabel(k.used_count, k.max_uses)}</td>
                     <td className="nums px-4 py-2 text-ink-dim">{k.quota_per_hour > 0 ? k.quota_per_hour : '—'}</td>
                     <td className="nums px-4 py-2 text-ink-dim">{fmtDateTime(k.expires_at)}</td>
-                    <td className="px-4 py-2">
-                      {k.state === 'active' ? <span className="text-permit">active</span> : <span className="text-ink-faint">revoked</span>}
-                    </td>
                     <td className="nums px-4 py-2 text-ink-faint">{fmtDateTime(k.created_at)}</td>
-                    {mayManage && (
+                    {showActions && (
                       <td className="px-4 py-2">
                         <div className="flex justify-end gap-2">
-                          {k.state === 'active' ? (
-                            <>
-                              <EditButton k={k} />
-                              <RevokeButton name={k.name} />
-                            </>
-                          ) : (
-                            <span className="text-ink-faint">—</span>
-                          )}
+                          <EditButton k={k} />
+                          <RevokeButton name={k.name} />
                         </div>
                       </td>
                     )}
