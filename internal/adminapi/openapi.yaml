@@ -709,12 +709,12 @@ paths:
         "404": { $ref: "#/components/responses/Problem" }
   /admin/v1/enrollments:
     get:
-      summary: The enrollment approval queue (keyset-paginated on id).
+      summary: The enrollment approval queue, newest-first (keyset-paginated on id).
       operationId: listEnrollments
       parameters:
         - { name: status, in: query, required: false, description: "pending (default) | issued | denied", schema: { type: string } }
         - { name: limit, in: query, required: false, description: "page size (1..2000, default 200)", schema: { type: integer } }
-        - { name: after, in: query, required: false, description: "keyset cursor: return rows with id greater than this (from next_after)", schema: { type: integer } }
+        - { name: before, in: query, required: false, description: "keyset cursor: return rows with id less than this (from next_before) — newest-first", schema: { type: integer } }
       responses:
         "200":
           description: A page of enrollments in the requested status.
@@ -1532,7 +1532,7 @@ components:
       properties:
         enrollments: { type: array, items: { $ref: "#/components/schemas/EnrollmentView" } }
         count: { type: integer, description: "page size — NOT the queue total" }
-        next_after: { type: integer, description: "keyset cursor for the next page; absent on the last page" }
+        next_before: { type: integer, description: "keyset cursor for the next (older) page; absent on the last page" }
     EnrollDecision:
       type: object
       required: [enrollment_id, status]

@@ -117,9 +117,9 @@ export function useEnrollments(status: EnrollmentStatus) {
   return useInfiniteQuery({
     queryKey: ['enrollments', status],
     queryFn: ({ pageParam }) =>
-      unwrap(api.GET('/admin/v1/enrollments', { params: { query: { status, limit: 200, after: pageParam } } })),
-    initialPageParam: 0,
-    getNextPageParam: (last) => last.next_after ?? undefined,
+      unwrap(api.GET('/admin/v1/enrollments', { params: { query: { status, limit: 200, before: pageParam } } })),
+    initialPageParam: 0, // before=0 -> no cursor -> newest page first
+    getNextPageParam: (last) => last.next_before ?? undefined,
   })
 }
 

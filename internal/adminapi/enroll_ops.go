@@ -67,22 +67,22 @@ func (s *Server) mapEnrollErr(w http.ResponseWriter, r *http.Request, err error)
 	}
 }
 
-// GET /admin/v1/enrollments?status=pending&limit=N&after=ID — the approval queue
-// (default pending; pass status=issued|denied to view decided ones). Keyset-
-// paginated on id (same cursor shape as /devices): the queue is join-key-holder
-// influenced and pending rows are never auto-reaped, so it must not be unbounded.
-// `count` is the page size; `next_after` (when present) is the next page cursor.
+// GET /admin/v1/enrollments?status=pending&limit=N&before=ID — the approval queue
+// (default pending; pass status=issued|denied to view decided ones). Keyset-paginated
+// NEWEST-FIRST on id (same shape as /audit's `before` cursor): the queue is join-key-holder
+// influenced and pending rows are never auto-reaped, so it must not be unbounded. `count` is
+// the page size; `next_before` (when present) pages to older rows.
 func (s *Server) handleEnrollments(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
 	if status == "" {
 		status = enrollment.StatusPending
 	}
 	limit := queryInt(r, "limit", 200, 1, 2000)
-	after := queryInt(r, "after", 0, 0, 1<<62)
+	before := queryInt(r, "before", 0, 0, 1<<62)
 	q := s.cfg.Store.DB.WithContext(r.Context()).Model(&enrollment.Enrollment{}).
-		Where("status = ?", status).Order("id ASC").Limit(limit)
-	if after > 0 {
-		q = q.Where("id > ?", after)
+		Where("status = ?", status).Order("id DESC").Limit(limit)
+	if before > 0 {
+		q = q.Where("id < ?", before)
 	}
 	var es []enrollment.Enrollment
 	if err := q.Find(&es).Error; err != nil {
@@ -112,7 +112,7 @@ func (s *Server) handleEnrollments(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := map[string]any{"enrollments": out, "count": len(out)}
 	if len(es) == limit {
-		resp["next_after"] = es[len(es)-1].ID // cursor: rows with a higher id
+		resp["next_before"] = es[len(es)-1].ID // cursor: rows with a lower id (older)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

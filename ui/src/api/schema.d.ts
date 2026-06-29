@@ -634,7 +634,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** The enrollment approval queue (keyset-paginated on id). */
+        /** The enrollment approval queue, newest-first (keyset-paginated on id). */
         get: operations["listEnrollments"];
         put?: never;
         post?: never;
@@ -1359,8 +1359,8 @@ export interface components {
             enrollments: components["schemas"]["EnrollmentView"][];
             /** @description page size — NOT the queue total */
             count: number;
-            /** @description keyset cursor for the next page; absent on the last page */
-            next_after?: number;
+            /** @description keyset cursor for the next (older) page; absent on the last page */
+            next_before?: number;
         };
         EnrollDecision: {
             enrollment_id: string;
@@ -2433,8 +2433,8 @@ export interface operations {
                 status?: string;
                 /** @description page size (1..2000, default 200) */
                 limit?: number;
-                /** @description keyset cursor: return rows with id greater than this (from next_after) */
-                after?: number;
+                /** @description keyset cursor: return rows with id less than this (from next_before) — newest-first */
+                before?: number;
             };
             header?: never;
             path?: never;
