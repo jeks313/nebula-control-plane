@@ -288,7 +288,10 @@ func startCollect(ctx context.Context, wg *sync.WaitGroup, log *slog.Logger, q q
 	go func() {
 		defer wg.Done()
 		log.Info("gateway collect API listening", "addr", addr, "access", "Harbor-only (mTLS, leaf-pinned)")
-		if err := srv.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		// Via httpserve.Serve (not ListenAndServeTLS directly) so its ErrorLog drops the benign
+		// TLS-handshake noise from the NLB's TCP health check on this mTLS port (Error Zero) — the
+		// preconfigured mTLS TLSConfig still drives ListenAndServeTLS("", "").
+		if err := httpserve.Serve(srv, "", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Error("gateway collect API failed", "err", err)
 		}
 	}()
