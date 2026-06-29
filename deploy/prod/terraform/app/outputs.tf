@@ -101,8 +101,11 @@ output "monitoring_private_ip" {
 }
 
 output "loki_host" {
-  description = "Stable host for node Alloy + gateway FireLens to push to Loki: the in-VPC private DNS name (survives a monitoring relaunch) when a mesh domain is set, else the monitoring node's current private IP. deploy.sh renders it into config.alloy."
-  value       = local.loki_domain != "" ? local.loki_domain : try(aws_instance.node["monitoring"].private_ip, "")
+  description = "Stable host for node Alloy + gateway FireLens to push to Loki: the in-VPC private DNS name (survives a monitoring relaunch) when the private-zone record exists, else the monitoring node's current private IP. deploy.sh renders it into config.alloy."
+  # Keyed on local.gateway_acme (the SAME gate as the aws_route53_record.loki record + the private
+  # zone) — NOT just loki_domain — so the DNS-name branch is only used when the record actually
+  # exists. Otherwise a config with a mesh domain but no private zone would emit an unresolvable name.
+  value = local.gateway_acme == 1 ? local.loki_domain : try(aws_instance.node["monitoring"].private_ip, "")
 }
 
 output "monitoring_hint" {

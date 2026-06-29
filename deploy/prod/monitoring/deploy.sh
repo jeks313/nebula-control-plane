@@ -230,7 +230,7 @@ cat <<EOF
 ────────────────────────────────────────────────────────────────────────────
  Node            : $MON_ID (${MON_PRIV:-private}; mesh member, group:workloads)
  Scrapes         : core-api/admin-api $SCHEME at $HARBOR_OVERLAY:{$CORE_PORT,$ADMIN_PORT}, lighthouse $LH_OVERLAY:$LH_STATS_PORT (over the overlay)
- Logs            : harbor journald -> Grafana Alloy -> Loki ($MON_PRIV:3100). Query in Grafana (Loki datasource); the Fargate gateway/lighthouse ship via awslogs.
+ Logs            : harbor journald -> Grafana Alloy -> Loki ($LOKI_HOST:3100). Query in Grafana (Loki datasource); the Fargate gateway/lighthouse ship via awslogs.
  Reach the UIs   : ssh -i $SSH_KEY -o "$SSM_PROXY" -L 3000:localhost:3000 -L 9090:localhost:9090 -L 9093:localhost:9093 $SSH_USER@$MON_ID
                    then http://localhost:3000 (Grafana), :9090 (Prometheus), :9093 (Alertmanager)
  Alert delivery  : PLACEHOLDER (null receiver) — wire a real Slack/email/PagerDuty receiver in

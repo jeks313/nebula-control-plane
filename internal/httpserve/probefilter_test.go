@@ -2,8 +2,25 @@ package httpserve
 
 import (
 	"bytes"
+	"log"
+	"net/http"
 	"testing"
 )
+
+// TestQuietProbeNoise: installs the filter when ErrorLog is nil; leaves a caller-set ErrorLog alone.
+func TestQuietProbeNoise(t *testing.T) {
+	srv := &http.Server{}
+	quietProbeNoise(srv)
+	if srv.ErrorLog == nil {
+		t.Fatal("expected quietProbeNoise to install an ErrorLog when nil")
+	}
+	preset := log.New(&bytes.Buffer{}, "", 0)
+	srv2 := &http.Server{ErrorLog: preset}
+	quietProbeNoise(srv2)
+	if srv2.ErrorLog != preset {
+		t.Fatal("expected quietProbeNoise to leave a caller-set ErrorLog untouched")
+	}
+}
 
 // TestProbeFilter: benign handshake noise from health checks / scanners is dropped; genuine
 // server errors (and any non-handshake line) pass through unchanged.
