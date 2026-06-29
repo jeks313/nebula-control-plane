@@ -23,6 +23,11 @@ locals {
   mesh_tls       = var.mesh_name != "" && var.mesh_domain != ""
   gateway_domain = local.mesh_tls ? "${var.mesh_name}-gateway.${var.mesh_domain}" : ""
   harbor_domain  = local.mesh_tls ? "${var.mesh_name}-harbor.${var.mesh_domain}" : ""
+  # In-VPC-only name for Loki (the log sink on the monitoring box). A private-zone A record (see
+  # dns_private.tf) points it at the monitoring node's current IP, so log shippers (gateway FireLens,
+  # node Alloy) target a STABLE name and survive a monitoring relaunch instead of baking a private IP
+  # that goes stale. Plain HTTP, internal only — never public.
+  loki_domain = local.mesh_tls ? "${var.mesh_name}-loki.${var.mesh_domain}" : ""
 
   # The shared Cloudflare DNS token exists when ANY component does ACME.
   acme_token = (local.gateway_domain != "" || local.harbor_domain != "") ? 1 : 0

@@ -467,8 +467,12 @@ resource "aws_ecs_task_definition" "gateway" {
     logConfiguration = {
       logDriver = "awsfirelens"
       options = {
-        Name   = "loki"
-        Host   = aws_instance.node["monitoring"].private_ip
+        Name = "loki"
+        # Stable in-VPC DNS name (private zone) for the Loki sink, NOT a baked monitoring IP:
+        # fluent-bit re-resolves it, so a monitoring relaunch is picked up automatically instead
+        # of stranding gateway logs on a dead IP (the silent gap after the 2026-06-24 relaunch).
+        # Falls back to the live IP when there's no mesh domain (loki_domain empty).
+        Host   = local.loki_domain != "" ? local.loki_domain : aws_instance.node["monitoring"].private_ip
         Port   = "3100"
         Labels = "job=fargate-gateway, host=gateway"
       }

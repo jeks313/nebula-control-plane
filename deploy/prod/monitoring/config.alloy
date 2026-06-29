@@ -3,9 +3,11 @@
 // `systemd-run --collect` / systemd) and pushes to Loki on the monitoring node. Alloy is the
 // supported successor to promtail (Grafana moved promtail to LTS/deprecated in 2025).
 //
-// REFERENCE: deploy.sh renders the live copy per node — substituting the monitoring node's private
-// IP as the Loki endpoint (http://<monitoring-private-ip>:3100/loki/api/v1/push, over the VPC,
-// SG-locked) and NCP_HOST_LABEL as that node's `host` label.
+// REFERENCE: deploy.sh renders the live copy per node — substituting LOKI_ENDPOINT with the stable
+// in-VPC Loki host (the terraform `loki_host` output: the private DNS name when a mesh domain is set,
+// else the monitoring node's private IP; http://<host>:3100/loki/api/v1/push over the VPC, SG-locked)
+// and NCP_HOST_LABEL with that node's `host` label. A DNS host means a monitoring relaunch is picked
+// up by re-resolution — no baked IP to go stale.
 
 loki.relabel "journal" {
 	forward_to = []
@@ -34,6 +36,6 @@ loki.source.journal "harbor" {
 
 loki.write "default" {
 	endpoint {
-		url = "http://MONITORING_PRIVATE_IP:3100/loki/api/v1/push"
+		url = "http://LOKI_ENDPOINT:3100/loki/api/v1/push"
 	}
 }

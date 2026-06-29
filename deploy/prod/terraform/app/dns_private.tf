@@ -51,3 +51,16 @@ resource "aws_route53_record" "harbor_overlay" {
   ttl     = 60
   records = [var.harbor_overlay_ip]
 }
+
+# <mesh>-loki -> the monitoring node's CURRENT private IP (the Loki log sink). A stable name for
+# log shippers so a monitoring relaunch (new IP) is picked up by re-resolution instead of stranding
+# them on a baked IP — the gap that silently lost gateway logs after the 2026-06-24 relaunch. Short
+# TTL so a relaunch propagates fast. Private zone only: Loki is in-VPC, never public.
+resource "aws_route53_record" "loki" {
+  count   = local.gateway_acme
+  zone_id = aws_route53_zone.mesh_private[0].zone_id
+  name    = local.loki_domain
+  type    = "A"
+  ttl     = 60
+  records = [aws_instance.node["monitoring"].private_ip]
+}

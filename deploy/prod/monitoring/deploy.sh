@@ -63,6 +63,7 @@ OUT="$(terraform -chdir="$TFDIR" output -json)"
 val() { jq -r "$1 // \"\"" <<<"$OUT"; }
 MON_ID="$(val '.instance_ids.value.monitoring')" # SSH/scp target over SSM (the node is private, no public IP)
 MON_PRIV="$(val '.monitoring_private_ip.value')"
+LOKI_HOST="$(val '.loki_host.value')"; LOKI_HOST="${LOKI_HOST:-$MON_PRIV}" # stable DNS name (private zone) else the IP
 HB_ID="$(val '.instance_ids.value.harbor')"
 LH_ID="$(val '.instance_ids.value.lighthouse')"             # EC2 lighthouse (empty when lighthouse_runtime=fargate)
 LIGHTHOUSE_RUNTIME="$(val '.lighthouse_runtime.value')"; LIGHTHOUSE_RUNTIME="${LIGHTHOUSE_RUNTIME:-ec2}"
@@ -193,8 +194,8 @@ rsh "$MON_ID" 'cd /opt/ncp-monitoring && sudo docker compose up -d && echo up'
 # -> Loki is a separate FireLens change). The cloud client is intentionally NOT shipped here yet.
 install_alloy() { # install_alloy <instance-id> <host-label>
   local id="$1" label="$2"
-  echo "==> installing Grafana Alloy on $label ($id) -> Loki ($MON_PRIV:3100)"
-  sed -e "s#http://MONITORING_PRIVATE_IP:3100#http://$MON_PRIV:3100#" -e "s#NCP_HOST_LABEL#$label#g" \
+  echo "==> installing Grafana Alloy on $label ($id) -> Loki ($LOKI_HOST:3100)"
+  sed -e "s#http://LOKI_ENDPOINT:3100#http://$LOKI_HOST:3100#" -e "s#NCP_HOST_LABEL#$label#g" \
     "$HERE/config.alloy" > "$WORK/config.alloy.$label"
   rcp "$WORK/config.alloy.$label" "$SSH_USER@$id:/tmp/config.alloy"
   rsh "$id" "set -e

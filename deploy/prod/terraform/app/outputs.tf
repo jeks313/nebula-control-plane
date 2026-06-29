@@ -100,6 +100,11 @@ output "monitoring_private_ip" {
   value       = try(aws_instance.node["monitoring"].private_ip, "")
 }
 
+output "loki_host" {
+  description = "Stable host for node Alloy + gateway FireLens to push to Loki: the in-VPC private DNS name (survives a monitoring relaunch) when a mesh domain is set, else the monitoring node's current private IP. deploy.sh renders it into config.alloy."
+  value       = local.loki_domain != "" ? local.loki_domain : try(aws_instance.node["monitoring"].private_ip, "")
+}
+
 output "monitoring_hint" {
   description = "Stand up the monitoring stack (ADR 0007 Phase 7b) after the genesis bootstrap: `SSH_KEY=~/.ssh/absolute bash deploy/prod/monitoring/deploy.sh` (enrolls the monitoring node + brings up Prometheus/Alertmanager/Grafana). Reach the UIs via SSH tunnel to the monitoring node (Grafana :3000, Prometheus :9090, Alertmanager :9093)."
   value       = "monitoring node: ${try("ssh ec2-user@${local.public_ip["monitoring"]}", "<applied with the monitoring node>")}  ·  deploy: deploy/prod/monitoring/deploy.sh"

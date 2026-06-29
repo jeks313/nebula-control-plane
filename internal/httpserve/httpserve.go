@@ -8,7 +8,11 @@ package httpserve
 
 import (
 	"crypto/tls"
+	"io"
+	"log"
 	"net/http"
+	"os"
+	"strings"
 )
 
 // Serve runs srv with TLS when it can, plaintext only as a last resort:
@@ -20,6 +24,7 @@ import (
 //
 // Under TLS, net/http negotiates HTTP/2 automatically and TLS 1.2+ is enforced.
 func Serve(srv *http.Server, certFile, keyFile string) error {
+	quietProbeNoise(srv)
 	if hasTLSConfig(srv) {
 		return srv.ListenAndServeTLS("", "")
 	}
@@ -30,6 +35,43 @@ func Serve(srv *http.Server, certFile, keyFile string) error {
 		return srv.ListenAndServeTLS(certFile, keyFile)
 	}
 	return srv.ListenAndServe()
+}
+
+// quietProbeNoise points srv.ErrorLog at a writer that DROPS benign TLS-handshake noise —
+// connections a load-balancer health check or port scanner opens and closes mid-handshake. These
+// are EXPECTED behaviour (e.g. the gateway's NLB HTTPS /healthz probe), so net/http's default
+// "http: TLS handshake error from <ip>: <EOF|reset|timeout>" must not pollute the logs (Error
+// Zero: a healthy system emits no errors). A genuine handshake failure — an unusable cipher, a bad
+// cert — does not match these causes and still surfaces. No-op if the caller set its own ErrorLog.
+func quietProbeNoise(srv *http.Server) {
+	if srv.ErrorLog != nil {
+		return
+	}
+	srv.ErrorLog = log.New(probeFilter{w: os.Stderr}, "", log.LstdFlags)
+}
+
+// benignHandshakeCauses are the connection-level closes a probe/scanner produces — never a real
+// server fault, so a "TLS handshake error" carrying one of them is dropped.
+var benignHandshakeCauses = []string{
+	"EOF",
+	"connection reset by peer",
+	"i/o timeout",
+	"broken pipe",
+	"first record does not look like a TLS handshake", // a plain-TCP probe to the TLS port
+}
+
+type probeFilter struct{ w io.Writer }
+
+func (f probeFilter) Write(p []byte) (int, error) {
+	s := string(p)
+	if strings.Contains(s, "TLS handshake error") {
+		for _, c := range benignHandshakeCauses {
+			if strings.Contains(s, c) {
+				return len(p), nil // swallow — expected probe noise
+			}
+		}
+	}
+	return f.w.Write(p)
 }
 
 // Scheme reports the URL scheme a (cert,key) pair implies, for log/redirect lines.
