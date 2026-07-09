@@ -1,5 +1,65 @@
 [
   {
+    "hash": "f3ee9b4",
+    "date": "2026-07-09",
+    "subject": "fix(rollout): converge offline/re-enrolled hosts to the completed pilot/nebula floor"
+  },
+  {
+    "hash": "c97b26d",
+    "date": "2026-06-29",
+    "subject": "feat(console): enrollment queue newest-first (keyset DESC + before cursor)"
+  },
+  {
+    "hash": "0251d9a",
+    "date": "2026-06-28",
+    "subject": "fix(gateway): route the collect (:9443) mTLS server through httpserve.Serve to drop TCP-healthcheck handshake noise"
+  },
+  {
+    "hash": "eb7f6f2",
+    "date": "2026-06-28",
+    "subject": "refine(observability): tie Loki DNS branch to the record's gate + summary/test polish"
+  },
+  {
+    "hash": "9118ded",
+    "date": "2026-06-28",
+    "subject": "feat(observability): stable Loki DNS for log shippers + drop health-probe handshake noise"
+  },
+  {
+    "hash": "e4c4b29",
+    "date": "2026-06-28",
+    "subject": "feat(gateway): re-enable HTTPS /healthz self-heal (now that autotls serves no-SNI)"
+  },
+  {
+    "hash": "edac252",
+    "date": "2026-06-28",
+    "subject": "feat(autotls): serve the primary cert on missing/unknown SNI (enables no-SNI LB health checks)"
+  },
+  {
+    "hash": "a7e500c",
+    "date": "2026-06-28",
+    "subject": "revert(gateway): drop the NLB HTTPS /healthz check — autocert needs SNI, NLB health checks don't send it"
+  },
+  {
+    "hash": "16be281",
+    "date": "2026-06-28",
+    "subject": "feat(gateway): self-heal a wedged gateway via HTTPS /healthz + ECS replacement"
+  },
+  {
+    "hash": "fedb466",
+    "date": "2026-06-28",
+    "subject": "test(gateways): cover the collect health recorder state machine + document the down-threshold invariant"
+  },
+  {
+    "hash": "ea0461c",
+    "date": "2026-06-28",
+    "subject": "feat(gateways): gateway health monitoring + dashboard pane"
+  },
+  {
+    "hash": "abbe290",
+    "date": "2026-06-28",
+    "subject": "refine(console): typed /version schema, TZ-aligned CalVer, atomic changelog, badge polish"
+  },
+  {
     "hash": "9641225",
     "date": "2026-06-28",
     "subject": "feat(console): version badge + changelog page (CalVer + commit, grouped by date)"
