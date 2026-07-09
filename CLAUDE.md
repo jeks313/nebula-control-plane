@@ -90,6 +90,45 @@ need the cloud, verified once in the minimal Tier-2 harness).
 - This repo lives at `~/Data/Devel/nebula-control-plane`. (`~/Data` may be sync-watched — keep build
   artifacts gitignored.)
 
+## Deploying to the POC (live control plane, ca-central-1)
+
+There is ONE live environment. To ship a harbor change, from the repo root run:
+
+```bash
+bash deploy/scripts/deploy-harbor.sh                # changelog regen -> build -tags ui -> stage -> hot-swap -> recreate units -> verify
+bash deploy/scripts/deploy-harbor.sh --skip-build   # redeploy the existing bin/harbor as-is
+```
+
+The script is self-contained and idempotent. It: regenerates the embedded changelog
+(`gen-changelog.sh`), builds `bin/harbor` with `make harbor-ui` (npm build + `-tags ui` so the
+console stays embedded, version stamped from `git describe`), uploads the binary to the artifacts
+S3 bucket, then over **one SSM RunShellScript** makes the box pull it, verify sha256, back up the
+current binary (`/usr/local/bin/harbor.bak-<sha>-<ts>`), atomic-rename swap it in, and **recreate**
+the three transient units capturing each one's argv live from `/proc`. It verifies all units are
+`active`, no proc runs a `(deleted)` inode, ports `:443/:8444/:9445` listen, and `harbor fleet` runs.
+Commit first for a clean version stamp (a dirty tree stamps `-dirty`).
+
+Environment facts (overridable via `NCP_*` env vars):
+- **Harbor box** `i-0123456789abcdef0` (`ncp-harbor`), reached only via **SSM** (no direct SSH needed —
+  transfer goes through S3). Harbor runs as **transient `systemd-run --collect` units** owned by
+  `ec2-user`, NOT plain unit files: `ncp-core` (core-api :8444), `ncp-collect` (collect), `ncp-admin`
+  (admin-api/console :443 — needs `AmbientCapabilities=CAP_NET_BIND_SERVICE`). `pilot supervise`
+  manages **nebula only**, never harbor. Never `systemctl restart` these — a binary swap doesn't
+  update a running transient unit; you must stop + `systemd-run` again (the script does this).
+- **Artifacts bucket** `ncp-artifacts-123456789012` (the box has GetObject; workstation creds have PutObject).
+- **AWS creds**: gpg-decrypted from `~/aws-key-*.env.gpg` (auto-discovered; see the aws-creds-gpg note).
+  A first `gpg -d` in the session may prompt once to cache the passphrase.
+- **Rollback**: the previous binary is the `harbor.bak-*` file left on the box — `cp` it back over
+  `/usr/local/bin/harbor` and re-run with `--skip-build`, or rebuild the prior commit. Don't prune the `.bak`s blindly.
+
+NOT handled by the script — do these manually when the change needs them:
+- **Migrations are manual.** `serve` never runs `migrate.Up`. A change that adds a migration needs
+  `harbor migrate up` on the box (env-default DB flags from `/etc/profile.d/harbor-cli.sh`) — apply the
+  additive migration BEFORE swapping the binary.
+- **The gateway is a separate target** (Fargate distroless image): `deploy/prod/fargate/build-push.sh`
+  + `aws ecs update-service --force-new-deployment`. Only needed if the change touches gateway-linked
+  packages (`internal/enrollment` etc.). A harbor-only change does not require it.
+
 ## Critical gotchas
 
 - **Overlay CIDR = `100.64.0.0/16`** (CGNAT). Do NOT use `10.42/10.43` — those are **k3s defaults**
