@@ -614,6 +614,39 @@ func (e *Engine) currentCompletedGen(ctx context.Context, lane string) int {
 	return r.TargetVersion
 }
 
+// FloorCatchupGen is the steady-state convergence backstop for the release lanes
+// (nebula/pilot). It returns the completed-floor generation a host should converge
+// to when it is BEHIND that floor, and whether a catch-up is warranted.
+//
+// Unlike commandForLane, it is NOT membership-gated: a rollout's member set is a
+// point-in-time snapshot taken at Start (StartConfig.Hosts), so a host that enrolled
+// or RE-ENROLLED to a new overlay IP after that snapshot — or was simply absent from
+// it — is a member of no rollout and never receives an apply_bundle from *CommandFor,
+// leaving it on a stale binary forever even though genForLane already stamps the floor
+// gen into its bundle. This drives such stragglers to refetch.
+//
+// It defers to an active rollout: while the lane's latest rollout is canary|widening
+// the wave logic owns convergence, so this stays silent (out-of-wave members already
+// sit at the floor via prev). It only ever drives UP — currentCompletedGen excludes a
+// rolled-back target, so a host is never pulled onto a reverted generation. A floor of
+// 0 (no completed rollout on the lane) or a host already at/above the floor yields no
+// catch-up. Callers must still confirm the floor gen has an artifact for the host's
+// arch before commanding a refetch, or an unservable host would churn a no-op every beat.
+func (e *Engine) FloorCatchupGen(ctx context.Context, lane string, reportedGen int) (gen int, catchup bool) {
+	r, ok, err := e.current(ctx, lane)
+	if err != nil {
+		return 0, false
+	}
+	if ok && (r.State == StateCanary || r.State == StateWidening) {
+		return 0, false // an in-flight rollout owns convergence on this lane
+	}
+	floor := e.currentCompletedGen(ctx, lane)
+	if floor == 0 || reportedGen >= floor {
+		return 0, false
+	}
+	return floor, true
+}
+
 // Status returns the policy lane's current rollout and its hosts.
 func (e *Engine) Status(ctx context.Context) (Rollout, []Host, error) {
 	return e.StatusLane(ctx, LanePolicy)

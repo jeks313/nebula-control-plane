@@ -474,14 +474,14 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 
 	wire.WriteJSON(w, http.StatusOK, wire.HeartbeatResponse{
 		ProtocolVersion: wire.ProtocolVersion,
-		Commands:        s.commandsFor(ctx, dev.OverlayIP, req.AppliedBundleVersion, req.AppliedBlocklistVersion, appliedNebula, appliedPilot, certNotAfter, dev.GroupsGeneration, dev.IssuedGeneration),
+		Commands:        s.commandsFor(ctx, dev.OverlayIP, dev.GOOS, dev.GOARCH, req.AppliedBundleVersion, req.AppliedBlocklistVersion, appliedNebula, appliedPilot, certNotAfter, dev.GroupsGeneration, dev.IssuedGeneration),
 	})
 }
 
 // commandsFor decides the typed commands to return: the near-expiry renew
 // backstop (4.6) plus, for 6.6, an apply_bundle that drives the host toward its
 // rollout target version (or back to prev after a rollback).
-func (s *Server) commandsFor(ctx context.Context, overlayIP string, appliedVersion, appliedBlocklist, appliedNebula, appliedPilot int, certNotAfter, groupsGen, issuedGen int64) []wire.Command {
+func (s *Server) commandsFor(ctx context.Context, overlayIP, goos, goarch string, appliedVersion, appliedBlocklist, appliedNebula, appliedPilot int, certNotAfter, groupsGen, issuedGen int64) []wire.Command {
 	var cmds []wire.Command
 	// Renew backstop: near cert expiry (4.6) OR a pending group reassignment
 	// (groups_generation > issued_generation — ADR 0002). One CmdRenew covers both (renew
@@ -503,9 +503,38 @@ func (s *Server) commandsFor(ctx context.Context, overlayIP string, appliedVersi
 			cmds = append(cmds, cmd)
 		} else if cmd, ok := s.cfg.Rollout.PilotCommandFor(ctx, overlayIP, appliedPilot); ok {
 			cmds = append(cmds, cmd)
+		} else if cmd, ok := s.floorReconcile(ctx, goos, goarch, appliedNebula, appliedPilot); ok {
+			// Backstop for hosts that no active/completed rollout commands because they
+			// were never in its member snapshot (enrolled/re-enrolled after Start, or
+			// absent from it): drive any host running below the completed nebula/pilot
+			// floor up to it. Gated on arch-servability so an unservable host doesn't
+			// churn a no-op refetch every beat. See rollout.Engine.FloorCatchupGen.
+			cmds = append(cmds, cmd)
 		}
 	}
 	return cmds
+}
+
+// floorReconcile returns a single apply_bundle when the host is running below the
+// completed nebula- or pilot-lane floor AND the floor generation ships an artifact for
+// the host's arch (so the refetched bundle actually carries a newer tuple). nebula is
+// checked before pilot; one apply_bundle refreshes every lane, so at most one is emitted.
+func (s *Server) floorReconcile(ctx context.Context, goos, goarch string, appliedNebula, appliedPilot int) (wire.Command, bool) {
+	if s.cfg.NebulaReleases != nil {
+		if gen, ok := s.cfg.Rollout.FloorCatchupGen(ctx, rollout.LaneNebula, appliedNebula); ok {
+			if _, _, _, servable := s.cfg.NebulaReleases.Lookup(ctx, gen, goos, goarch); servable {
+				return wire.Command{Type: wire.CmdApplyBundle, BundleVersion: gen}, true
+			}
+		}
+	}
+	if s.cfg.PilotReleases != nil {
+		if gen, ok := s.cfg.Rollout.FloorCatchupGen(ctx, rollout.LanePilot, appliedPilot); ok {
+			if _, _, _, servable := s.cfg.PilotReleases.Lookup(ctx, gen, goos, goarch); servable {
+				return wire.Command{Type: wire.CmdApplyBundle, BundleVersion: gen}, true
+			}
+		}
+	}
+	return wire.Command{}, false
 }
 
 // handleRenew implements POST /v1/certs/renew (4.3): re-sign the calling

@@ -434,3 +434,75 @@ func TestOnlyOneActive(t *testing.T) {
 		t.Fatalf("second start err = %v, want ErrActiveExists", err)
 	}
 }
+
+// TestFloorCatchupGenDrivesNonMembers is the offline/re-enrolled convergence backstop:
+// a host that is a member of NO rollout (enrolled/re-enrolled after the Start snapshot,
+// or absent from it) still gets driven up to the completed floor when it reports behind
+// it — the case *CommandFor can't cover because it is membership-gated. FloorCatchupGen
+// defers to an in-flight rollout on the lane and never drives onto a rolled-back target.
+func TestFloorCatchupGenDrivesNonMembers(t *testing.T) {
+	eng, db, clk := newEngine(t)
+	ctx := context.Background()
+	members := []string{"100.64.0.1", "100.64.0.2"}
+
+	// No completed rollout yet: nothing to catch up to.
+	if _, ok := eng.FloorCatchupGen(ctx, rollout.LaneNebula, 0); ok {
+		t.Fatal("no completed rollout: FloorCatchupGen should be silent")
+	}
+
+	// Stage + complete gen 2 over gen 1 across the two members -> floor = 2.
+	if _, err := eng.Start(ctx, rollout.StartConfig{
+		Lane: rollout.LaneNebula, TargetVersion: 2, PrevVersion: 1, Hosts: members,
+		CanarySize: 1, Observe: 10 * time.Minute, MissingAfter: 3 * time.Minute, Actor: "alice",
+	}); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	heartbeatNeb(t, db, "100.64.0.1", 2, "healthy", clk.now())
+	eng.Evaluate(ctx) // canary widens
+	heartbeatNeb(t, db, "100.64.0.2", 2, "healthy", clk.now())
+	eng.Evaluate(ctx) // completes
+	if r, _, _ := eng.StatusLane(ctx, rollout.LaneNebula); r.State != rollout.StateCompleted {
+		t.Fatalf("state = %s, want completed", r.State)
+	}
+
+	// A host that was never a member (e.g. re-enrolled to a fresh overlay IP) and is
+	// running the old gen gets driven up to the floor, even though no rollout row
+	// references it.
+	if gen, ok := eng.FloorCatchupGen(ctx, rollout.LaneNebula, 1); !ok || gen != 2 {
+		t.Fatalf("non-member behind floor: got (%d,%v), want (2,true)", gen, ok)
+	}
+	// A host already at (or ahead of) the floor is left alone.
+	if _, ok := eng.FloorCatchupGen(ctx, rollout.LaneNebula, 2); ok {
+		t.Fatal("host at floor: FloorCatchupGen should be silent")
+	}
+	if _, ok := eng.FloorCatchupGen(ctx, rollout.LaneNebula, 3); ok {
+		t.Fatal("host ahead of floor: FloorCatchupGen should be silent")
+	}
+	// Lanes are independent: the pilot lane has no completed rollout.
+	if _, ok := eng.FloorCatchupGen(ctx, rollout.LanePilot, 0); ok {
+		t.Fatal("other lane with no completed rollout: should be silent")
+	}
+
+	// While a NEW rollout is in flight on the lane, the wave logic owns convergence,
+	// so the backstop stands down even for a straggler behind the old floor.
+	if _, err := eng.Start(ctx, rollout.StartConfig{
+		Lane: rollout.LaneNebula, TargetVersion: 3, PrevVersion: 2, Hosts: members,
+		CanarySize: 1, Observe: 10 * time.Minute, MissingAfter: 3 * time.Minute, Actor: "alice",
+	}); err != nil {
+		t.Fatalf("start gen3: %v", err)
+	}
+	if _, ok := eng.FloorCatchupGen(ctx, rollout.LaneNebula, 1); ok {
+		t.Fatal("in-flight rollout: FloorCatchupGen should defer")
+	}
+
+	// The gen-3 canary goes bad and rolls back; the floor stays 2 (a reverted target is
+	// excluded), so a straggler is driven to 2 — never onto the bad gen 3.
+	heartbeatNeb(t, db, "100.64.0.1", 3, "unhealthy", clk.now())
+	eng.Evaluate(ctx)
+	if r, _, _ := eng.StatusLane(ctx, rollout.LaneNebula); r.State != rollout.StateRolledBack {
+		t.Fatalf("state = %s, want rolledback", r.State)
+	}
+	if gen, ok := eng.FloorCatchupGen(ctx, rollout.LaneNebula, 1); !ok || gen != 2 {
+		t.Fatalf("after rollback, non-member behind floor: got (%d,%v), want (2,true)", gen, ok)
+	}
+}
