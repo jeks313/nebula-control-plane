@@ -148,7 +148,8 @@ NOT handled by the script — do these manually when the change needs them:
 
 **M0–M6 complete; M7.1 done; ADR 0005 (pull-based gateways) DONE (Phases 1–3) — the next code step
 is back on the milestone track at 7.2.** A live demo (terraform apply + bootstrap-genesis.sh) can
-run now on the real off-mesh topology. Schema at migration **000015**. M0 feasibility PASSED
+run now on the real off-mesh topology. Schema ceiling on disk is **000031** (next free: **000032**;
+the older "000015" here was stale). M0 feasibility PASSED
 (2026-06-11: SoftHSM P256 CA,
 tunnel forms — design §M0 results; spike under `spike/m0/`, `make m0-*`). The trust
 spine is built end-to-end **on Linux** (Windows/macOS parity deferred to M10):
@@ -208,6 +209,36 @@ offboarding (depends on M9 OIDC — scaffolding until then). Decisions logged th
   (no revert command). `harbor blocklist add|remove` stage it; `harbor blocklist status` shows
   convergence. *Tests:* `internal/rollout` `TestConcurrentLanesAndBlocklistFreeze`; integration
   `TestConfigFetchNoReissueCarriesBlocklist`, `TestHeartbeatDrivesBlocklistConvergence`.
+
+### ADR 0014 — overlay naming & split-horizon DNS (PROPOSED design; NO code yet)
+
+Design-only decision record (committed 2026-07-16, `docs/Nebula Control Plane - ADR 0014 - Overlay
+Naming and Split-Horizon DNS.md`, mirrored to the vault). A net-new, **un-milestoned** capability —
+auto-DNS (every node a unique name matching its cert) + admin-defined split-horizon forward zones.
+**Nothing is built**; this is the ADR a future milestone rides. Key decisions:
+- **Resolver = a per-host EMBEDDED Go resolver in Pilot** (`miekg/dns`, already an indirect dep →
+  **zero new release-signing TCB**), answering from the cached signed bundle. Chosen over Nebula's
+  built-in `lighthouse.dns` (no forwarding/split-horizon) and a central `unbound` pair (a P3
+  dependency, and per-group confidentiality would degrade to a source-IP-ACL second policy engine).
+  `KillMode=process` + ADR 0003 re-adopt mean a resolver crash can't drop the tunnel.
+- **Phase 0 = the linchpin: cert names are NOT unique today.** Host-asserted `RequestedName`, signer
+  only rejects empty, and `ipam.ensureDevice`'s `FirstOrCreate` silently collapses same-named hosts
+  onto one `devices` row. Must add normalize→DNS-label + `overlay_ip`-anchored uniqueness (a
+  `dns_names` table) BEFORE any name is served. Standalone correctness win independent of DNS.
+- **Delivery = the signed bundle** (new `bundle.DNS`, two fail-open build sites, sorted/byte-stable),
+  a `dns` rollout lane, dual-control forward-zone publish. First migration would be **000032**.
+- **Ask C (default-forward path):** non-mesh queries go to **per-netblock** default forwarders
+  (resolved from `enrollments.sub_range`) → fleet default → the host's captured pre-existing
+  upstreams (non-destructive) → SERVFAIL. Answers "where does everything else go" once Pilot is first-stop.
+- **Scale posture:** **SCOPED is the fleet default** (OS split-DNS routes only mesh + forward zones to
+  Pilot); **PRIMARY (Pilot as the host's default resolver) is never the fleet default.** The shared
+  `unbound` forward-cache (co-located on lighthouses) flips **default-ON ≥ ~1k hosts / metered
+  upstreams** with a mandatory direct-fallback; the resolver runs as a supervised child in its own
+  cgroup at scale.
+- **TLS:** name the mesh a **subdomain you own** (`mesh.<yourdomain>`) so the existing `autotls`
+  DNS-01 flow issues public certs for names that resolve only on-mesh; `.internal` forces a private CA.
+Phases: 0 name-hardening → 1 auto A/PTR (Linux) → 2 forward zones + governance + scale items →
+3 cross-platform + console → 4 deferred. Open questions #1–#8 live in the ADR (mesh apex, posture, …).
 
 ### ADR 0005 — pull-based enrollment gateways (current divergence)
 
