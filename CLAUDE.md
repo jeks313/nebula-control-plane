@@ -146,20 +146,26 @@ NOT handled by the script — do these manually when the change needs them:
 > implementation plan (per-step `✅` + "Proven:" notes); for *what/why* the design plan.
 > This is a fast summary — re-read those for exact state.
 
-**M0–M6 complete; M7.1 done; ADR 0005 (pull-based gateways) DONE (Phases 1–3) — the next code step
-is back on the milestone track at 7.2.** A live demo (terraform apply + bootstrap-genesis.sh) can
+**Milestone track: M0–M4 + M6 complete; M5 PARTIAL; M7 is the frontier (7.1 done · 7.2 engine+CLI
+built, no console · 7.3 partial · 7.4 blocked on M9 OIDC); M8 (CA rotation) is 100% unbuilt; M9/M10
+PARTIAL. Development forked off the linear track into ADR-driven parallel streams — ADRs 0003–0011
+have all shipped or are code-complete (per-ADR built-state below).** A live demo (terraform apply + bootstrap-genesis.sh) can
 run now on the real off-mesh topology. Schema ceiling on disk is **000031** (next free: **000032**;
 the older "000015" here was stale). M0 feasibility PASSED
 (2026-06-11: SoftHSM P256 CA,
-tunnel forms — design §M0 results; spike under `spike/m0/`, `make m0-*`). The trust
-spine is built end-to-end **on Linux** (Windows/macOS parity deferred to M10):
+tunnel forms — design §M0 results; spike under `spike/m0/`, `make m0-*`). **The poc *is* the prod
+stack** (Aurora + KMS CA/config-signing keys-never-on-disk + ACME edge TLS + distroless Fargate
+gateway & lighthouse, SSM-only). The trust spine is built end-to-end **on Linux** (Windows/macOS =
+M10, PARTIAL):
 - **M1 Pilot** — supervises `nebula`, host keygen, enroll, renew, render, drift-revert.
 - **M2 Harbor Core** — GORM store (sqlite/postgres) + hash-chained audit, IPAM (quarantine
   built), Signer (SoftHSM/PKCS#11 + circuit-breaker), secrets, reusable dual-control/RBAC.
 - **M3 enrollment** — public gateway, stateless nonce, durable queue + result store, token
   enroll, async poll, approval queue, genesis ceremony.
 - **M4 lifecycle** — Core-as-mesh-node, renewal + jitter, heartbeat, drift, P3 chaos.
-- **M5 attestation** — AWS sigv4 `GetCallerIdentity` enroll + dual-control cloud-trust.
+- **M5 attestation** — ⚠ **PARTIAL:** AWS sigv4 `GetCallerIdentity` enroll (5.1/5.2) + immutable-fact
+  group map (5.5, `internal/cloudtrust`, live) done; **open:** IID cross-check (5.3), one-enroll-per-
+  instance (5.4), Azure attested data (5.6), PrivateLink (5.7).
 - **M6 policy** — group DSL → compiler → JWS-signed firewall in the bundle, compile-time
   invariants, dual-control publish, canary rollout + auto-rollback, drift-revert, lighthouse
   registry.
@@ -181,8 +187,10 @@ offboarding (depends on M9 OIDC — scaffolding until then). Decisions logged th
   revert — the blocklist set is always the latest active set, an operator lifts a bad entry.
   (No per-version snapshots.) `apply_bundle` now means "refetch the latest bundle" via `GET
   /v1/config`.
-- **2.12 device-state machine is unbuilt** (the `devices` table is id/name/created_at only); it
-  is a hard prerequisite for 7.3.
+- **2.12 device lifecycle is now BUILT (partial):** the reaper (`internal/reaper`, migrations 000025
+  `enrollments.ephemeral` + 000026 `devices.reaped_at`/`reap_reason`) soft-marks + reclaims cert-lapsed
+  hosts; a reaped-but-live host self-heals on check-in (`coreapi` heartbeat-self-heal + IP reconcile).
+  Still a soft-mark, not yet a full lifecycle state column.
 
 - ✅ **7.1a — blocklist in the signed bundle (data path).** `internal/revocation.Registry`
   (Add/Lift/List/ActiveFingerprints — normalized lowercase-hex, **sorted** for byte-stable
@@ -209,6 +217,77 @@ offboarding (depends on M9 OIDC — scaffolding until then). Decisions logged th
   (no revert command). `harbor blocklist add|remove` stage it; `harbor blocklist status` shows
   convergence. *Tests:* `internal/rollout` `TestConcurrentLanesAndBlocklistFreeze`; integration
   `TestConfigFetchNoReissueCarriesBlocklist`, `TestHeartbeatDrivesBlocklistConvergence`.
+- 🟢 **7.2 — revoke-as-DoS guards: engine + CLI + dual-control BUILT; admin-API/console PENDING.**
+  `internal/revocation` has `BulkRevokeKind` (two-person quorum via `dualcontrol`), a DB-backed rate
+  limit (`MaxBulkPerWindow=3`/`BulkWindow`, counts *operations* not rows), `ErrControlPlaneProtected`
+  (can't blocklist a control-plane/lighthouse fingerprint), `ErrBulkTooLarge`. Wired to a break-glass
+  CLI `harbor blocklist bulk-revoke -operator-a/-operator-b -fingerprints` (`cmd/harbor/bulkrevoke.go`,
+  tested). **Still open:** the admin-API route + RBAC perm + step-up MFA + the **UI-5** blocklist /
+  propagation-status console view (no Blocklist page in `Shell.tsx` nav yet — the last visible gap).
+- 🟡 **7.3 — decommission: reaper slice BUILT, cloud-terminate hook NOT.** `internal/reaper`
+  (default-on; `-reap-disable`/`-reap-dry-run`) reclaims a cert-lapsed host's overlay IP, prunes its
+  heartbeat, soft-marks the device — **never** reaps a valid-cert / control-plane / central-block host,
+  **never** blocklists; a reaped-but-live host **self-heals** on check-in (`coreapi` steps 6–8, audited).
+  **Still open:** an explicit `harbor decommission`, a cloud-terminate/CloudTrail-driven auto-reap
+  (today's trigger is cert-lapse/time, not cloud inventory), and hard-delete of reaped rows.
+- 🔴 **7.4 — IdP offboarding: NOT STARTED** (needs the M9 laptop OIDC device-code flow, itself unbuilt).
+
+### ADR-driven parallel streams (shipped/code-complete since 7.1b)
+
+The linear track forked into ADR streams. Net state (✅ built · ◐ code-complete-but-off · 🟡 partial · ✎ design-only):
+- ✅ **ADR 0003 — pilot + nebula self-update/distribution.** `internal/{nebularelease,nebulaupdate,
+  pilotrelease,pilotupdate,pilotservice,binverify}`; migrations 000016/000017 (release registries),
+  000020/000021 (per-arch + `host_arch`). Rollout engine now has **four lanes** (`LanePolicy`/
+  `LaneBlocklist`/`LaneNebula`/`LanePilot`; nebula/pilot *revert* on rollback, unlike blocklist freeze).
+  `harbor nebula|pilot` + release-ingest; console **Releases** page; publishing runbook.
+- ◐ **ADR 0004 / 0009 — SSO user enrollment + control-plane trust-zone separation.** `internal/
+  {usertrust,ssoassert,autotls}`; `harbor usertrust publish`; `pilot install/enroll --sso` (loopback
+  auth-code); Entra MFA via the `amr` claim (`adminauth`); off-mesh SSO portal + `checkIssuanceBind`
+  invariant. **Code-complete but OFF BY DEFAULT** on the poc (runs `-mock-idp`).
+- ✅ **ADR 0005 — pull-based enrollment gateways** (own subsection below) + **gateway health**
+  monitoring (migration 000031 `gateway_health`, `internal/gatewayhealth`, console Gateways pane).
+- ✅ **ADR 0006 — distroless Fargate/lighthouse images** (Phases 1–2; Phase 3 digest-pin/supply-chain open).
+- ✅ **ADR 0007 — production deploy + HA fixes.** `deploy/prod/` (terraform foundation+app; monitoring:
+  prometheus/loki/alertmanager/grafana/alloy). HA substrate: shared nonce-replay guard (000018,
+  `internal/replay`) + fleet-wide signer circuit breaker (000019, `signer/breaker_sql.go`). **Still
+  single-AZ** (`desired_count=1`); durable enrollment queue still SQLite.
+- ✅ **ADR 0008 — client install & bootstrap** (Phases 1/3/4: idempotent `pilot install`, per-OS
+  service backends, multi-mesh, `uninstall -purge`). Phase 2 (org-signed meshinfo / org-root pin /
+  console "Generate installer") unbuilt.
+- ✅ **ADR 0010 — IPAM named netblocks** (SHIPPED, all phases): `internal/netblock`, migrations 000022/
+  000023/000029, `harbor ipam`, console **IPAM** page, per-netblock metrics.
+- 🟡 **ADR 0011 — declarative config store** (Phase 1 shipped): `internal/config` + migration 000027
+  `config_store` (first-class set/get for policy/cloudtrust/usertrust; propose/approve handlers removed →
+  `PUT/GET /config/{kind}` + `*:manage` perms). Phase 2 (export/import, GitOps, drift, TF provider) unbuilt.
+- ✅ **ADR 0002 / 0013 — group reassignment.** Migration 000030 (`desired_groups`/`groups_generation`/
+  `issued_generation`); single-device `PATCH /devices/{ip}/groups` (`device:manage`); **bulk
+  name-pattern re-group** (`adminapi/device_regroup_bulk.go`: dry-run preview + guarded apply, cap 100,
+  dual-control ≥25 but **opt-in/off by default**); console **Devices** bulk UI. *(Both ADRs read
+  "proposed" but Phase A is shipped + tested; ADR 0013 Phase B enforceable-reductions is not.)*
+- ✎ **ADR 0012 — pilot fleet metrics: DESIGN-ONLY.** Harbor-component + gateway-health metrics exist
+  (those are ADR 0007/0005), but the ADR-0012 subject — pilots pushing nebula `:4280` metrics on the
+  heartbeat → `ncp_fleet_*` — is **unbuilt** (three forks open). The pilot leaf tier is the obs gap.
+- ✅ **Lighthouse HA + scheduled cert rotation + relay** (extends M4/M6): migration 000028
+  `lighthouse_rotations`, `harbor lighthouse rotate` (in-place re-sign), multi-LH blip-free rotation,
+  registry→fleet propagation, lighthouse-as-Nebula-relay (`use_relays` for symmetric-NAT off-cloud hosts).
+- ✎ **ADR 0014 — overlay naming & split-horizon DNS: DESIGN-ONLY** (detail below).
+
+### M8 · M9 · M10 status
+
+- **M8 — CA & key rotation: 100% UNBUILT** (the largest wholly-untouched milestone). No CA-rotation code
+  exists; the KMS CA + config-signing keys are live, but multi-CA bundle distribution, the CA lifecycle
+  state machine, signing cut-over/drain, retirement, config-key rotation, the emergency path, and the
+  staging drill are all unbuilt. *(The scheduled lighthouse-cert rotation above is 6.8-adjacent, NOT
+  M8 CA rotation.)*
+- **M9 — hardening & operations: PARTIAL (delivered via ADR 0007, not per-step ticks).** The poc IS the
+  prod stack (above); ✅ 9.6 signed waved self-update (ADR 0003); 🟡 HA substrate present but single-AZ;
+  🟡 SSM break-glass path live (no dual-operator drill). ❌ 9.1 laptop OIDC device-code flow (blocks 7.4),
+  9.3/9.4/9.7/9.8/9.10 open.
+- **M10 — Windows + macOS parity: PARTIAL (past stubs).** Real Windows **SCM** backend
+  (`pilotservice/service_windows.go`, `svc.Run`), macOS launchd scaffold, **Wintun** self-staging
+  (`nebulaboot/embed_wintun_windows.go`), opt-in SSM-only Windows client on prod. **Still open:**
+  host-key DACL/DPAPI at-rest, least-priv service account (runs LocalSystem), MSI + Authenticode/
+  notarization, Win/mac CI runners, macOS Keychain, laptop OIDC.
 
 ### ADR 0014 — overlay naming & split-horizon DNS (PROPOSED design; NO code yet)
 
@@ -297,12 +376,15 @@ bootstrap; reuse result-TTL; pinned-cert-sufficient).
 Note: the durable queue (`internal/queue`) is now safe for concurrent first-open by several processes
 (the co-located gateway+worker+admin) — AutoMigrate tolerates the benign create race.
 
-**After ADR 0005: back to 7.2 — revoke-as-DoS guards.** Reuse `internal/dualcontrol` (register a
-`revoke.bulk` Kind) for bulk-revoke (quorum ≥2) + a DB-backed rate limit (model on `signer` breaker,
-NOT the in-memory `internal/ratelimit`); refuse blocklisting a `control-plane`/lighthouse fingerprint
-— enforced server-side at BOTH propose and commit (resolve groups via `adminapi` `fleetGroupMap` +
-`lighthouse.Registry` + `policy.GroupControlPlane`/`GroupLighthouse`). Add the admin API routes +
-RBAC perm + step-up MFA, and the UI-5 blocklist/propagation-status console view.
+**Genuinely-unbuilt frontier (what a next session could pick up):**
+- **Finish 7.2** — the engine/CLI/dual-control/rate-limit/P10-guard are done; add the admin-API route +
+  RBAC perm + step-up MFA + the **UI-5** blocklist/propagation-status console view (the last visible gap).
+- **7.3** — an explicit `harbor decommission` + a cloud-terminate/CloudTrail-driven auto-reap (today's
+  reaper triggers on cert-lapse, not cloud inventory) + hard-delete.
+- **M8 — CA & key rotation** — the biggest greenfield milestone, entirely unbuilt.
+- **7.4 / M9 9.1** — laptop OIDC device-code flow (unblocks IdP offboarding).
+- **ADR 0012** (pilot fleet metrics) and **ADR 0014** (overlay DNS) are design-only.
+- **M10** — the Windows/macOS hardening tail (DACL/DPAPI, Authenticode/notarization, CI runners, least-priv).
 
 ## Conventions
 
