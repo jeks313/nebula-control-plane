@@ -303,7 +303,30 @@ func FetchConfig(ctx context.Context, p RenewParams) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("enrollclient: %w", err)
 	}
-	if err := (Params{Layout: p.Layout}).writeConfigArtifacts(b, cr.Bundle); err != nil {
+	lp := Params{Layout: p.Layout}
+	// Host-bind (anti cross-device replay): a config-only bundle is compiled for a SPECIFIC
+	// host (its firewall/groups), so applying one minted for a DIFFERENT host would swap in
+	// the wrong policy. Bind by OUR overlay IP (from our own cert — stable across renews),
+	// never by anything the fetched bundle asserts about itself. Unlike enroll/renew this
+	// path does not verifyCert (it deliberately does not rotate the cert), so this is the
+	// binding that keeps a replayed/cross-host bundle from being applied.
+	myIP, err := lp.overlayIPFromCert()
+	if err != nil {
+		return Result{}, err
+	}
+	if b.Device.OverlayIP != myIP {
+		return Result{}, fmt.Errorf("enrollclient: refusing a config bundle bound to %q, not this host (%q)", b.Device.OverlayIP, myIP)
+	}
+	// Anti-rollback (anti blocklist-downgrade replay): refuse a bundle whose blocklist-lane
+	// version is STRICTLY LOWER than the one already applied — a stale/replayed bundle used
+	// to DROP a revoked fingerprint from pki.blocklist. The blocklist version only advances
+	// (an add or a lift bumps it), unlike the policy BundleVersion (which legitimately
+	// decreases on an auto-rollback), so only this lane is guarded. Refusing is SAFE for
+	// availability: the host keeps its current, already-newer-or-equal config.
+	if applied, ok := lp.appliedBlocklistVersion(p.PinnedConfigPub); ok && b.BlocklistVersion < applied {
+		return Result{}, fmt.Errorf("enrollclient: refusing blocklist rollback (bundle blocklist_version %d < applied %d) — possible replay/downgrade", b.BlocklistVersion, applied)
+	}
+	if err := lp.writeConfigArtifacts(b, cr.Bundle); err != nil {
 		return Result{}, err
 	}
 	return Result{Status: "config", OverlayIP: b.Device.OverlayIP}, nil
@@ -430,6 +453,41 @@ func verifyCert(b bundle.Bundle, pubBytes []byte) error {
 		return fmt.Errorf("enrollclient: issued cert is not bound to our key")
 	}
 	return nil
+}
+
+// overlayIPFromCert returns this host's overlay IP, read from its on-disk cert. The IP is
+// stable across renews (a renew keeps the same identity/IP while rotating the key), so it
+// is the right key to host-bind a CONFIG refresh — unlike the cert/key, which rotate.
+func (p Params) overlayIPFromCert() (string, error) {
+	pem, err := os.ReadFile(p.Layout.HostCert())
+	if err != nil {
+		return "", fmt.Errorf("enrollclient: read host cert: %w", err)
+	}
+	leaf, _, err := cert.UnmarshalCertificateFromPEM(pem)
+	if err != nil {
+		return "", fmt.Errorf("enrollclient: parse host cert: %w", err)
+	}
+	nets := leaf.Networks()
+	if len(nets) == 0 {
+		return "", fmt.Errorf("enrollclient: host cert has no networks")
+	}
+	return nets[0].Addr().String(), nil
+}
+
+// appliedBlocklistVersion returns the blocklist-lane version of the currently-applied
+// bundle (the on-disk, pinned-key-verified bundle.json). ok=false when there is no prior
+// bundle or it can't be verified (a fresh host / first apply) — the anti-rollback guard
+// then fails OPEN (there is nothing to compare against).
+func (p Params) appliedBlocklistVersion(pinned *ecdsa.PublicKey) (int, bool) {
+	raw, err := os.ReadFile(p.Layout.Bundle())
+	if err != nil {
+		return 0, false
+	}
+	b, err := bundle.Verify(raw, pinned)
+	if err != nil {
+		return 0, false
+	}
+	return b.BlocklistVersion, true
 }
 
 func (p Params) writeArtifacts(b bundle.Bundle, rawBundleJWS []byte) error {
