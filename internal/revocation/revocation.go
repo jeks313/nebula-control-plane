@@ -45,7 +45,14 @@ const (
 // Errors callers can branch on.
 var (
 	ErrNoFingerprint = errors.New("revocation: fingerprint is required")
-	ErrAlreadyActive = errors.New("revocation: fingerprint is already blocklisted")
+	// ErrInvalidFingerprint is returned when a fingerprint is not a canonical Nebula
+	// cert fingerprint (64 lowercase hex chars). Nebula enforces the blocklist by EXACT
+	// string match against hex.EncodeToString(sha256(cert)), so a colon-separated /
+	// uppercase / truncated value (e.g. pasted from `openssl x509 -fingerprint`) would be
+	// stored and shown "active" yet match NOTHING — a silent failure of the emergency
+	// control. We reject it at the write path so a revoke can never quietly no-op.
+	ErrInvalidFingerprint = errors.New("revocation: fingerprint must be 64 hex chars (a Nebula cert fingerprint: lowercase, no colons)")
+	ErrAlreadyActive      = errors.New("revocation: fingerprint is already blocklisted")
 	// ErrControlPlaneProtected is the always-on P10 guard: a fingerprint resolving
 	// to a control-plane/lighthouse host (reserved group, or — when configured — an
 	// overlay IP inside the central reserved block) can never be blocklisted, no
@@ -127,6 +134,23 @@ func normFingerprint(fp string) string {
 	return strings.ToLower(strings.TrimSpace(fp))
 }
 
+// validFingerprint reports whether fp is a canonical Nebula cert fingerprint: exactly
+// 64 lowercase hex chars (hex.EncodeToString(sha256(...))). Callers pass the
+// already-normalized (lowercased/trimmed) value. This is what nebula's pki.blocklist
+// matches by exact string, so anything else can never take effect.
+func validFingerprint(fp string) bool {
+	if len(fp) != 64 {
+		return false
+	}
+	for i := 0; i < len(fp); i++ {
+		c := fp[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
 // Add blocklists a cert fingerprint. If a lifted row for the same fingerprint
 // exists it is re-activated; an already-active fingerprint returns
 // ErrAlreadyActive (idempotent-friendly: callers may treat it as success).
@@ -139,6 +163,13 @@ func (r *Registry) Add(ctx context.Context, fingerprint, reason, actor string) (
 	fp := normFingerprint(fingerprint)
 	if fp == "" {
 		return Row{}, ErrNoFingerprint
+	}
+	// Reject anything that is not a canonical 64-hex fingerprint BEFORE writing a row —
+	// otherwise a malformed value (colons / uppercase / truncation) is stored and shown
+	// "active" but can never match nebula's exact-string blocklist, silently no-op'ing the
+	// revocation (the operator believes the host is off the mesh; it is not).
+	if !validFingerprint(fp) {
+		return Row{}, fmt.Errorf("%w: %q", ErrInvalidFingerprint, fingerprint)
 	}
 	if err := r.protectControlPlane(ctx, fp); err != nil {
 		return Row{}, err
@@ -256,6 +287,12 @@ func (r *Registry) applyBulk(ctx context.Context, spec BulkRevokeSpec, actor str
 		fp := normFingerprint(raw)
 		if fp == "" || seen[fp] {
 			continue
+		}
+		// A malformed fingerprint fails the WHOLE bulk (nothing applied), rather than
+		// silently skipping it — a partial-with-a-silent-hole bulk revoke is the same
+		// false-confidence failure as the single-add path (see ErrInvalidFingerprint).
+		if !validFingerprint(fp) {
+			return fmt.Errorf("%w: %q", ErrInvalidFingerprint, raw)
 		}
 		seen[fp] = true
 		fps = append(fps, fp)
