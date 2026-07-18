@@ -8,6 +8,7 @@ import (
 
 	"github.com/jeks313/nebula-control-plane/internal/joinkey"
 	"github.com/jeks313/nebula-control-plane/internal/lighthouse"
+	"github.com/jeks313/nebula-control-plane/internal/policy"
 	"github.com/jeks313/nebula-control-plane/internal/rollout"
 	"gorm.io/gorm"
 )
@@ -313,6 +314,15 @@ func (s *Server) handleJoinKeyCreate(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusBadRequest, "name required", "the 'name' field is empty")
 		return
 	}
+	// A join key may not grant a reserved group (control-plane/lighthouse): those
+	// identities bypass the fleet firewall and are revocation-immune, so they are minted
+	// only by genesis / lighthouse-mint — never self-service via enrollment. Early 400
+	// here (the enrollment issue() chokepoint is the load-bearing backstop).
+	if policy.GrantsReservedGroup(b.Groups) {
+		writeProblem(w, http.StatusBadRequest, "reserved group",
+			"join keys may not grant a reserved group (control-plane/lighthouse)")
+		return
+	}
 	secret, jk, err := joinkey.Create(r.Context(), s.cfg.Store, joinkey.Params{
 		Name: b.Name, Groups: b.Groups, SubRange: b.SubRange, MaxUses: b.MaxUses,
 		TTL: time.Duration(b.TTLSeconds) * time.Second, AutoIssue: b.AutoIssue,
@@ -351,6 +361,12 @@ func (s *Server) handleJoinKeyUpdate(w http.ResponseWriter, r *http.Request) {
 		TTLSeconds   *int      `json:"ttl_seconds"`
 	}
 	if !readJSON(w, r, &b) {
+		return
+	}
+	// Can't PATCH a key into granting a reserved group either (see handleJoinKeyCreate).
+	if b.Groups != nil && policy.GrantsReservedGroup(*b.Groups) {
+		writeProblem(w, http.StatusBadRequest, "reserved group",
+			"join keys may not grant a reserved group (control-plane/lighthouse)")
 		return
 	}
 	p := joinkey.UpdateParams{

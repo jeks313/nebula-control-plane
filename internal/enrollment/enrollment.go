@@ -61,6 +61,12 @@ var (
 	ErrMethod     = errors.New("enrollment: unsupported method")
 	ErrNotPending = errors.New("enrollment: not a pending enrollment")
 	ErrQuota      = errors.New("enrollment: join-key enrollment quota exceeded")
+	// ErrReservedGroup is the enrollment CHOKEPOINT refusal: ordinary enrollment (any
+	// method, and admin Approve) may never issue a reserved group (control-plane /
+	// lighthouse). Those identities bypass the fleet firewall and are revocation-immune,
+	// so they are minted ONLY by the genesis ceremony and `harbor lighthouse-mint`, which
+	// sign via the signer directly and never pass through this consumer.
+	ErrReservedGroup = errors.New("enrollment: refusing to issue a reserved group (control-plane/lighthouse) via enrollment")
 
 	// SSO (oidc/saml) enrollment outcomes (ADR 0004; decisions S5–S8). All terminal
 	// for THIS attempt — a denied SSO enrollment is acked, never redelivered (the
@@ -292,7 +298,7 @@ func Terminal(err error) bool { return terminal(err) }
 // vs. a transient/infra failure (retry).
 func terminal(err error) bool {
 	for _, t := range []error{
-		ErrBadRequest, ErrSignature, ErrNonce, ErrReplay, ErrMethod, ErrQuota,
+		ErrBadRequest, ErrSignature, ErrNonce, ErrReplay, ErrMethod, ErrQuota, ErrReservedGroup,
 		joinkey.ErrNotFound, joinkey.ErrExpired, joinkey.ErrExhausted,
 		// Attestation outcomes are all terminal for THIS attempt. A bad/forged/
 		// un-allowlisted attestation will never succeed; an STS-unavailable error also
@@ -985,6 +991,19 @@ func (c *Consumer) certTTL(ephemeral bool) time.Duration {
 // ephemeral shortens the cert validity (certTTL) for an ephemeral-join-key host; it is
 // the join-key Ephemeral flag threaded through from processToken / re-derived on Approve.
 func (c *Consumer) issue(ctx context.Context, actor, deviceName string, pubBytes []byte, groups []string, netblockName, method string, ephemeral bool) (ip netip.Addr, certPEM []byte, fingerprint string, notAfter time.Time, err error) {
+	// CHOKEPOINT (P10): ordinary enrollment must NEVER mint a reserved group
+	// (control-plane/lighthouse). All auto-issue methods (token/aws-sigv4/sso) AND admin
+	// Approve funnel through here, so this single guard closes every enrollment route,
+	// independent of the admin perimeter (join keys / trust configs are also guarded there).
+	// A reserved-group identity bypasses the fleet firewall AND is revocation-immune, so it
+	// may only be minted by genesis / `harbor lighthouse-mint` (which sign via the signer
+	// directly, not through this consumer). Refuse BEFORE allocating an IP or touching the CA.
+	if policy.GrantsReservedGroup(groups) {
+		gj, _ := json.Marshal(groups)
+		_ = c.audit(ctx, "system", "enroll-reserved-group-refused", deviceName,
+			fmt.Sprintf(`{"groups":%s,"method":%q,"actor":%q}`, gj, method, actor))
+		return netip.Addr{}, nil, "", time.Time{}, fmt.Errorf("%w: %s", ErrReservedGroup, gj)
+	}
 	ip, err = c.cfg.Allocator.Allocate(ctx, deviceName, netblockName, method)
 	if err != nil {
 		// An exhaustion denial is a clean terminal "no addresses available" — surface
