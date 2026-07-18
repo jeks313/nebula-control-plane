@@ -29,6 +29,7 @@ func (e enrollEnv) coreAPI() http.Handler {
 		CABundlePEM: e.caPEM, Pool: e.pool, CertLifetime: 24 * time.Hour,
 		Lighthouses:     []bundle.Lighthouse{{OverlayIP: "100.64.0.1", PublicAddrs: []string{"1.2.3.4:4242"}}},
 		BlocklistSource: e.rev.ActiveFingerprints,
+		Revocation:      e.rev, // renew must refuse a revoked host (M7.1 durability)
 		Rollout:         rollout.New(e.store.DB, nil),
 	}).Handler()
 }
@@ -199,6 +200,48 @@ func issuedRow(t *testing.T, e enrollEnv, ip string) enrollment.Enrollment {
 		t.Fatalf("reload issued enrollment at %s: %v", ip, err)
 	}
 	return row
+}
+
+// TestRenewRefusedForRevokedHost is the M7.1-durability fix: once a host's CURRENT
+// fingerprint is blocklisted, coreapi.handleRenew refuses to re-sign it — so a revoked
+// host cannot rotate to a fresh, un-blocklisted fingerprint and evade revocation. (Before
+// the fix, renew authenticated by source IP + status='issued' only and never consulted
+// the revocation registry, so this returned 200 with a new cert.)
+func TestRenewRefusedForRevokedHost(t *testing.T) {
+	e := setupEnroll(t)
+	ctx := context.Background()
+	api := e.coreAPI()
+
+	// Enroll an ordinary 'web' host -> issued at an overlay IP with a persisted fingerprint.
+	secret, _, _ := joinkey.Create(ctx, e.store, joinkey.Params{Name: "k", Groups: []string{"web"}, MaxUses: 0, AutoIssue: true}, time.Now())
+	res, err := e.cons.Process(ctx, e.candidate(t, secret, "target"))
+	if err != nil || res.Status != "issued" {
+		t.Fatalf("enroll: %v %s", err, res.Status)
+	}
+	ip := res.OverlayIP
+	fp := issuedRow(t, e, ip).Fingerprint
+
+	// A renew BEFORE revocation succeeds (baseline).
+	body, _ := signRenew(t)
+	if rec := renewReq(t, api, body, ip); rec.Code != http.StatusOK {
+		t.Fatalf("pre-revocation renew status = %d; %s", rec.Code, rec.Body)
+	}
+	// The renew rotated the fingerprint; blocklist the NEW current one.
+	fp = issuedRow(t, e, ip).Fingerprint
+	if _, err := e.rev.Add(ctx, fp, "compromised — REVOKE", "operator"); err != nil {
+		t.Fatalf("blocklist add: %v", err)
+	}
+
+	// Now renew must be REFUSED (403 account_not_allowed) — the revoked host cannot mint a
+	// fresh cert. And no new fingerprint was stamped (the device row is unchanged).
+	body2, _ := signRenew(t)
+	rec := renewReq(t, api, body2, ip)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("revoked renew status = %d, want 403; body=%s", rec.Code, rec.Body)
+	}
+	if post := issuedRow(t, e, ip).Fingerprint; post != fp {
+		t.Fatalf("revoked renew rotated the fingerprint (%s -> %s) — it must not re-sign", fp, post)
+	}
 }
 
 func TestRenewFromWrongIPRejected(t *testing.T) {

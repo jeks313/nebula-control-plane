@@ -239,6 +239,27 @@ func (s *Server) device(ctx context.Context, r *http.Request) (enrollment.Enroll
 	return e, true
 }
 
+// revoked reports whether fingerprint is on the active blocklist. When the revocation
+// registry is not wired (dev/test/read-only Core), it reports (false, nil) — the check is
+// a no-op. A read error is surfaced so the caller can FAIL CLOSED: a cert-minting path
+// (renew) must not proceed when we cannot confirm the host is un-revoked. dev.Fingerprint
+// and ActiveFingerprints are both canonical lowercase hex, so this is an exact match.
+func (s *Server) revoked(ctx context.Context, fingerprint string) (bool, error) {
+	if s.cfg.Revocation == nil || fingerprint == "" {
+		return false, nil
+	}
+	fps, err := s.cfg.Revocation.ActiveFingerprints(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, fp := range fps {
+		if fp == fingerprint {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // allocationOwner returns the device NAME currently holding overlay IP ip in IPAM (overlay_ip is
 // UNIQUE among live allocations, so at most one). Used by self-heal to fail closed when the IP was
 // re-handed to a DIFFERENT device.
@@ -547,6 +568,26 @@ func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
 	dev, ok := s.device(ctx, r)
 	if !ok {
 		wire.WriteError(w, wire.CodeAccountNotAllowed, "no enrolled device at this overlay address")
+		return
+	}
+
+	// A revoked host must not be able to renew itself back to life (M7.1 durability).
+	// `harbor blocklist add` only writes the revocations table — it does NOT flip the
+	// enrollment status or release the IP — so without this gate a blocklisted host that
+	// still has ANY path to Core (its established tunnel, or Core not-yet-having-applied
+	// the block) would re-sign with a fresh key and land a NEW fingerprint the blocklist
+	// does not cover, orphaning the operator's revocation. Checked against the host's
+	// CURRENT persisted fingerprint. Fail CLOSED on a read error, mirroring trySelfHeal:
+	// don't mint a fresh cert when we cannot confirm the host is not revoked.
+	switch revoked, rerr := s.revoked(ctx, dev.Fingerprint); {
+	case rerr != nil:
+		_, _ = s.cfg.Store.AppendAudit(ctx, "system", "renew-revocation-check-error", dev.OverlayIP, rerr.Error())
+		wire.WriteError(w, wire.CodeSigningUnavailable, "revocation status unavailable; retry")
+		return
+	case revoked:
+		_, _ = s.cfg.Store.AppendAudit(ctx, "renew:"+dev.DeviceName, "renew-refused-revoked", dev.DeviceName,
+			fmt.Sprintf(`{"overlay_ip":%q,"fingerprint":%q}`, dev.OverlayIP, dev.Fingerprint))
+		wire.WriteError(w, wire.CodeAccountNotAllowed, "certificate revoked")
 		return
 	}
 
