@@ -183,7 +183,14 @@ type Config struct {
 	// produced (used by lower-level tests).
 	ConfigBackend signer.Backend // config-signing key (signs bundles)
 	ConfigKeyID   string         // its kid (pinned by Pilot)
-	CABundlePEM   []byte         // CA cert PEM for the bundle's ca_bundle
+	CABundlePEM   []byte         // CA cert PEM for the bundle's ca_bundle (static fallback)
+	// CABundleSource, if set, is consulted at bundle-build time so the CA rotation
+	// registry (M8) drives the bundle's ca_bundle live: it returns every NON-RETIRED CA
+	// (staged+active+draining), so a newly staged CA is trusted fleet-wide before it ever
+	// signs ("trust before you sign", design §4.6). A failed/empty read falls back to the
+	// static CABundlePEM rather than severing trust (fail-open on availability, like
+	// BlocklistSource/LighthouseSource).
+	CABundleSource func(context.Context) ([]string, error)
 	Lighthouses   []bundle.Lighthouse
 	// TunDev + ListenPort are this mesh's nebula TUN device name + UDP listen port,
 	// stamped into every issued bundle so a multi-mesh host gets distinct values per
@@ -1053,7 +1060,7 @@ func (c *Consumer) buildBundle(ctx context.Context, deviceName, ip string, group
 		IssuedAt:      c.now().UTC().Format(time.RFC3339),
 		Device:        bundle.Device{Name: deviceName, OverlayIP: ip, Groups: groups},
 		Certificate:   string(certPEM),
-		CABundle:      []string{string(c.cfg.CABundlePEM)},
+		CABundle:      c.caBundle(ctx),
 		Firewall:      bundle.CompileFirewall(c.cfg.Policy, groups),
 		Lighthouses:   c.lighthouses(ctx),
 		Blocklist:     c.blocklist(ctx),
@@ -1068,6 +1075,19 @@ func (c *Consumer) buildBundle(ctx context.Context, deviceName, ip string, group
 		NotAfter:      notAfter.UTC().Format(time.RFC3339),
 	}
 	return bundle.Sign(c.cfg.ConfigBackend, c.cfg.ConfigKeyID, b)
+}
+
+// caBundle returns the fleet's trusted CA cert PEMs for a bundle: the live CA rotation
+// registry (M8) when a source is set (every non-retired CA), else the static single CA. A
+// failed or empty read falls back to the static CABundlePEM so an enrollment never ships a
+// bundle with no CA to trust (fail-open on availability, design §4.6).
+func (c *Consumer) caBundle(ctx context.Context) []string {
+	if c.cfg.CABundleSource != nil {
+		if cas, err := c.cfg.CABundleSource(ctx); err == nil && len(cas) > 0 {
+			return cas
+		}
+	}
+	return []string{string(c.cfg.CABundlePEM)}
 }
 
 // blocklist returns the fleet's active revoked-cert fingerprints for a bundle

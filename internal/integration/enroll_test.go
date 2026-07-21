@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/jeks313/nebula-control-plane/internal/bundle"
+	"github.com/jeks313/nebula-control-plane/internal/ca"
 	"github.com/jeks313/nebula-control-plane/internal/enrollment"
 	"github.com/jeks313/nebula-control-plane/internal/ipam"
 	"github.com/jeks313/nebula-control-plane/internal/joinkey"
@@ -44,6 +45,7 @@ type enrollEnv struct {
 	cfgB        signer.Backend
 	policy      *policy.Policy
 	rev         *revocation.Registry // cert blocklist (7.1); wired as BlocklistSource
+	caReg       *ca.Registry         // CA rotation registry (M8); wired as CABundleSource, seeded with the current CA
 }
 
 func setupEnroll(t *testing.T) enrollEnv {
@@ -97,6 +99,12 @@ func setupEnroll(t *testing.T) enrollEnv {
 		t.Fatal(err)
 	}
 	rev := revocation.New(s.DB, audit)
+	// M8: the CA rotation registry, seeded with the current CA as active (as the live serve
+	// path does on boot), wired as the bundle's CABundleSource so a staged CA propagates.
+	caReg := ca.New(s.DB, audit)
+	if _, _, err := caReg.SeedActive(context.Background(), "test-ca", string(caPEM), "software", "boot"); err != nil {
+		t.Fatalf("seed CA: %v", err)
+	}
 	cons := enrollment.New(enrollment.Config{
 		Store: s, Nonces: ring, Replay: replay.New(2 * time.Minute),
 		Signer: sg, Allocator: alloc, Pool: pool, CertLifetime: 24 * time.Hour,
@@ -107,9 +115,10 @@ func setupEnroll(t *testing.T) enrollEnv {
 		Lighthouses:     []bundle.Lighthouse{{OverlayIP: "100.64.0.1", PublicAddrs: []string{"198.51.100.1:4242"}}},
 		Policy:          &pol,
 		BlocklistSource: rev.ActiveFingerprints,
+		CABundleSource:  caReg.TrustBundle,
 		Results:         d, ResultTTL: time.Hour,
 	})
-	return enrollEnv{cons: cons, store: s, ring: ring, caPEM: caPEM, pool: pool, d: d, pinned: pinned, configKeyID: configKeyID, sg: sg, cfgB: cfgB, policy: &pol, rev: rev}
+	return enrollEnv{cons: cons, store: s, ring: ring, caPEM: caPEM, pool: pool, d: d, pinned: pinned, configKeyID: configKeyID, sg: sg, cfgB: cfgB, policy: &pol, rev: rev, caReg: caReg}
 }
 
 // fresh generates a host key and a nonce bound to it.

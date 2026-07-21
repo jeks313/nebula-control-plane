@@ -79,7 +79,13 @@ type Config struct {
 	Signer        *signer.Signer
 	ConfigBackend signer.Backend
 	ConfigKeyID   string
-	CABundlePEM   []byte
+	CABundlePEM   []byte // static fallback for the bundle's ca_bundle
+	// CABundleSource, if set, is consulted at bundle-build time so the CA rotation
+	// registry (M8) drives every renew / GET /v1/config bundle's ca_bundle live: it returns
+	// every NON-RETIRED CA (staged+active+draining), so a newly staged CA is trusted
+	// fleet-wide before it ever signs ("trust before you sign", design §4.6). A failed or
+	// empty read falls back to CABundlePEM (fail-open, like BlocklistSource/LighthouseSource).
+	CABundleSource func(context.Context) ([]string, error)
 	Lighthouses   []bundle.Lighthouse
 	// LighthouseSource, if set, is consulted at bundle-build time so registry
 	// changes (6.8) propagate live; it overrides the static Lighthouses. On error
@@ -202,6 +208,19 @@ func (s *Server) blocklistVersion(ctx context.Context) int {
 		return 0
 	}
 	return s.cfg.Rollout.BlocklistVersion(ctx)
+}
+
+// caBundle returns the fleet's trusted CA cert PEMs for a bundle: the live CA rotation
+// registry (M8) when a source is set (every non-retired CA), else the static single CA. A
+// failed or empty read falls back to CABundlePEM so a renew / config refresh never ships a
+// bundle with no CA to trust (fail-open on availability, design §4.6).
+func (s *Server) caBundle(ctx context.Context) []string {
+	if s.cfg.CABundleSource != nil {
+		if cas, err := s.cfg.CABundleSource(ctx); err == nil && len(cas) > 0 {
+			return cas
+		}
+	}
+	return []string{string(s.cfg.CABundlePEM)}
 }
 
 // blocklist returns the fleet's active revoked-cert fingerprints for a bundle
@@ -776,7 +795,7 @@ func (s *Server) assembleBundle(ctx context.Context, dev enrollment.Enrollment, 
 		IssuedAt:         s.now().UTC().Format(time.RFC3339),
 		Device:           bundle.Device{Name: dev.DeviceName, OverlayIP: dev.OverlayIP, Groups: groups},
 		Certificate:      certPEM,
-		CABundle:         []string{string(s.cfg.CABundlePEM)},
+		CABundle:         s.caBundle(ctx),
 		Firewall:         bundle.CompileFirewall(s.cfg.Policy, groups),
 		Lighthouses:      s.lighthouses(ctx),
 		Blocklist:        s.blocklist(ctx),

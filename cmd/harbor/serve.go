@@ -208,6 +208,7 @@ func cmdCoreAPI(args []string) {
 	api := coreapi.New(coreapi.Config{
 		Store: s, Signer: sg, ConfigBackend: cfgB, ConfigKeyID: wire.PubkeyHash(cfgPub),
 		CABundlePEM: caPEM, Lighthouses: parseLighthouses(*cf.lighthouse), LighthouseSource: cf.lighthouseSource(s), Policy: cf.policy(s),
+		CABundleSource:  cf.caTrustSource(s, caPEM, audit), // M8: live CA-rotation trust bundle (seeds the current CA)
 		BlocklistSource: cf.blocklistSource(s),
 		Rollout:         rollout.New(s.DB, audit),
 		NebulaReleases:  nebularelease.New(s.DB),

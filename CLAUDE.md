@@ -274,15 +274,20 @@ The linear track forked into ADR streams. Net state (✅ built · ◐ code-compl
 
 ### M8 · M9 · M10 status
 
-- **M8 — CA & key rotation: STARTED (slice 1 of ~4 built).** ✅ **CA registry + lifecycle state machine**
-  (`internal/ca`, migration **000032** `ca_certs`): `staged→active→draining→retired` with DB-enforced
-  single-active (partial unique index), `TrustBundle()` (non-retired CAs, sorted/byte-stable), `Active()`
-  (the signing CA), `SeedActive()` boot-seed, plus Stage/Activate(atomic cut-over demotes prior active
-  to draining)/Retire(refuses live dependents)/Abandon, all audited + unit-tested. **Still open:** 8.1
-  wiring (source `bundle.CABundle` from `TrustBundle` via a fail-open seam + boot-seed the current CA +
-  `harbor ca` CLI + heartbeat adoption tracking), 8.3 signing cut-over in the Signer + drain tracking
-  (which CA signed each leaf) + the 100%-adoption gate on activate, 8.4 retirement + KMS deletion alarms,
-  8.5 config-signing-key rotation (same overlap mechanism), 8.6 emergency path, 8.7 staging drill.
+- **M8 — CA & key rotation: STARTED (slice 1 + most of 8.1 built).** ✅ **CA registry + lifecycle state
+  machine** (`internal/ca`, migration **000032** `ca_certs`): `staged→active→draining→retired` with
+  DB-enforced single-active (partial unique index), `TrustBundle()` (non-retired CAs, sorted/byte-stable),
+  `Active()` (the signing CA), `SeedActive()` boot-seed, plus Stage/Activate(atomic cut-over demotes prior
+  active to draining)/Retire(refuses live dependents)/Abandon, all audited + unit-tested. ✅ **8.1 trust
+  distribution**: `CABundleSource` seam on `enrollment.Config`+`coreapi.Config` (fail-open to the static
+  `-ca-cert`) so every enroll/renew/`GET /v1/config` bundle's `ca_bundle` is sourced from `TrustBundle`
+  live; core-api + enroll-worker **boot-seed the current CA as active** on start (race-tolerant);
+  `harbor ca list|stage|activate|retire|abandon` break-glass CLI (classified in the CLI-surface guard).
+  Proven by integration `TestEnrollBundleCarriesStagedCA` (a staged CA2 reaches a new bundle's ca_bundle
+  while the leaf is still signed by the active CA). **Still open:** heartbeat **adoption tracking** (the
+  100%-trust gate that must precede a cut-over), 8.3 signing cut-over in the Signer + drain tracking
+  (which CA signed each leaf), 8.4 retirement + KMS deletion alarms, 8.5 config-signing-key rotation
+  (same overlap mechanism), 8.6 emergency path, 8.7 staging drill.
   *(The scheduled lighthouse-cert rotation above is 6.8-adjacent, NOT M8 CA rotation.)*
 - **M9 — hardening & operations: PARTIAL (delivered via ADR 0007, not per-step ticks).** The poc IS the
   prod stack (above); ✅ 9.6 signed waved self-update (ADR 0003); 🟡 HA substrate present but single-AZ;

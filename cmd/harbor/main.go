@@ -72,6 +72,8 @@ func main() {
 		cmdGenesis(os.Args[2:])
 	case "ca-init":
 		cmdCAInit(os.Args[2:])
+	case "ca":
+		cmdCA(os.Args[2:])
 	case "issue-cert":
 		cmdIssueCert(os.Args[2:])
 	case "backfill-cp-enrollment":
@@ -146,6 +148,11 @@ usage:
   harbor policy active     [db flags]                 show the published policy
   harbor genesis           -out DIR -operator-a A -operator-b B -lighthouse-pub PEM [... db flags]
   harbor ca-init           -ca-cert OUT [-backend software|pkcs11|kms] [-ca-key OUT] [... db flags]
+  harbor ca list           [db flags]                          CA-rotation lifecycle (M8, design §4.6)
+  harbor ca stage          -cert CA2.crt -name N [-kms-key-id ID] [-actor A] [db flags]   trust CA2 before it signs
+  harbor ca activate       -id N [-actor A] [db flags]         cut signing over to CA N (prior active -> draining)
+  harbor ca retire         -id N -dependents 0 [-actor A] [db flags]   remove a drained CA from trust
+  harbor ca abandon        -id N [-actor A] [db flags]         cancel a staged CA
   harbor issue-cert        -name DEVICE -in-pub HOST.pub -ca-cert CA [-groups a,b] [... db flags]
   harbor backfill-cp-enrollment -cert HOST.crt -pool CIDR [-name N] [-groups a,b] [-overlay-ip IP] [db flags]
                            break-glass: record the missing issued enrollment row for a

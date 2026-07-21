@@ -294,6 +294,7 @@ func (cf *coreFlags) buildConsumer(s *store.Store, results enrollment.ResultSink
 		PilotReleaseFor: pilotReleaseFor,
 		ConfigBackend:   cfgB, ConfigKeyID: wire.PubkeyHash(cfgPub),
 		CABundlePEM: caPEM, Lighthouses: parseLighthouses(*cf.lighthouse), LighthouseSource: cf.lighthouseSource(s), Policy: cf.policy(s),
+		CABundleSource:  cf.caTrustSource(s, caPEM, audit), // M8: live CA-rotation trust bundle (seeds the current CA)
 		BlocklistSource: cf.blocklistSource(s),
 		Results:         results, ResultTTL: time.Hour,
 		CloudTrust: ct, AWSSigV4Enabled: ct != nil,

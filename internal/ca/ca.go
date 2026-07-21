@@ -312,37 +312,38 @@ func (r *Registry) SeedActive(ctx context.Context, name, certPEM, kmsKeyID, acto
 	if err != nil {
 		return CA{}, false, err
 	}
-	var seeded bool
+	// Already populated? Return the current active and seed nothing.
+	var n int64
+	if err := r.db.WithContext(ctx).Model(&CA{}).Count(&n).Error; err != nil {
+		return CA{}, false, fmt.Errorf("ca: seed active: %w", err)
+	}
+	if n > 0 {
+		return r.activeOrEmpty(ctx), false, nil
+	}
+	now := r.now().UTC().UnixNano()
+	out := CA{
+		Name: name, Fingerprint: fp, CertPEM: certPEM, KMSKeyID: kmsKeyID,
+		State: StateActive, NotAfter: notAfter.UTC().UnixNano(),
+		CreatedBy: actor, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := r.db.WithContext(ctx).Create(&out).Error; err != nil {
+		// Lost a concurrent boot-seed (another Core inserted first): the unique name /
+		// one-active index rejected us. Treat it as already-seeded and return the winner
+		// (race-tolerant, mirroring the netblock/config boot-seeds — D22).
+		if errors.Is(err, gorm.ErrDuplicatedKey) {
+			return r.activeOrEmpty(ctx), false, nil
+		}
+		return CA{}, false, fmt.Errorf("ca: seed active: %w", err)
+	}
+	r.recordAudit(ctx, actor, "ca-seed-active", name, fmt.Sprintf(`{"fingerprint":%q}`, fp))
+	return out, true, nil
+}
+
+// activeOrEmpty returns the current active CA, or the zero CA if none/unreadable (best-effort).
+func (r *Registry) activeOrEmpty(ctx context.Context) CA {
 	var out CA
-	terr := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var n int64
-		if err := tx.Model(&CA{}).Count(&n).Error; err != nil {
-			return err
-		}
-		if n > 0 {
-			// Already populated — return the current active (if any) and seed nothing.
-			_ = tx.First(&out, "state = ?", StateActive).Error
-			return nil
-		}
-		now := r.now().UTC().UnixNano()
-		out = CA{
-			Name: name, Fingerprint: fp, CertPEM: certPEM, KMSKeyID: kmsKeyID,
-			State: StateActive, NotAfter: notAfter.UTC().UnixNano(),
-			CreatedBy: actor, CreatedAt: now, UpdatedAt: now,
-		}
-		if err := tx.Create(&out).Error; err != nil {
-			return err
-		}
-		seeded = true
-		return nil
-	})
-	if terr != nil {
-		return CA{}, false, fmt.Errorf("ca: seed active: %w", terr)
-	}
-	if seeded {
-		r.recordAudit(ctx, actor, "ca-seed-active", name, fmt.Sprintf(`{"fingerprint":%q}`, fp))
-	}
-	return out, seeded, nil
+	_ = r.db.WithContext(ctx).First(&out, "state = ?", StateActive).Error
+	return out
 }
 
 func (r *Registry) recordAudit(ctx context.Context, actor, action, target, details string) {
