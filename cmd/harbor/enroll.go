@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -54,6 +55,7 @@ type coreFlags struct {
 	pilotVersion, pilotSHA256, pilotURL    *string
 	certLifetime                           *time.Duration
 	ephemeralCertLifetime                  *time.Duration
+	caCutoverInterval                      *time.Duration
 	maxPerHour                             *int
 	lighthouse                             *string
 	lighthouseDB                           *bool
@@ -99,6 +101,7 @@ func addCoreFlags(fs *flag.FlagSet) *coreFlags {
 	cf.pilotURL = fs.String("pilot-url", "", "URL pilots fetch the new pilot binary from (sha-verified)")
 	cf.certLifetime = fs.Duration("cert-lifetime", 30*24*time.Hour, "issued cert validity")
 	cf.ephemeralCertLifetime = fs.Duration("ephemeral-cert-lifetime", 24*time.Hour, "issued cert validity for hosts joining via an ephemeral join key (shorter than -cert-lifetime; foundation for the auto-reaping lifecycle, impl 2.12)")
+	cf.caCutoverInterval = fs.Duration("ca-cutover-interval", 30*time.Second, "M8.3b online CA rotation: how often this signing process polls for a newly-activated CA and hot-swaps its signer to it (0 disables; a botched swap always keeps the prior CA signing)")
 	cf.maxPerHour = fs.Int("max-certs-per-hour", 0, "signing circuit-breaker ceiling (0=unlimited)")
 	cf.lighthouse = fs.String("lighthouse", "", "lighthouses for the bundle: overlayIP=host:port[,...]")
 	cf.lighthouseDB = fs.Bool("lighthouse-db", false, "source lighthouses from the DB registry (6.8) instead of -lighthouse")
@@ -395,6 +398,11 @@ func enrollWorker(args []string) {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	// M8.3b online CA rotation: hot-swap this worker's signer to a newly-activated CA (fail-safe;
+	// the prior CA keeps signing on any error). Joined on shutdown via wg.
+	audit := func(c context.Context, a, ac, t, d string) error { _, e := s.AppendAudit(c, a, ac, t, d); return e }
+	var wg sync.WaitGroup
+	cf.startCACutoverReconciler(ctx, &wg, cons.Signer(), s, audit, log)
 	log.Info("enroll worker started", "batch", *batch, "interval", interval.String(), "lease", lease.String())
 	var total int
 	for ctx.Err() == nil {
@@ -412,6 +420,7 @@ func enrollWorker(args []string) {
 			log.Info("enroll worker: processed batch", "count", n, "total", total)
 		}
 	}
+	wg.Wait()
 	log.Info("enroll worker stopped", "total_processed", total)
 }
 
@@ -519,8 +528,14 @@ func cmdCollect(args []string) {
 	if *obsAddr != "" {
 		obs.Serve(ctx, *obsAddr, log) // /metrics (Go runtime + process) for the collector (Phase 7b)
 	}
+	// M8.3b online CA rotation: hot-swap the collector's signer to a newly-activated CA (fail-safe;
+	// the prior CA keeps signing on any error). Joined on shutdown via wg.
+	audit := func(c context.Context, a, ac, t, d string) error { _, e := s.AppendAudit(c, a, ac, t, d); return e }
+	var wg sync.WaitGroup
+	cf.startCACutoverReconciler(ctx, &wg, cons.Signer(), s, audit, log)
 	log.Info("harbor collect running", "mode", mode, "interval", interval.String())
 	_ = coll.Run(ctx, gateways, *interval)
+	wg.Wait()
 	log.Info("harbor collect stopped")
 }
 

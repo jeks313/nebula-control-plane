@@ -18,6 +18,15 @@ import (
 // mkStagedCA mints a fresh self-signed P256 CA (a would-be "CA2") and returns its PEM.
 func mkStagedCA(t *testing.T, name string) string {
 	t.Helper()
+	pem, _ := mkStagedCAWithBackend(t, name)
+	return pem
+}
+
+// mkStagedCAWithBackend mints a fresh P256 CA and ALSO returns the backend holding its key, so a
+// test can both stage it and hot-swap the live signer to it (M8.3b) — the software cut-over the
+// cmd/harbor factory intentionally refuses, driven directly here to exercise the signing path.
+func mkStagedCAWithBackend(t *testing.T, name string) (pemStr string, backend signer.Backend) {
+	t.Helper()
 	b, _ := signer.NewSoftwareBackend()
 	now := time.Now()
 	_, pem, err := signer.SelfSignCA(b, signer.CATemplate{
@@ -26,7 +35,7 @@ func mkStagedCA(t *testing.T, name string) string {
 	if err != nil {
 		t.Fatalf("self-sign %s: %v", name, err)
 	}
-	return string(pem)
+	return string(pem), b
 }
 
 // deliveredBundle rebuilds + verifies the signed bundle an issued enrollment would ship,
@@ -171,6 +180,93 @@ func mustBundleCert(t *testing.T, jws []byte, e enrollEnv) string {
 		t.Fatalf("verify renew bundle: %v", err)
 	}
 	return b.Certificate
+}
+
+// TestSigningCutsOverToActivatedCA is the M8.3b acceptance: after a new CA is activated and the
+// signer is hot-swapped to it, a renewing host is re-signed by CA2 (not CA1), the renewed leaf
+// verifies against a CA in its delivered trust bundle, and — via 8.3a re-stamping — the drain
+// count moves from CA1 to CA2 with no restart. The signer is shared by enroll + renew, so this
+// exercises the live cut-over on the running signing path.
+func TestSigningCutsOverToActivatedCA(t *testing.T) {
+	e := setupEnroll(t)
+	ctx := context.Background()
+	api := e.coreAPI()
+
+	// Enroll host-cut under CA1.
+	secret, _, _ := joinkey.Create(ctx, e.store, joinkey.Params{Name: "k", Groups: []string{"web"}, MaxUses: 0, AutoIssue: true}, time.Now())
+	res, err := e.cons.Process(ctx, e.candidate(t, secret, "host-cut"))
+	if err != nil || res.Status != "issued" {
+		t.Fatalf("enroll: %v %s", err, res.Status)
+	}
+	ip := res.OverlayIP
+	ca1fp := e.sg.CurrentFingerprint()
+	if issuerFP(t, res.CertPEM) != ca1fp {
+		t.Fatalf("enrolled leaf Issuer = %s, want CA1 %s", issuerFP(t, res.CertPEM), ca1fp)
+	}
+	if n, _ := e.caReg.LiveDependents(ctx, ca1fp); n < 1 {
+		t.Fatalf("CA1 live dependents = %d, want >=1 after enroll", n)
+	}
+
+	// Stage + activate CA2, then hot-swap the signer to it (the reconciler's job; driven directly
+	// because the cmd/harbor factory refuses a software CA2 — here we hold its backend).
+	ca2PEM, ca2backend := mkStagedCAWithBackend(t, "ca-2")
+	ca2row, err := e.caReg.Stage(ctx, "ca-2", ca2PEM, "software", "op")
+	if err != nil {
+		t.Fatalf("stage CA2: %v", err)
+	}
+	if err := e.caReg.Activate(ctx, ca2row.ID, "op"); err != nil {
+		t.Fatalf("activate CA2: %v", err)
+	}
+	if err := e.sg.SwapCA([]byte(ca2PEM), ca2backend); err != nil {
+		t.Fatalf("hot-swap to CA2: %v", err)
+	}
+	if e.sg.CurrentFingerprint() != ca2row.Fingerprint {
+		t.Fatalf("after swap fp = %s, want CA2 %s", e.sg.CurrentFingerprint(), ca2row.Fingerprint)
+	}
+
+	// Renew -> the fresh leaf is signed by CA2, and ca_fingerprint re-stamps to CA2.
+	body, _ := signRenew(t)
+	rec := renewReq(t, api, body, ip)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("renew: %d %s", rec.Code, rec.Body)
+	}
+	var rr wire.RenewResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &rr); err != nil {
+		t.Fatal(err)
+	}
+	b, err := bundle.Verify(rr.Bundle, e.pinned)
+	if err != nil {
+		t.Fatalf("verify renew bundle: %v", err)
+	}
+	if got := issuerFP(t, []byte(b.Certificate)); got != ca2row.Fingerprint {
+		t.Fatalf("renewed leaf Issuer = %s, want CA2 %s (signer did not cut over)", got, ca2row.Fingerprint)
+	}
+	// The renewed leaf verifies against a CA in the delivered (dual-CA) trust bundle.
+	verified := false
+	for _, caPEM := range b.CABundle {
+		pool, perr := cert.NewCAPoolFromPEM([]byte(caPEM))
+		if perr != nil {
+			continue
+		}
+		c, _, _ := cert.UnmarshalCertificateFromPEM([]byte(b.Certificate))
+		if _, verr := pool.VerifyCertificate(time.Now(), c); verr == nil {
+			verified = true
+			break
+		}
+	}
+	if !verified {
+		t.Fatal("renewed leaf does not verify against any CA in the delivered bundle")
+	}
+	// Drain moves CA1 -> CA2 (8.3a re-stamp on the renew that 8.3b re-signed under CA2).
+	if row := issuedRow(t, e, ip); row.CAFingerprint != ca2row.Fingerprint {
+		t.Fatalf("renew did not re-stamp ca_fingerprint to CA2 (got %s)", row.CAFingerprint)
+	}
+	if n, _ := e.caReg.LiveDependents(ctx, ca1fp); n != 0 {
+		t.Fatalf("CA1 live dependents = %d after the host renewed onto CA2, want 0 (drained)", n)
+	}
+	if n, _ := e.caReg.LiveDependents(ctx, ca2row.Fingerprint); n < 1 {
+		t.Fatalf("CA2 live dependents = %d, want >=1", n)
+	}
 }
 
 // TestHeartbeatDrivesCAAdoption is the M8.1 end-to-end acceptance across the full

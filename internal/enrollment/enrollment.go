@@ -281,6 +281,10 @@ func New(cfg Config) *Consumer {
 	return &Consumer{cfg: cfg, now: cfg.Now}
 }
 
+// Signer exposes the enrollment signer so the process running this consumer can drive the M8.3b
+// online CA-rotation cut-over reconciler against it (the same *signer.Signer that issues certs).
+func (c *Consumer) Signer() *signer.Signer { return c.cfg.Signer }
+
 // Drain claims a batch from the durable queue, processes each, and acks
 // terminal outcomes (success or a recorded business decision) while nacking
 // transient/infra failures for redelivery (poison handling lives in the queue).

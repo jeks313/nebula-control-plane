@@ -250,6 +250,9 @@ func cmdCoreAPI(args []string) {
 	}
 	wg.Add(1)
 	go func() { defer wg.Done(); sg.RunBreakerMetric(ctx, 15*time.Second) }()
+	// M8.3b online CA rotation: poll for a newly-activated CA and hot-swap this Core's signer to
+	// it (fail-safe; the prior CA keeps signing on any error). Joined on shutdown via wg.
+	cf.startCACutoverReconciler(ctx, &wg, sg, s, audit, log)
 	// Device reaper (impl 2.12): reclaim leaked overlay IPs and prune stale heartbeats for hosts whose
 	// cert has lapsed beyond grace (it NEVER reaps a valid cert and NEVER blocklists — off-boarding is
 	// an explicit revoke). core-api holds the allocator + audit, so it owns the reaper (admin-api/

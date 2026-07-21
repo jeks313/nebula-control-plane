@@ -148,7 +148,7 @@ NOT handled by the script — do these manually when the change needs them:
 
 **Milestone track: M0–M4 + M6 complete; M5 PARTIAL; M7 is the frontier (7.1 done · 7.2 engine+CLI
 built, no console · 7.3 partial · 7.4 blocked on M9 OIDC); M8 (CA rotation) is the ACTIVE milestone
-(slice 1 + 8.1 + 8.3a drain-tracking built; 8.3b signing cut-over next); M9/M10
+(slice 1 + 8.1 + 8.3a drain-tracking + 8.3b zero-downtime signing cut-over built; 8.3c force-renew next); M9/M10
 PARTIAL. Development forked off the linear track into ADR-driven parallel streams — ADRs 0003–0011
 have all shipped or are code-complete (per-ADR built-state below).** A live demo (terraform apply + bootstrap-genesis.sh) can
 run now on the real off-mesh topology. Schema ceiling on disk is **000034** (next free: **000035**;
@@ -305,8 +305,24 @@ The linear track forked into ADR streams. Net state (✅ built · ◐ code-compl
   Reviewed adversarially (inline 5-lens pass, 0 defects). ⚠ **DEPLOY ORDER:** apply migration **000034**
   (`harbor migrate up`) BEFORE swapping the binary — the first post-swap core-api/enroll-worker boot backfills
   `ca_fingerprint` on existing issued rows, and the stamp/re-stamp writes need the column.
-  **Still open:** 8.3b signing cut-over in the Signer (select the active CA's backend — touches CA-key custody/P2,
-  needs design sign-off) + 8.3c force-renew stragglers, 8.4 retirement + KMS deletion alarms, 8.5
+  ✅ **8.3b signing cut-over (HOT-SWAP, zero-downtime — user-chosen mechanism).** The `Signer` now holds its
+  `{CA cert, backend}` behind an `atomic.Pointer` (`signingIdentity`); `Issue()` snapshots it once per call so an
+  in-flight signature can never chain to one CA while signing with another's key. `Signer.SwapCA` re-points it,
+  running the SAME validation as boot (parse/IsCA/P256/backend-pubkey==cert-pubkey) plus an expiry guard, and is
+  **fail-safe**: any failure returns an error and the prior CA keeps signing (no torn state, no halt). The
+  breaker/policy/audit/clock are process-level and deliberately NOT swapped, so the fleet-wide rate ceiling +
+  audit trail survive a rotation. A per-process poll reconciler (`RunActiveCAReconciler`, `-ca-cutover-interval`
+  default 30s, 0 disables) on **core-api + the enroll worker/collector** watches `ca.Active()` and hot-swaps when
+  a new CA is activated — no restart. Cut-over latency is bounded + harmless (activate already gated on 100%
+  trust adoption, 8.1). Backend rebuild uses an injected `BackendFactory` (KMS ARN / `pkcs11:<label>` id-based, so
+  **NO CA private key is ever handled in-process**, P2); a *software* CA2 cut-over is refused with a clear
+  "restart with -ca-key" (dev-only; the poc is KMS). `ncp_signer_active_ca_cutovers_total` + a `ca-signing-cutover`
+  audit row per swap. Proven by `internal/signer` `TestSwapCAValidatesAndIsAtomic`/`TestIssueFollowsHotSwap`/
+  `TestReconcileActiveCA` + integration `TestSigningCutsOverToActivatedCA` (enroll under CA1 -> activate+swap ->
+  renew re-signs under CA2, drain moves CA1->CA2, no restart). ⚠ **runbook (8.4):** keep `-ca-cert` pointed at a
+  still-trusted CA — booting with a *retired* CA in `-ca-cert` would briefly sign untrusted leaves until the
+  first reconcile tick (a draining CA is fine — still trusted).
+  **Still open:** 8.3c force-renew stragglers (accelerate drain), 8.4 retirement + KMS deletion alarms, 8.5
   config-signing-key rotation (same overlap mechanism), 8.6 emergency path, 8.7 staging drill.
   *(The scheduled lighthouse-cert rotation above is 6.8-adjacent, NOT M8 CA rotation.)*
 - **M9 — hardening & operations: PARTIAL (delivered via ADR 0007, not per-step ticks).** The poc IS the
@@ -412,9 +428,9 @@ Note: the durable queue (`internal/queue`) is now safe for concurrent first-open
 - **7.3** — an explicit `harbor decommission` + a cloud-terminate/CloudTrail-driven auto-reap (today's
   reaper triggers on cert-lapse, not cloud inventory) + hard-delete.
 - **M8 — CA & key rotation** — the ACTIVE milestone. Registry + lifecycle (slice 1), 8.1 trust distribution +
-  adoption gate, and 8.3a drain tracking are built; **8.3b signing cut-over is next** (select the active CA's
-  backend at sign time — touches CA-key custody/P2, needs design sign-off), then 8.3c force-renew, 8.4
-  retirement + KMS deletion alarms, 8.5 config-key rotation, 8.6 emergency path, 8.7 staging drill.
+  adoption gate, 8.3a drain tracking, and **8.3b signing cut-over (zero-downtime hot-swap)** are built; next is
+  **8.3c force-renew stragglers** (accelerate the drain), then 8.4 retirement + KMS deletion alarms, 8.5
+  config-key rotation, 8.6 emergency path, 8.7 staging drill.
 - **7.4 / M9 9.1** — laptop OIDC device-code flow (unblocks IdP offboarding).
 - **ADR 0012** (pilot fleet metrics) and **ADR 0014** (overlay DNS) are design-only.
 - **M10** — the Windows/macOS hardening tail (DACL/DPAPI, Authenticode/notarization, CI runners, least-priv).

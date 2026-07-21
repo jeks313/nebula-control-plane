@@ -104,7 +104,7 @@ func goodTemplate(t *testing.T) Template {
 func TestIssueAndVerify(t *testing.T) {
 	audit := &recordingAudit{}
 	s := newSigner(t, 100, audit)
-	caPEM, err := s.caCert.MarshalPEM()
+	caPEM, err := s.CACert().MarshalPEM()
 	if err != nil {
 		t.Fatal(err)
 	}

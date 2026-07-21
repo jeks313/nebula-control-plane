@@ -2,15 +2,18 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jeks313/nebula-control-plane/internal/ca"
+	"github.com/jeks313/nebula-control-plane/internal/signer"
 	"github.com/jeks313/nebula-control-plane/internal/store"
 	"github.com/slackhq/nebula/cert"
 )
@@ -61,6 +64,68 @@ func (cf *coreFlags) caTrustSource(s *store.Store, caPEM []byte, audit ca.AuditF
 		}
 	}
 	return reg.TrustBundle
+}
+
+// activeCASource adapts the CA-rotation registry's active CA into the signer's ActiveCARef so the
+// M8.3b hot-swap reconciler can watch for a newly-activated CA without the signer package importing
+// ca. "No active CA" maps to an empty ref (the reconciler keeps the current signing CA rather than
+// swapping to nothing).
+func (cf *coreFlags) activeCASource(s *store.Store, audit ca.AuditFunc) func(context.Context) (signer.ActiveCARef, error) {
+	reg := ca.New(s.DB, audit)
+	return func(ctx context.Context) (signer.ActiveCARef, error) {
+		c, err := reg.Active(ctx)
+		if err != nil {
+			if errors.Is(err, ca.ErrNoActive) {
+				return signer.ActiveCARef{}, nil
+			}
+			return signer.ActiveCARef{}, err
+		}
+		return signer.ActiveCARef{Fingerprint: c.Fingerprint, CertPEM: []byte(c.CertPEM), KMSKeyID: c.KMSKeyID}, nil
+	}
+}
+
+// activeCABackendFactory builds the signing backend for a rotated-in active CA (M8.3b), reading
+// its stored signing-backend id EXACTLY as caSeedIdentity records it: a "pkcs11:<label>" URI, the
+// literal "software", or otherwise a KMS key id/ARN. Non-fatal (the reconciler logs + retries).
+// The factory is only ever called for a CA that DIFFERS from the one this process booted with (the
+// reconciler short-circuits an unchanged active CA), so a software CA can only mean a NEW software
+// key this process does not hold -> refuse with a clear message (restart with the new -ca-key). The
+// poc uses KMS, where the stored ARN suffices and NO CA private key is ever handled here (P2 — the
+// key stays in KMS; this only names it).
+func (cf *coreFlags) activeCABackendFactory() signer.BackendFactory {
+	return func(ctx context.Context, kmsKeyID string, _ []byte) (signer.Backend, error) {
+		switch {
+		case strings.HasPrefix(kmsKeyID, "pkcs11:"):
+			return signer.NewPKCS11Backend(signer.PKCS11Config{
+				ModulePath: *cf.module, TokenLabel: *cf.token, Pin: *cf.pin,
+				KeyLabel: strings.TrimPrefix(kmsKeyID, "pkcs11:"),
+			})
+		case kmsKeyID == "software" || kmsKeyID == "":
+			return nil, fmt.Errorf("software-backed process cannot reach a new software CA key %q at runtime; restart with the new -ca-key to cut over (KMS/PKCS#11 cut over live)", kmsKeyID)
+		default:
+			return signer.NewKMSBackend(ctx, signer.KMSConfig{KeyID: kmsKeyID, Region: *cf.kmsRegion})
+		}
+	}
+}
+
+// startCACutoverReconciler launches the M8.3b hot-swap reconciler for a signing process (core-api
+// or the enroll worker): it polls the active CA and cuts sg over when a new CA is activated. It is
+// fail-safe (a bad tick keeps the prior CA) and bounded by -ca-cutover-interval (0 disables). The
+// goroutine is registered on wg so it drains on shutdown before the DB pool closes.
+func (cf *coreFlags) startCACutoverReconciler(ctx context.Context, wg *sync.WaitGroup, sg *signer.Signer, s *store.Store, audit ca.AuditFunc, log *slog.Logger) {
+	interval := *cf.caCutoverInterval
+	if interval <= 0 {
+		log.Info("ca: online CA-rotation cut-over reconciler disabled (-ca-cutover-interval=0); activate a CA then restart to cut signing over")
+		return
+	}
+	src := cf.activeCASource(s, audit)
+	factory := cf.activeCABackendFactory()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		sg.RunActiveCAReconciler(ctx, src, factory, interval, log)
+	}()
+	log.Info("ca: online CA-rotation cut-over reconciler started (M8.3b)", "interval", interval.String())
 }
 
 // adoptionGate is the pure M8.1 cut-over decision: proceed iff the target CA is fully

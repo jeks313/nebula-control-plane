@@ -7,12 +7,16 @@
 package signer
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/netip"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -30,6 +34,12 @@ var (
 	metricBreakerTrips = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "ncp_signer_breaker_trips_total",
 		Help: "Signing circuit breaker trips observed by this Core (the cert/hour ceiling was breached).",
+	})
+	// M8.3b online CA-rotation cut-over: incremented each time this process hot-swaps its
+	// signing identity to a newly-activated CA (should tick once per rotation per process).
+	metricActiveCACutovers = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ncp_signer_active_ca_cutovers_total",
+		Help: "Signing CA hot-swaps this process performed (M8.3b online CA rotation cut-over).",
 	})
 )
 
@@ -120,28 +130,25 @@ type Config struct {
 	Now func() time.Time
 }
 
-// Signer issues leaf certificates.
-type Signer struct {
-	caCert  cert.Certificate
-	backend Backend
-	policy  IssuePolicy
-	breaker Breaker
-	audit   func(ctx context.Context, actor, action, target, details string) error
-	onAlarm func(count int)
-	now     func() time.Time
+// signingIdentity is the {CA cert, signing backend} pair the Signer currently signs with. It
+// is swapped ATOMICALLY as a unit during an online CA-rotation cut-over (M8.3b) so a leaf is
+// never signed by CA_n's backend but chained to CA_m's cert. The fingerprint is precomputed so
+// the reconciler can compare cheaply without re-hashing the cert each poll.
+type signingIdentity struct {
+	caCert      cert.Certificate
+	backend     Backend
+	fingerprint string // lower-hex caCert.Fingerprint()
 }
 
-// New validates config and returns a Signer. It confirms the backend's public
-// key actually matches the CA certificate, so a misconfigured backend fails
-// fast rather than minting certs no one trusts.
-func New(cfg Config) (*Signer, error) {
-	if cfg.Audit == nil {
-		return nil, fmt.Errorf("signer: Audit callback is required")
-	}
-	if cfg.Backend == nil {
+// newIdentity validates a CA cert + backend the SAME way boot does (parse, IsCA, P256, and the
+// backend's public key MUST match the cert) and returns the ready-to-store identity. Used by
+// both New (boot) and SwapCA (cut-over), so a hot-swap can never install an identity that boot
+// would have rejected.
+func newIdentity(caCertPEM []byte, backend Backend) (*signingIdentity, error) {
+	if backend == nil {
 		return nil, fmt.Errorf("signer: Backend is required")
 	}
-	ca, _, err := cert.UnmarshalCertificateFromPEM(cfg.CACertPEM)
+	ca, _, err := cert.UnmarshalCertificateFromPEM(caCertPEM)
 	if err != nil {
 		return nil, fmt.Errorf("signer: parse CA cert: %w", err)
 	}
@@ -151,12 +158,40 @@ func New(cfg Config) (*Signer, error) {
 	if ca.Curve() != cert.Curve_P256 {
 		return nil, fmt.Errorf("signer: CA curve is %s, only P256 is supported", ca.Curve())
 	}
-	pub, err := cfg.Backend.PublicKey()
+	pub, err := backend.PublicKey()
 	if err != nil {
 		return nil, fmt.Errorf("signer: backend public key: %w", err)
 	}
-	if !bytesEqual(pub, ca.PublicKey()) {
+	if !bytes.Equal(pub, ca.PublicKey()) {
 		return nil, fmt.Errorf("signer: backend public key does not match the CA certificate")
+	}
+	fp, _ := ca.Fingerprint()
+	return &signingIdentity{caCert: ca, backend: backend, fingerprint: strings.ToLower(strings.TrimSpace(fp))}, nil
+}
+
+// Signer issues leaf certificates. The {CA cert, backend} it signs with lives behind an atomic
+// pointer so it can be hot-swapped mid-flight (M8.3b); the breaker, policy, audit, and clock are
+// process-level and survive a cut-over unchanged (the fleet-wide rate ceiling + audit trail carry
+// across a rotation).
+type Signer struct {
+	identity atomic.Pointer[signingIdentity]
+	policy   IssuePolicy
+	breaker  Breaker
+	audit    func(ctx context.Context, actor, action, target, details string) error
+	onAlarm  func(count int)
+	now      func() time.Time
+}
+
+// New validates config and returns a Signer. It confirms the backend's public
+// key actually matches the CA certificate, so a misconfigured backend fails
+// fast rather than minting certs no one trusts.
+func New(cfg Config) (*Signer, error) {
+	if cfg.Audit == nil {
+		return nil, fmt.Errorf("signer: Audit callback is required")
+	}
+	id, err := newIdentity(cfg.CACertPEM, cfg.Backend)
+	if err != nil {
+		return nil, err
 	}
 	now := cfg.Now
 	if now == nil {
@@ -166,23 +201,143 @@ func New(cfg Config) (*Signer, error) {
 	if br == nil {
 		br = newBreaker(cfg.MaxCertsPerHour, time.Hour, now)
 	}
-	return &Signer{
-		caCert:  ca,
-		backend: cfg.Backend,
+	s := &Signer{
 		policy:  cfg.Policy,
 		breaker: br,
 		audit:   cfg.Audit,
 		onAlarm: cfg.OnAlarm,
 		now:     now,
-	}, nil
+	}
+	s.identity.Store(id)
+	return s, nil
+}
+
+// CurrentFingerprint is the lower-hex fingerprint of the CA this Signer is currently signing
+// with. The reconciler compares it against the registry's active CA to decide whether to swap.
+func (s *Signer) CurrentFingerprint() string {
+	if id := s.identity.Load(); id != nil {
+		return id.fingerprint
+	}
+	return ""
+}
+
+// CACert returns the CA certificate this Signer is currently signing with (the active CA). Nil
+// only before New has stored an identity (never happens for a Signer returned by New).
+func (s *Signer) CACert() cert.Certificate {
+	if id := s.identity.Load(); id != nil {
+		return id.caCert
+	}
+	return nil
+}
+
+// SwapCA atomically re-points the Signer at a new signing CA (M8.3b online CA-rotation cut-over).
+// It runs the SAME validation as New (parse, IsCA, P256, backend public key == cert public key)
+// and additionally refuses an already-expired CA, so a hot-swap can only ever install an identity
+// that is valid to sign with. On ANY failure it returns an error and the current identity keeps
+// signing — a botched cut-over never halts issuance (fail-safe). It is idempotent: swapping to
+// the CA already in use is a no-op. The breaker/policy/audit/clock are deliberately not touched,
+// so the fleet-wide rate ceiling and audit trail survive the rotation.
+func (s *Signer) SwapCA(caCertPEM []byte, backend Backend) error {
+	id, err := newIdentity(caCertPEM, backend)
+	if err != nil {
+		return err
+	}
+	if !id.caCert.NotAfter().After(s.now()) {
+		return fmt.Errorf("signer: refusing to cut over to CA %s: it expired %s",
+			id.fingerprint, id.caCert.NotAfter().UTC().Format(time.RFC3339))
+	}
+	if cur := s.identity.Load(); cur != nil && cur.fingerprint == id.fingerprint {
+		return nil // already signing with this CA
+	}
+	s.identity.Store(id)
+	return nil
+}
+
+// ActiveCARef is the minimal view of the registry's active CA the reconciler needs. cmd/harbor
+// adapts ca.Registry.Active into this so the signer package never imports the ca package (no
+// cycle). An empty Fingerprint means "no active CA recorded" — the reconciler then keeps the
+// current identity rather than swapping to nothing.
+type ActiveCARef struct {
+	Fingerprint string
+	CertPEM     []byte
+	KMSKeyID    string // how to reach its signing backend (KMS ARN / "pkcs11:<label>" / "software")
+}
+
+// BackendFactory builds the signing Backend for a rotated-in CA from its stored signing-backend
+// id (KMSKeyID) and expected public key. Injected by cmd/harbor so this package stays free of
+// KMS/PKCS#11 construction. A returned error is logged + retried next tick (the current CA keeps
+// signing), e.g. a software-backed process asked to reach a new software CA key it does not hold.
+type BackendFactory func(ctx context.Context, kmsKeyID string, caPubKey []byte) (Backend, error)
+
+// ReconcileActiveCA hot-swaps the signing identity to the registry's active CA if it differs from
+// the one in use. Returns swapped=true only when a cut-over happened. It is fail-safe at every
+// step: a read error, an unparseable cert, a backend-build failure, or a rejected swap all return
+// an error WITHOUT disturbing the current identity, so the previous CA keeps signing until the
+// problem clears. Safe to call repeatedly (idempotent once converged).
+func (s *Signer) ReconcileActiveCA(ctx context.Context, active func(context.Context) (ActiveCARef, error), factory BackendFactory) (bool, error) {
+	ref, err := active(ctx)
+	if err != nil {
+		return false, fmt.Errorf("signer: read active CA: %w", err)
+	}
+	if ref.Fingerprint == "" {
+		return false, nil // nothing active recorded yet — keep the current identity
+	}
+	if strings.EqualFold(strings.TrimSpace(ref.Fingerprint), s.CurrentFingerprint()) {
+		return false, nil // already signing with the active CA
+	}
+	ca, _, perr := cert.UnmarshalCertificateFromPEM(ref.CertPEM)
+	if perr != nil {
+		return false, fmt.Errorf("signer: parse active CA cert %s: %w", ref.Fingerprint, perr)
+	}
+	backend, ferr := factory(ctx, ref.KMSKeyID, ca.PublicKey())
+	if ferr != nil {
+		return false, fmt.Errorf("signer: build backend for active CA %s: %w", ref.Fingerprint, ferr)
+	}
+	if serr := s.SwapCA(ref.CertPEM, backend); serr != nil {
+		return false, fmt.Errorf("signer: cut over to active CA %s: %w", ref.Fingerprint, serr)
+	}
+	metricActiveCACutovers.Inc()
+	_ = s.audit(ctx, "system", "ca-signing-cutover", ref.Fingerprint, fmt.Sprintf(`{"kms_key_id":%q}`, ref.KMSKeyID))
+	return true, nil
+}
+
+// RunActiveCAReconciler polls the active-CA source and hot-swaps this process's Signer whenever a
+// new CA is activated (M8.3b), until ctx is cancelled. Cut-over latency is bounded by interval,
+// which is harmless: `harbor ca activate` only promotes a CA the whole fleet already trusts (the
+// 100% adoption gate, 8.1), so a few seconds of the prior CA still signing strands no one. A
+// failing tick is logged and retried; the previous CA keeps signing meanwhile.
+func (s *Signer) RunActiveCAReconciler(ctx context.Context, active func(context.Context) (ActiveCARef, error), factory BackendFactory, interval time.Duration, log *slog.Logger) {
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			swapped, err := s.ReconcileActiveCA(ctx, active, factory)
+			switch {
+			case err != nil && log != nil:
+				log.Warn("signer: active-CA cut-over check failed; still signing with the previous CA", "err", err)
+			case swapped && log != nil:
+				log.Info("signer: hot-swapped signing to the newly-activated CA", "fingerprint", s.CurrentFingerprint())
+			}
+		}
+	}
 }
 
 // Issue validates, rate-limits, signs, and audits a leaf certificate. actor is
 // the authenticated requester (for the audit row). It returns the certificate
 // and its PEM encoding.
 func (s *Signer) Issue(ctx context.Context, actor string, t Template) (cert.Certificate, []byte, error) {
+	// 0. Snapshot the active signing identity ONCE for the whole call, so a concurrent hot-swap
+	//    (M8.3b) can never chain this leaf to one CA's cert while signing it with another's key.
+	id := s.identity.Load()
+
 	// 1. Validate before touching the breaker budget or the CA key (2.4).
-	if err := s.validate(t); err != nil {
+	if err := s.validate(id.caCert, t); err != nil {
 		_ = s.audit(ctx, actor, "issue-cert-rejected", t.Name, err.Error())
 		return nil, nil, err
 	}
@@ -221,7 +376,7 @@ func (s *Signer) Issue(ctx context.Context, actor string, t Template) (cert.Cert
 		PublicKey: t.PublicKey,
 		Curve:     cert.Curve_P256,
 	}
-	c, err := SignTBS(s.backend, tbs, s.caCert)
+	c, err := SignTBS(id.backend, tbs, id.caCert)
 	if err != nil {
 		_ = s.audit(ctx, actor, "issue-cert-error", t.Name, err.Error())
 		return nil, nil, fmt.Errorf("signer: sign: %w", err)
@@ -290,7 +445,7 @@ func (s *Signer) RunBreakerMetric(ctx context.Context, interval time.Duration) {
 	}
 }
 
-func (s *Signer) validate(t Template) error {
+func (s *Signer) validate(caCert cert.Certificate, t Template) error {
 	if t.Name == "" {
 		return ErrEmptyName
 	}
@@ -320,8 +475,8 @@ func (s *Signer) validate(t Template) error {
 	if s.policy.MaxLifetime > 0 && t.NotAfter.Sub(t.NotBefore) > s.policy.MaxLifetime {
 		return fmt.Errorf("%w: %s > %s", ErrLifetimeTooLong, t.NotAfter.Sub(t.NotBefore), s.policy.MaxLifetime)
 	}
-	if t.NotAfter.After(s.caCert.NotAfter()) {
-		return fmt.Errorf("%w (CA expires %s)", ErrExpiresAfterCA, s.caCert.NotAfter().UTC().Format(time.RFC3339))
+	if t.NotAfter.After(caCert.NotAfter()) {
+		return fmt.Errorf("%w (CA expires %s)", ErrExpiresAfterCA, caCert.NotAfter().UTC().Format(time.RFC3339))
 	}
 	return nil
 }
@@ -379,16 +534,4 @@ func prefixesToStrings(ps []netip.Prefix) []string {
 		out[i] = p.String()
 	}
 	return out
-}
-
-func bytesEqual(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
