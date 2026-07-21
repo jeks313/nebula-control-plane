@@ -150,7 +150,7 @@ NOT handled by the script — do these manually when the change needs them:
 built, no console · 7.3 partial · 7.4 blocked on M9 OIDC); M8 (CA rotation) is 100% unbuilt; M9/M10
 PARTIAL. Development forked off the linear track into ADR-driven parallel streams — ADRs 0003–0011
 have all shipped or are code-complete (per-ADR built-state below).** A live demo (terraform apply + bootstrap-genesis.sh) can
-run now on the real off-mesh topology. Schema ceiling on disk is **000031** (next free: **000032**;
+run now on the real off-mesh topology. Schema ceiling on disk is **000032** (next free: **000033**;
 the older "000015" here was stale). M0 feasibility PASSED
 (2026-06-11: SoftHSM P256 CA,
 tunnel forms — design §M0 results; spike under `spike/m0/`, `make m0-*`). **The poc *is* the prod
@@ -274,11 +274,16 @@ The linear track forked into ADR streams. Net state (✅ built · ◐ code-compl
 
 ### M8 · M9 · M10 status
 
-- **M8 — CA & key rotation: 100% UNBUILT** (the largest wholly-untouched milestone). No CA-rotation code
-  exists; the KMS CA + config-signing keys are live, but multi-CA bundle distribution, the CA lifecycle
-  state machine, signing cut-over/drain, retirement, config-key rotation, the emergency path, and the
-  staging drill are all unbuilt. *(The scheduled lighthouse-cert rotation above is 6.8-adjacent, NOT
-  M8 CA rotation.)*
+- **M8 — CA & key rotation: STARTED (slice 1 of ~4 built).** ✅ **CA registry + lifecycle state machine**
+  (`internal/ca`, migration **000032** `ca_certs`): `staged→active→draining→retired` with DB-enforced
+  single-active (partial unique index), `TrustBundle()` (non-retired CAs, sorted/byte-stable), `Active()`
+  (the signing CA), `SeedActive()` boot-seed, plus Stage/Activate(atomic cut-over demotes prior active
+  to draining)/Retire(refuses live dependents)/Abandon, all audited + unit-tested. **Still open:** 8.1
+  wiring (source `bundle.CABundle` from `TrustBundle` via a fail-open seam + boot-seed the current CA +
+  `harbor ca` CLI + heartbeat adoption tracking), 8.3 signing cut-over in the Signer + drain tracking
+  (which CA signed each leaf) + the 100%-adoption gate on activate, 8.4 retirement + KMS deletion alarms,
+  8.5 config-signing-key rotation (same overlap mechanism), 8.6 emergency path, 8.7 staging drill.
+  *(The scheduled lighthouse-cert rotation above is 6.8-adjacent, NOT M8 CA rotation.)*
 - **M9 — hardening & operations: PARTIAL (delivered via ADR 0007, not per-step ticks).** The poc IS the
   prod stack (above); ✅ 9.6 signed waved self-update (ADR 0003); 🟡 HA substrate present but single-AZ;
   🟡 SSM break-glass path live (no dual-operator drill). ❌ 9.1 laptop OIDC device-code flow (blocks 7.4),

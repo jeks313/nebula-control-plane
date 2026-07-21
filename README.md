@@ -125,7 +125,11 @@ CA, no cloud, no containers) still lives under [`spike/m0/`](spike/m0/README.md)
 ## Status & documentation
 
 The trust spine is built end-to-end on Linux (enrollment, renewal, signed bundles, group firewall,
-staged rollouts, revocation, admin console); Windows/macOS parity and CA/key rotation are the main
-remaining milestones. The planning docs in **`docs/`** are canonical and evolve with the code: the
-Design Plan (*what* & *why*), the Implementation Plan (*order* & *scope*), the Protocol Spec, and
-ADRs 0001-0014. `CLAUDE.md` carries a living, code-verified status summary.
+staged rollouts, revocation, admin console). Host and lighthouse certificates already rotate with
+zero downtime; the two main remaining milestones are rotation of the CA and config-signing keys
+themselves (M8) and the Windows/macOS hardening tail (M10). The per-OS service backends (Windows SCM,
+macOS launchd) are built and validated on real hosts, so what remains for M10 is at-rest host-key
+protection, least-privilege service accounts, and signed installers. The planning docs in **`docs/`**
+are canonical and evolve with the code: the Design Plan (*what* & *why*), the Implementation Plan
+(*order* & *scope*), the Protocol Spec, and ADRs 0001-0014. `CLAUDE.md` carries a living,
+code-verified status summary.
