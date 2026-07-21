@@ -147,10 +147,11 @@ NOT handled by the script — do these manually when the change needs them:
 > This is a fast summary — re-read those for exact state.
 
 **Milestone track: M0–M4 + M6 complete; M5 PARTIAL; M7 is the frontier (7.1 done · 7.2 engine+CLI
-built, no console · 7.3 partial · 7.4 blocked on M9 OIDC); M8 (CA rotation) is 100% unbuilt; M9/M10
+built, no console · 7.3 partial · 7.4 blocked on M9 OIDC); M8 (CA rotation) is the ACTIVE milestone
+(slice 1 + 8.1 + 8.3a drain-tracking built; 8.3b signing cut-over next); M9/M10
 PARTIAL. Development forked off the linear track into ADR-driven parallel streams — ADRs 0003–0011
 have all shipped or are code-complete (per-ADR built-state below).** A live demo (terraform apply + bootstrap-genesis.sh) can
-run now on the real off-mesh topology. Schema ceiling on disk is **000033** (next free: **000034**;
+run now on the real off-mesh topology. Schema ceiling on disk is **000034** (next free: **000035**;
 the older "000015" here was stale). M0 feasibility PASSED
 (2026-06-11: SoftHSM P256 CA,
 tunnel forms — design §M0 results; spike under `spike/m0/`, `make m0-*`). **The poc *is* the prod
@@ -274,7 +275,7 @@ The linear track forked into ADR streams. Net state (✅ built · ◐ code-compl
 
 ### M8 · M9 · M10 status
 
-- **M8 — CA & key rotation: STARTED (slice 1 + most of 8.1 built).** ✅ **CA registry + lifecycle state
+- **M8 — CA & key rotation: STARTED (slice 1 + 8.1 + 8.3a built).** ✅ **CA registry + lifecycle state
   machine** (`internal/ca`, migration **000032** `ca_certs`): `staged→active→draining→retired` with
   DB-enforced single-active (partial unique index), `TrustBundle()` (non-retired CAs, sorted/byte-stable),
   `Active()` (the signing CA), `SeedActive()` boot-seed, plus Stage/Activate(atomic cut-over demotes prior
@@ -292,9 +293,20 @@ The linear track forked into ADR streams. Net state (✅ built · ◐ code-compl
   override) + a `harbor ca adoption -id N` inspector. Reviewed adversarially (5-lens workflow, 0 defects).
   ⚠ **DEPLOY ORDER:** apply migration 000033 (`harbor migrate up`) BEFORE swapping the binary; old pilots
   omit the field and read as laggards until they re-beat under the new pilot, so the first post-ship
-  `activate` is blocked until the fleet re-reports (or use `-force`). **Still open:** 8.3 signing cut-over
-  in the Signer (select the active CA's backend) + drain tracking (which CA signed each leaf; a new
-  `enrollments.ca_fingerprint`) + force-renew stragglers, 8.4 retirement + KMS deletion alarms, 8.5
+  `activate` is blocked until the fleet re-reports (or use `-force`). ✅ **8.3a drain tracking** (migration
+  **000034** `enrollments.ca_fingerprint`): the CA that signed each host's CURRENT leaf (its `cert.Issuer()`,
+  byte-identical to the active CA's registry fingerprint) is stamped at issue AND re-stamped on every renewal
+  (`enrollment.issue/record`/Approve + `coreapi.handleRenew`, folded into the existing fail-closed updates).
+  `ca.Registry.LiveDependents(fp)` counts issued, non-expired leaves per CA (by the stored fingerprint OR the
+  leaf's own `Issuer()` when empty, so a **pre-8.3 fleet is never miscounted as 0** — the load-bearing fallback);
+  **`Retire` now self-counts and refuses fail-closed** while any live leaf remains (dropped the manual
+  `-dependents` flag). `harbor ca list` shows a **LIVE-DEPS** column; the boot-seed backfills empty rows to the
+  genesis CA. Proven by `internal/ca` `TestLiveDependents`/`TestRetire` + integration `TestCAFingerprintStampedAndRestamped`.
+  Reviewed adversarially (inline 5-lens pass, 0 defects). ⚠ **DEPLOY ORDER:** apply migration **000034**
+  (`harbor migrate up`) BEFORE swapping the binary — the first post-swap core-api/enroll-worker boot backfills
+  `ca_fingerprint` on existing issued rows, and the stamp/re-stamp writes need the column.
+  **Still open:** 8.3b signing cut-over in the Signer (select the active CA's backend — touches CA-key custody/P2,
+  needs design sign-off) + 8.3c force-renew stragglers, 8.4 retirement + KMS deletion alarms, 8.5
   config-signing-key rotation (same overlap mechanism), 8.6 emergency path, 8.7 staging drill.
   *(The scheduled lighthouse-cert rotation above is 6.8-adjacent, NOT M8 CA rotation.)*
 - **M9 — hardening & operations: PARTIAL (delivered via ADR 0007, not per-step ticks).** The poc IS the
@@ -399,7 +411,10 @@ Note: the durable queue (`internal/queue`) is now safe for concurrent first-open
   RBAC perm + step-up MFA + the **UI-5** blocklist/propagation-status console view (the last visible gap).
 - **7.3** — an explicit `harbor decommission` + a cloud-terminate/CloudTrail-driven auto-reap (today's
   reaper triggers on cert-lapse, not cloud inventory) + hard-delete.
-- **M8 — CA & key rotation** — the biggest greenfield milestone, entirely unbuilt.
+- **M8 — CA & key rotation** — the ACTIVE milestone. Registry + lifecycle (slice 1), 8.1 trust distribution +
+  adoption gate, and 8.3a drain tracking are built; **8.3b signing cut-over is next** (select the active CA's
+  backend at sign time — touches CA-key custody/P2, needs design sign-off), then 8.3c force-renew, 8.4
+  retirement + KMS deletion alarms, 8.5 config-key rotation, 8.6 emergency path, 8.7 staging drill.
 - **7.4 / M9 9.1** — laptop OIDC device-code flow (unblocks IdP offboarding).
 - **ADR 0012** (pilot fleet metrics) and **ADR 0014** (overlay DNS) are design-only.
 - **M10** — the Windows/macOS hardening tail (DACL/DPAPI, Authenticode/notarization, CI runners, least-priv).

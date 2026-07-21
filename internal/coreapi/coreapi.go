@@ -718,13 +718,17 @@ func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fp, _ := crt.Fingerprint()
+	// The CA that signed this renewed leaf (M8.3 drain tracking) — re-stamped on every
+	// renewal so CA1 drains toward zero as hosts migrate to CA2 after a cut-over. Issuer()
+	// is the exact CA this signature chained to (== ca_certs.fingerprint), TOCTOU-free.
+	caFp := strings.ToLower(strings.TrimSpace(crt.Issuer()))
 	// Track the host's CURRENT fingerprint: it rotates with the key on every
 	// renewal, so a blocklist must target the live fingerprint (M7.1/7.3). Fail
 	// closed if we can't persist it — delivering a renewed bundle whose fingerprint
 	// Core never recorded would leave a blocklist blind spot (the device could not
-	// be revoked by fingerprint).
+	// be revoked by fingerprint). The ca_fingerprint rides the SAME fail-closed write.
 	if err := s.cfg.Store.DB.WithContext(ctx).Model(&enrollment.Enrollment{}).
-		Where("id = ?", dev.ID).Update("fingerprint", fp).Error; err != nil {
+		Where("id = ?", dev.ID).Updates(map[string]any{"fingerprint": fp, "ca_fingerprint": caFp}).Error; err != nil {
 		wire.WriteError(w, wire.CodeInternal, "renew bookkeeping failed")
 		return
 	}

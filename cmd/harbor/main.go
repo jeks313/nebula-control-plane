@@ -152,7 +152,7 @@ usage:
   harbor ca stage          -cert CA2.crt -name N [-kms-key-id ID] [-actor A] [db flags]   trust CA2 before it signs
   harbor ca adoption       -id N [-stale-after D] [db flags]   how many live hosts trust CA N yet (the cut-over gate)
   harbor ca activate       -id N [-force] [-stale-after D] [-actor A] [db flags]   cut over to CA N once 100% adopted
-  harbor ca retire         -id N -dependents 0 [-actor A] [db flags]   remove a drained CA from trust
+  harbor ca retire         -id N [-actor A] [db flags]   remove a drained CA from trust (refuses while any live leaf still chains to it)
   harbor ca abandon        -id N [-actor A] [db flags]         cancel a staged CA
   harbor issue-cert        -name DEVICE -in-pub HOST.pub -ca-cert CA [-groups a,b] [... db flags]
   harbor backfill-cp-enrollment -cert HOST.crt -pool CIDR [-name N] [-groups a,b] [-overlay-ip IP] [db flags]

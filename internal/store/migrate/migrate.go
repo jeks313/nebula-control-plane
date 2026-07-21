@@ -59,6 +59,7 @@ var migrations = []*gormigrate.Migration{
 	sqlMigration("000031_gateway_health"),
 	sqlMigration("000032_ca_certs"),
 	sqlMigration("000033_heartbeat_trusted_cas"),
+	sqlMigration("000034_enrollment_ca_fingerprint"),
 }
 
 // Up applies all pending migrations.

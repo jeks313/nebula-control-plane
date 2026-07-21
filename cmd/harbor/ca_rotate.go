@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -43,10 +44,21 @@ func caSeedIdentity(caPEM []byte, cf *coreFlags) (name, kmsID string) {
 func (cf *coreFlags) caTrustSource(s *store.Store, caPEM []byte, audit ca.AuditFunc) func(context.Context) ([]string, error) {
 	reg := ca.New(s.DB, audit)
 	name, kmsID := caSeedIdentity(caPEM, cf)
-	if _, seeded, err := reg.SeedActive(context.Background(), name, string(caPEM), kmsID, "boot-seed"); err != nil {
+	seededCA, seeded, err := reg.SeedActive(context.Background(), name, string(caPEM), kmsID, "boot-seed")
+	switch {
+	case err != nil:
 		slog.Warn("ca: boot-seed of the current CA into the rotation registry failed; ca_bundle falls back to -ca-cert", "err", err)
-	} else if seeded {
+	case seeded:
 		slog.Info("ca: seeded the current CA into the rotation registry (M8)", "name", name, "kms_key_id", kmsID)
+		// M8.3 backfill (hygiene): pre-8.3 issued enrollments have an empty ca_fingerprint but
+		// were all signed by this genesis CA — stamp them so drain counts / `ca list` are
+		// populated. NOT a correctness dependency (ca.LiveDependents also falls back to each
+		// leaf's own Issuer()). Idempotent: the WHERE self-limits to 0 rows on later boots.
+		if res := s.DB.Exec("UPDATE enrollments SET ca_fingerprint = ? WHERE ca_fingerprint = '' AND status = 'issued'", seededCA.Fingerprint); res.Error != nil {
+			slog.Warn("ca: ca_fingerprint backfill failed (non-fatal; LiveDependents falls back to the leaf Issuer)", "err", res.Error)
+		} else if res.RowsAffected > 0 {
+			slog.Info("ca: backfilled ca_fingerprint on pre-8.3 issued enrollments", "rows", res.RowsAffected)
+		}
 	}
 	return reg.TrustBundle
 }
@@ -77,8 +89,7 @@ func cmdCA(args []string) {
 	certPath := fs.String("cert", "", "stage: CA certificate PEM file (the new CA to trust)")
 	name := fs.String("name", "", "stage: human label for the CA (e.g. ca-2027)")
 	kmsKeyID := fs.String("kms-key-id", "", "stage: how to reach its signing backend (KMS ARN / 'pkcs11:<label>' / 'software'); empty = trust-only")
-	id := fs.Int64("id", 0, "activate/retire/abandon: the CA row id (see `ca list`)")
-	dependents := fs.Int("dependents", -1, "retire: count of live leaf certs still chaining to this CA (must be 0 to retire; drain tracking is M8.3, so confirm this yourself)")
+	id := fs.Int64("id", 0, "adoption/activate/retire/abandon: the CA row id (see `ca list`)")
 	actor := fs.String("actor", "operator", "admin identity for the audit trail")
 	force := fs.Bool("force", false, "activate: cut over even if <100% of LIVE hosts confirm trust of the target CA (break-glass — may strand laggards)")
 	staleAfter := fs.Duration("stale-after", 5*time.Minute, "activate/adoption: heartbeat freshness window defining a LIVE host (keep aligned with serve/admin-api -stale-after)")
@@ -100,10 +111,14 @@ func cmdCA(args []string) {
 			fmt.Println("no CAs yet (the current CA is seeded on core-api / enroll-worker startup)")
 			return
 		}
-		fmt.Printf("%-4s %-18s %-9s %-12s %s\n", "ID", "NAME", "STATE", "NOT_AFTER", "FINGERPRINT")
+		fmt.Printf("%-4s %-18s %-9s %-12s %-9s %s\n", "ID", "NAME", "STATE", "NOT_AFTER", "LIVE-DEPS", "FINGERPRINT")
 		for _, c := range rows {
-			fmt.Printf("%-4d %-18s %-9s %-12s %s\n", c.ID, c.Name, c.State,
-				time.Unix(0, c.NotAfter).UTC().Format("2006-01-02"), c.Fingerprint)
+			deps := "?" // "?" if the count read fails, so the table still prints
+			if n, derr := reg.LiveDependents(ctx, c.Fingerprint); derr == nil {
+				deps = strconv.Itoa(n)
+			}
+			fmt.Printf("%-4d %-18s %-9s %-12s %-9s %s\n", c.ID, c.Name, c.State,
+				time.Unix(0, c.NotAfter).UTC().Format("2006-01-02"), deps, c.Fingerprint)
 		}
 	case "stage":
 		if *certPath == "" || *name == "" {
@@ -187,13 +202,12 @@ func cmdCA(args []string) {
 		if *id == 0 {
 			fatalf("ca retire: -id is required")
 		}
-		if *dependents < 0 {
-			fatalf("ca retire: pass -dependents N (0 to retire). Drain tracking (which CA signed each leaf) is M8.3, so you must confirm no live leaf still chains to this CA.")
-		}
-		if err := reg.Retire(ctx, *id, *dependents, *actor); err != nil {
+		// The live-dependent count is computed automatically now (M8.3 drain tracking) and
+		// Retire refuses fail-closed while any live leaf still chains to this CA.
+		if err := reg.Retire(ctx, *id, *actor); err != nil {
 			fatalf("ca retire: %v", err)
 		}
-		fmt.Printf("retired CA id %d — out of the trust bundle; schedule its KMS key deletion (with alarms)\n", *id)
+		fmt.Printf("retired CA id %d — 0 live dependents confirmed; out of the trust bundle; schedule its KMS key deletion (with alarms)\n", *id)
 	case "abandon":
 		if *id == 0 {
 			fatalf("ca abandon: -id is required")

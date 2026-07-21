@@ -194,39 +194,37 @@ func (r *Registry) Activate(ctx context.Context, id int64, actor string) error {
 }
 
 // Retire moves a `draining` CA to `retired` (out of the trust bundle, eligible for key
-// deletion), but ONLY when it has no live dependents — liveDependents is the count of
-// still-valid leaf certs that chain to this CA, supplied by the caller (drain tracking is
-// M8.3). A non-zero count is refused with ErrHasDependents (§4.6 step 5 invariant).
-func (r *Registry) Retire(ctx context.Context, id int64, liveDependents int, actor string) error {
-	if liveDependents > 0 {
-		return fmt.Errorf("%w: %d live", ErrHasDependents, liveDependents)
+// deletion), but ONLY when it has no live dependents — leaf certs still chaining to it
+// (design §4.6 step 5). The count is computed automatically (LiveDependents) and the gate
+// is FAIL-CLOSED: an unknown count never permits a retire that could strand hosts this CA
+// signed. A draining CA gains no NEW leaves (only the active CA signs), so counting before
+// the guarded write is race-safe (the count only decreases).
+func (r *Registry) Retire(ctx context.Context, id int64, actor string) error {
+	target, err := r.Get(ctx, id)
+	if err != nil {
+		return err // ErrNotFound or a read error
+	}
+	if target.State != StateDraining {
+		return fmt.Errorf("%w: %s -> retired (only a draining CA can be retired)", ErrIllegalTransition, target.State)
+	}
+	deps, derr := r.LiveDependents(ctx, target.Fingerprint)
+	if derr != nil {
+		return derr // fail closed — never retire on an unknown dependent count
+	}
+	if deps > 0 {
+		return fmt.Errorf("%w: %d live", ErrHasDependents, deps)
 	}
 	now := r.now().UTC().UnixNano()
-	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var target CA
-		if err := tx.First(&target, "id = ?", id).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return ErrNotFound
-			}
-			return err
-		}
-		if target.State != StateDraining {
-			return fmt.Errorf("%w: %s -> retired (only a draining CA can be retired)", ErrIllegalTransition, target.State)
-		}
-		res := tx.Model(&CA{}).Where("id = ? AND state = ?", id, StateDraining).
-			Updates(map[string]any{"state": StateRetired, "updated_at": now})
-		if res.Error != nil {
-			return res.Error
-		}
-		if res.RowsAffected == 0 {
-			return fmt.Errorf("%w: draining -> retired (lost a concurrent transition)", ErrIllegalTransition)
-		}
-		return nil
-	})
-	if err != nil {
-		return err
+	// CAS on state=draining guards a concurrent transition (same pattern as Abandon).
+	res := r.db.WithContext(ctx).Model(&CA{}).Where("id = ? AND state = ?", id, StateDraining).
+		Updates(map[string]any{"state": StateRetired, "updated_at": now})
+	if res.Error != nil {
+		return fmt.Errorf("ca: retire: %w", res.Error)
 	}
-	r.recordAudit(ctx, actor, "ca-retire", fmt.Sprintf("id=%d", id), "")
+	if res.RowsAffected == 0 {
+		return fmt.Errorf("%w: draining -> retired (no longer draining)", ErrIllegalTransition)
+	}
+	r.recordAudit(ctx, actor, "ca-retire", fmt.Sprintf("id=%d", id), fmt.Sprintf(`{"live_dependents":%d}`, deps))
 	return nil
 }
 
@@ -422,4 +420,41 @@ func containsFold(fps []string, fp string) bool {
 		}
 	}
 	return false
+}
+
+// LiveDependents counts issued leaves still chaining to caFingerprint whose cert has NOT
+// expired — the "active certs per CA" drain count that gates Retire (design §4.6 step 5).
+// Reads enrollments by RAW table name (no enrollment import -> no import cycle, mirroring
+// AdoptionStatus). Expiry is parsed from the stored cert_pem (authoritative; there is no
+// expiry column). A row with an EMPTY ca_fingerprint (a leaf issued before this column
+// existed) falls back to the leaf's OWN Issuer(), so a pre-8.3 fleet — all signed by the
+// genesis CA — is never miscounted as zero dependents. That fallback is load-bearing
+// correctness for Retire, not hygiene.
+func (r *Registry) LiveDependents(ctx context.Context, caFingerprint string) (int, error) {
+	fp := strings.ToLower(strings.TrimSpace(caFingerprint))
+	var rows []struct {
+		CAFingerprint string `gorm:"column:ca_fingerprint"`
+		CertPEM       string `gorm:"column:cert_pem"`
+	}
+	if err := r.db.WithContext(ctx).Table("enrollments").
+		Select("ca_fingerprint, cert_pem").
+		Where("status = ?", "issued").Find(&rows).Error; err != nil {
+		return 0, fmt.Errorf("ca: live dependents: %w", err)
+	}
+	now := r.now()
+	n := 0
+	for _, e := range rows {
+		c, _, perr := cert.UnmarshalCertificateFromPEM([]byte(e.CertPEM))
+		if perr != nil || c == nil || !c.NotAfter().After(now) {
+			continue // unparseable or expired -> not a live dependent
+		}
+		rowFP := strings.ToLower(strings.TrimSpace(e.CAFingerprint))
+		if rowFP == "" {
+			rowFP = strings.ToLower(strings.TrimSpace(c.Issuer())) // pre-8.3 backfill fallback
+		}
+		if rowFP == fp {
+			n++
+		}
+	}
+	return n, nil
 }

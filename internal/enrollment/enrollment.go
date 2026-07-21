@@ -114,7 +114,11 @@ type Enrollment struct {
 	// updated on issue and on every renewal. It lets a host be blocklisted by name
 	// / overlay IP — resolved to its live fingerprint (M7.1). Empty until issued.
 	Fingerprint string `gorm:"column:fingerprint"`
-	CreatedAt   int64  `gorm:"column:created_at"`
+	// CAFingerprint is the fingerprint of the CA that signed this host's CURRENT leaf (its
+	// cert's Issuer()). Stamped at issue, re-stamped on every renewal (it changes on an M8.3
+	// signing cut-over), so Harbor can count live leaves per CA for drain tracking. Empty until issued.
+	CAFingerprint string `gorm:"column:ca_fingerprint"`
+	CreatedAt     int64  `gorm:"column:created_at"`
 	DecidedAt   int64  `gorm:"column:decided_at"`
 	Approver    string `gorm:"column:approver"`
 	// Ephemeral records whether this host joined via an ephemeral join key
@@ -384,7 +388,7 @@ func (c *Consumer) Process(ctx context.Context, cand queue.Candidate) (Result, e
 	// is recorded on the row now so a later Approve re-derives the same shorter cert TTL
 	// (the Approve path re-reads the key, mirroring the netblock re-derivation).
 	if !jk.AutoIssue {
-		if err := c.record(ctx, cand.EnrollmentID, req, pubBytes, jk.ID, groups, jk.SubRange, StatusPending, nil, "", "", evidence{}, jk.Ephemeral); err != nil {
+		if err := c.record(ctx, cand.EnrollmentID, req, pubBytes, jk.ID, groups, jk.SubRange, StatusPending, nil, "", "", "", evidence{}, jk.Ephemeral); err != nil {
 			return Result{}, fmt.Errorf("enroll: persist pending enrollment: %w", err) // transient -> nack, don't deliver
 		}
 		c.writeResult(ctx, cand.EnrollmentID, cand.RetrievalSecretHash, nil, StatusPending, "")
@@ -396,7 +400,7 @@ func (c *Consumer) Process(ctx context.Context, cand queue.Candidate) (Result, e
 	// auto_issue: mint immediately. The join key's sub-range carries the netblock
 	// name (ADR 0010 — reusing join_keys.sub_range); empty -> the default block. An
 	// ephemeral key shortens the cert TTL (issue's ephemeral arg) and is stamped on the row.
-	ip, certPEM, fp, notAfter, err := c.issue(ctx, "enroll-auto", deviceName, pubBytes, jk.GroupList(), jk.SubRange, "token", jk.Ephemeral)
+	ip, certPEM, fp, caFp, notAfter, err := c.issue(ctx, "enroll-auto", deviceName, pubBytes, jk.GroupList(), jk.SubRange, "token", jk.Ephemeral)
 	if err != nil {
 		return Result{}, err
 	}
@@ -404,7 +408,7 @@ func (c *Consumer) Process(ctx context.Context, cand queue.Candidate) (Result, e
 	if err != nil {
 		return Result{}, err
 	}
-	if err := c.record(ctx, cand.EnrollmentID, req, pubBytes, jk.ID, groups, jk.SubRange, StatusIssued, certPEM, ip.String(), fp, evidence{}, jk.Ephemeral); err != nil {
+	if err := c.record(ctx, cand.EnrollmentID, req, pubBytes, jk.ID, groups, jk.SubRange, StatusIssued, certPEM, ip.String(), fp, caFp, evidence{}, jk.Ephemeral); err != nil {
 		return Result{}, fmt.Errorf("enroll: persist issued enrollment: %w", err) // transient -> nack, don't deliver the bundle
 	}
 	c.writeResult(ctx, cand.EnrollmentID, cand.RetrievalSecretHash, bundleJWS, StatusIssued, "")
@@ -469,7 +473,7 @@ func (c *Consumer) processAttested(ctx context.Context, cand queue.Candidate, re
 	// Attested (cloud-sigv4) enrollments are non-ephemeral for now — ephemeral is a
 	// join-key concept; pass ephemeral=false through record/issue.
 	if !autoIssue {
-		if err := c.record(ctx, cand.EnrollmentID, req, pubBytes, 0, string(groupsJSON), netblock, StatusPending, nil, "", "", ev, false); err != nil {
+		if err := c.record(ctx, cand.EnrollmentID, req, pubBytes, 0, string(groupsJSON), netblock, StatusPending, nil, "", "", "", ev, false); err != nil {
 			return Result{}, fmt.Errorf("enroll: persist pending enrollment: %w", err) // transient -> nack, don't deliver
 		}
 		c.writeResult(ctx, cand.EnrollmentID, cand.RetrievalSecretHash, nil, StatusPending, "")
@@ -481,7 +485,7 @@ func (c *Consumer) processAttested(ctx context.Context, cand queue.Candidate, re
 	// Cloud-trust -> netblock binding (ADR 0010 Phase 2): the matched AWSAccount's
 	// Netblock (empty -> the bounded 'default' block) scopes the allocation. Method
 	// records the join source.
-	ip, certPEM, fp, notAfter, err := c.issue(ctx, "enroll-attested", deviceName, pubBytes, groupsSlice, netblock, "aws-sigv4", false)
+	ip, certPEM, fp, caFp, notAfter, err := c.issue(ctx, "enroll-attested", deviceName, pubBytes, groupsSlice, netblock, "aws-sigv4", false)
 	if err != nil {
 		return Result{}, err
 	}
@@ -489,7 +493,7 @@ func (c *Consumer) processAttested(ctx context.Context, cand queue.Candidate, re
 	if err != nil {
 		return Result{}, err
 	}
-	if err := c.record(ctx, cand.EnrollmentID, req, pubBytes, 0, string(groupsJSON), netblock, StatusIssued, certPEM, ip.String(), fp, ev, false); err != nil {
+	if err := c.record(ctx, cand.EnrollmentID, req, pubBytes, 0, string(groupsJSON), netblock, StatusIssued, certPEM, ip.String(), fp, caFp, ev, false); err != nil {
 		return Result{}, fmt.Errorf("enroll: persist issued enrollment: %w", err) // transient -> nack, don't deliver the bundle
 	}
 	c.writeResult(ctx, cand.EnrollmentID, cand.RetrievalSecretHash, bundleJWS, StatusIssued, "")
@@ -622,7 +626,7 @@ func (c *Consumer) processSSO(ctx context.Context, cand queue.Candidate, req wir
 	// SSO enrollments are non-ephemeral for now — ephemeral is a join-key concept;
 	// pass ephemeral=false through record/issue.
 	if !autoIssue {
-		if err := c.record(ctx, cand.EnrollmentID, req, pubBytes, 0, string(groupsJSON), netblock, StatusPending, nil, "", "", ev, false); err != nil {
+		if err := c.record(ctx, cand.EnrollmentID, req, pubBytes, 0, string(groupsJSON), netblock, StatusPending, nil, "", "", "", ev, false); err != nil {
 			return Result{}, fmt.Errorf("enroll: persist pending enrollment: %w", err) // transient -> nack, don't deliver
 		}
 		c.writeResult(ctx, cand.EnrollmentID, cand.RetrievalSecretHash, nil, StatusPending, "")
@@ -631,7 +635,7 @@ func (c *Consumer) processSSO(ctx context.Context, cand queue.Candidate, req wir
 		return Result{EnrollmentID: cand.EnrollmentID, Status: StatusPending}, nil
 	}
 
-	ip, certPEM, fp, notAfter, err := c.issue(ctx, "enroll-sso", deviceName, pubBytes, groupsSlice, netblock, providerSSO, false)
+	ip, certPEM, fp, caFp, notAfter, err := c.issue(ctx, "enroll-sso", deviceName, pubBytes, groupsSlice, netblock, providerSSO, false)
 	if err != nil {
 		return Result{}, err
 	}
@@ -639,7 +643,7 @@ func (c *Consumer) processSSO(ctx context.Context, cand queue.Candidate, req wir
 	if err != nil {
 		return Result{}, err
 	}
-	if err := c.record(ctx, cand.EnrollmentID, req, pubBytes, 0, string(groupsJSON), netblock, StatusIssued, certPEM, ip.String(), fp, ev, false); err != nil {
+	if err := c.record(ctx, cand.EnrollmentID, req, pubBytes, 0, string(groupsJSON), netblock, StatusIssued, certPEM, ip.String(), fp, caFp, ev, false); err != nil {
 		return Result{}, fmt.Errorf("enroll: persist issued enrollment: %w", err) // transient -> nack, don't deliver the bundle
 	}
 	c.writeResult(ctx, cand.EnrollmentID, cand.RetrievalSecretHash, bundleJWS, StatusIssued, "")
@@ -701,7 +705,7 @@ func (c *Consumer) Approve(ctx context.Context, enrollmentID, approver string) (
 	// the key keeps Approve consistent with approveNetblock and tolerant of a row written
 	// before this column existed. Cloud-sigv4 / SSO are always non-ephemeral.
 	ephemeral := c.approveEphemeral(ctx, e)
-	ip, certPEM, fp, notAfter, err := c.issue(ctx, approver, e.DeviceName, e.Pubkey, groups, netblockName, provenanceMethod(e.Method), ephemeral)
+	ip, certPEM, fp, caFp, notAfter, err := c.issue(ctx, approver, e.DeviceName, e.Pubkey, groups, netblockName, provenanceMethod(e.Method), ephemeral)
 	if err != nil {
 		return Result{}, err
 	}
@@ -716,7 +720,7 @@ func (c *Consumer) Approve(ctx context.Context, enrollmentID, approver string) (
 		Where("enrollment_id = ? AND status = ?", enrollmentID, StatusPending).
 		Updates(map[string]any{
 			"status": StatusIssued, "cert_pem": certPEM, "overlay_ip": ip.String(),
-			"fingerprint": fp, "decided_at": now, "approver": approver, "ephemeral": ephemeral,
+			"fingerprint": fp, "ca_fingerprint": caFp, "decided_at": now, "approver": approver, "ephemeral": ephemeral,
 		})
 	if claim.Error != nil {
 		_ = c.cfg.Allocator.Release(ctx, ip)
@@ -776,7 +780,7 @@ func (c *Consumer) deny(ctx context.Context, cand queue.Candidate, req wire.Enro
 	// Best-effort: a denial issues no cert, so a failed record only loses the
 	// history row — the audit append below still records the rejection, and there
 	// is no bundle to withhold. (Contrast the issue/pending paths, which fail closed.)
-	_ = c.record(ctx, cand.EnrollmentID, req, pubBytes, 0, "[]", "", StatusDenied, nil, "", "", evidence{}, false)
+	_ = c.record(ctx, cand.EnrollmentID, req, pubBytes, 0, "[]", "", StatusDenied, nil, "", "", "", evidence{}, false)
 	c.writeResult(ctx, cand.EnrollmentID, cand.RetrievalSecretHash, nil, StatusDenied, reason)
 	_ = c.audit(ctx, "system", action, req.CSR.RequestedName, reason)
 }
@@ -997,7 +1001,7 @@ func (c *Consumer) certTTL(ephemeral bool) time.Duration {
 // scope, or — later — an SSO entry); method is token | aws-sigv4 | sso (ADR 0010).
 // ephemeral shortens the cert validity (certTTL) for an ephemeral-join-key host; it is
 // the join-key Ephemeral flag threaded through from processToken / re-derived on Approve.
-func (c *Consumer) issue(ctx context.Context, actor, deviceName string, pubBytes []byte, groups []string, netblockName, method string, ephemeral bool) (ip netip.Addr, certPEM []byte, fingerprint string, notAfter time.Time, err error) {
+func (c *Consumer) issue(ctx context.Context, actor, deviceName string, pubBytes []byte, groups []string, netblockName, method string, ephemeral bool) (ip netip.Addr, certPEM []byte, fingerprint string, caFingerprint string, notAfter time.Time, err error) {
 	// CHOKEPOINT (P10): ordinary enrollment must NEVER mint a reserved group
 	// (control-plane/lighthouse). All auto-issue methods (token/aws-sigv4/sso) AND admin
 	// Approve funnel through here, so this single guard closes every enrollment route,
@@ -1009,7 +1013,7 @@ func (c *Consumer) issue(ctx context.Context, actor, deviceName string, pubBytes
 		gj, _ := json.Marshal(groups)
 		_ = c.audit(ctx, "system", "enroll-reserved-group-refused", deviceName,
 			fmt.Sprintf(`{"groups":%s,"method":%q,"actor":%q}`, gj, method, actor))
-		return netip.Addr{}, nil, "", time.Time{}, fmt.Errorf("%w: %s", ErrReservedGroup, gj)
+		return netip.Addr{}, nil, "", "", time.Time{}, fmt.Errorf("%w: %s", ErrReservedGroup, gj)
 	}
 	ip, err = c.cfg.Allocator.Allocate(ctx, deviceName, netblockName, method)
 	if err != nil {
@@ -1020,7 +1024,7 @@ func (c *Consumer) issue(ctx context.Context, actor, deviceName string, pubBytes
 			_ = c.audit(ctx, "system", "enroll-exhausted", deviceName,
 				fmt.Sprintf(`{"netblock":%q,"method":%q,"reason":"no addresses available"}`, netblockName, method))
 		}
-		return netip.Addr{}, nil, "", time.Time{}, fmt.Errorf("enrollment: allocate IP: %w", err)
+		return netip.Addr{}, nil, "", "", time.Time{}, fmt.Errorf("enrollment: allocate IP: %w", err)
 	}
 	nb := c.now().Add(-5 * time.Minute)
 	notAfter = nb.Add(c.certTTL(ephemeral))
@@ -1034,11 +1038,15 @@ func (c *Consumer) issue(ctx context.Context, actor, deviceName string, pubBytes
 	})
 	if ierr != nil {
 		_ = c.cfg.Allocator.Release(ctx, ip) // don't leak the IP on a failed sign
-		return netip.Addr{}, nil, "", time.Time{}, fmt.Errorf("enrollment: sign: %w", ierr)
+		return netip.Addr{}, nil, "", "", time.Time{}, fmt.Errorf("enrollment: sign: %w", ierr)
 	}
 	certPEM = pem
 	fingerprint, _ = crt.Fingerprint() // the blocklist key (M7.1)
-	return ip, certPEM, fingerprint, notAfter, nil
+	// The CA that signed this leaf, for per-CA drain tracking (M8.3). Issuer() is byte-identical
+	// to ca_certs.fingerprint and is the EXACT CA this signature chained to (TOCTOU-free — never
+	// query ca.Active() here, which could race a concurrent cut-over).
+	caFingerprint = strings.ToLower(strings.TrimSpace(crt.Issuer()))
+	return ip, certPEM, fingerprint, caFingerprint, notAfter, nil
 }
 
 // buildBundle assembles + signs the config bundle (3.6). Returns nil if no
@@ -1154,7 +1162,7 @@ type evidence struct {
 // handed to a host the control plane has no record of (which would be invisible to
 // blocklist/fleet/audit). ephemeral records whether the host joined via an ephemeral
 // join key (false for cloud-sigv4 / SSO).
-func (c *Consumer) record(ctx context.Context, enrollmentID string, req wire.EnrollRequest, pubBytes []byte, joinKeyID int64, groups, subRange, status string, certPEM []byte, ip, fingerprint string, ev evidence, ephemeral bool) error {
+func (c *Consumer) record(ctx context.Context, enrollmentID string, req wire.EnrollRequest, pubBytes []byte, joinKeyID int64, groups, subRange, status string, certPEM []byte, ip, fingerprint, caFingerprint string, ev evidence, ephemeral bool) error {
 	e := Enrollment{
 		EnrollmentID:    enrollmentID,
 		DeviceName:      deviceName(req, wire.PubkeyHash(pubBytes)),
@@ -1169,6 +1177,7 @@ func (c *Consumer) record(ctx context.Context, enrollmentID string, req wire.Enr
 		CertPEM:         certPEM,
 		OverlayIP:       ip,
 		Fingerprint:     fingerprint,
+		CAFingerprint:   caFingerprint,
 		Ephemeral:       ephemeral,
 		CreatedAt:       c.now().UnixNano(),
 		AttestProvider:  ev.provider,

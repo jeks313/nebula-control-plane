@@ -158,27 +158,32 @@ func TestActivateOnlyStaged(t *testing.T) {
 	}
 }
 
-// TestRetire: a draining CA with no dependents retires (out of the bundle); with
-// dependents it is refused; a non-draining CA cannot be retired.
+// TestRetire: a draining CA with a live dependent is refused; a non-draining CA cannot be
+// retired; once the last live leaf is gone the drained CA retires and leaves the trust bundle.
+// The live-dependent count is now computed by Retire itself (M8.3), not passed in.
 func TestRetire(t *testing.T) {
-	_, r := setup(t)
+	s, r := setup(t)
 	ctx := context.Background()
-	pem1, _ := mkCA(t, "ca-1")
-	pem2, _ := mkCA(t, "ca-2")
+	pem1, _, ca1cert, bk1 := mkCAWithBackend(t, "ca-1")
+	pem2, _, _, _ := mkCAWithBackend(t, "ca-2")
 	ca1, _, _ := r.SeedActive(ctx, "ca-1", pem1, "software", "boot")
 	ca2, _ := r.Stage(ctx, "ca-2", pem2, "kms", "op")
 	_ = r.Activate(ctx, ca2.ID, "op") // ca-1 -> draining, ca-2 -> active
 
-	// Still has live dependents -> refused.
-	if err := r.Retire(ctx, ca1.ID, 3, "op"); !errors.Is(err, ErrHasDependents) {
-		t.Fatalf("retire with dependents err = %v, want ErrHasDependents", err)
+	// A live leaf still chains to ca-1 -> retire refused (fail-closed drain gate).
+	seedEnroll(t, s.DB, "e-live", "issued", mkLeafPEM(t, ca1cert, bk1, "host", time.Now().Add(24*time.Hour)), ca1.Fingerprint)
+	if err := r.Retire(ctx, ca1.ID, "op"); !errors.Is(err, ErrHasDependents) {
+		t.Fatalf("retire with a live dependent err = %v, want ErrHasDependents", err)
 	}
-	// A draining CA (active) cannot be retired.
-	if err := r.Retire(ctx, ca2.ID, 0, "op"); !errors.Is(err, ErrIllegalTransition) {
+	// A draining CA (here ca-2 is active) cannot be retired.
+	if err := r.Retire(ctx, ca2.ID, "op"); !errors.Is(err, ErrIllegalTransition) {
 		t.Fatalf("retire the active CA err = %v, want ErrIllegalTransition", err)
 	}
-	// Drained -> retire succeeds and leaves the trust bundle.
-	if err := r.Retire(ctx, ca1.ID, 0, "op"); err != nil {
+	// The last dependent migrates off ca-1 (renewed to ca-2 / decommissioned) -> retire succeeds.
+	if err := s.DB.Table("enrollments").Where("enrollment_id = ?", "e-live").Update("status", "denied").Error; err != nil {
+		t.Fatalf("drain the dependent: %v", err)
+	}
+	if err := r.Retire(ctx, ca1.ID, "op"); err != nil {
 		t.Fatalf("retire drained ca-1: %v", err)
 	}
 	if st := states(t, r); st["ca-1"] != StateRetired {
