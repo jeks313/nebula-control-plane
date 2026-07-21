@@ -389,7 +389,7 @@ Note: the durable queue (`internal/queue`) is now safe for concurrent first-open
 ## Conventions
 
 - **Go module:** `github.com/jeks313/nebula-control-plane`. Binaries: `pilot`, `harbor`.
-- **Git identity:** Christopher Hyde / chris@hyde.ca. **Never add `Co-Authored-By` lines.**
+- **Git identity:** use your configured git `user.name` / `user.email`. **Never add `Co-Authored-By` lines.**
 - **Commit/push only when the user explicitly asks.** Milestone steps commit directly to `main`
   (linear history, one commit per step); an `origin` remote exists — push only on request.
 - `spike/m0/run/` and `spike/m0/tools/` are gitignored (generated certs/keys/SoftHSM token/built binaries).

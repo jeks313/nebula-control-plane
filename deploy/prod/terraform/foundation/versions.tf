@@ -10,13 +10,12 @@ terraform {
 
   # The foundation stack's OWN state lives in the very bucket it creates, so it is a
   # one-time bootstrap:
-  #   1. First apply with LOCAL state (this block commented) to create the bucket + keys.
-  #   2. Uncomment, fill in the bucket name, and run `terraform init -migrate-state` to
+  #   1. First apply with LOCAL state (comment this block out) to create the bucket + keys.
+  #   2. Uncomment, then run `terraform init -migrate-state -backend-config=backend.hcl` to
   #      move foundation.tfstate into the bucket. From then on it is remote + locked.
-  # The app stack uses the same bucket under a different key (app/versions.tf).
-  #
+  # The bucket name is NOT committed (so the repo can stay public): pass it via a gitignored
+  # backend.hcl (copy from backend.hcl.example). The app stack uses the same bucket, other key.
   backend "s3" {
-    bucket       = "ncp-tfstate-123456789012"
     key          = "nebula-control-plane/foundation.tfstate"
     region       = "ca-central-1"
     encrypt      = true

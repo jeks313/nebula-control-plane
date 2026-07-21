@@ -89,7 +89,7 @@ func cmdSeedDemo(args []string) {
 		{"100.64.255.2", "lh-iad", []string{"198.51.100.20:4242"}},
 		{"100.64.255.3", "lh-sin", []string{"192.0.2.30:4242"}},
 	} {
-		if _, err := reg.Add(ctx, lh.ip, lh.host, lh.addrs, "chris@hyde.ca"); err != nil {
+		if _, err := reg.Add(ctx, lh.ip, lh.host, lh.addrs, "admin@example.com"); err != nil {
 			fatalf("seed lighthouse %s: %v", lh.host, err)
 		}
 	}
@@ -172,15 +172,15 @@ func cmdSeedDemo(args []string) {
 		MinHealthy:    1,
 		Observe:       10 * time.Minute,
 		MissingAfter:  5 * time.Minute,
-		Actor:         "chris@hyde.ca",
+		Actor:         "admin@example.com",
 	}); err != nil {
 		fatalf("seed rollout: %v", err)
 	}
 
 	// A believable recent-activity trail (also fleshes out the verified audit chain).
 	for _, a := range []struct{ actor, action, target, detail string }{
-		{"chris@hyde.ca", "genesis-complete", "ca", "CA + config-signing keys created"},
-		{"chris@hyde.ca", "policy-published", "#42", "allow laptops -> servers tcp 22,443"},
+		{"admin@example.com", "genesis-complete", "ca", "CA + config-signing keys created"},
+		{"admin@example.com", "policy-published", "#42", "allow laptops -> servers tcp 22,443"},
 		{"ops@hyde.ca", "enroll-approved", "edge-fra-01", "100.64.0.11"},
 		{"ops@hyde.ca", "enroll-approved", "db-iad-01", "100.64.0.12"},
 	} {
@@ -205,7 +205,7 @@ func cmdSeedDemo(args []string) {
 	// source of truth the /active endpoints + enforcement readers now read), so a
 	// committed demo config is immediately ACTIVE; a pending change stays in the inbox.
 	dc := newPolicyController(s)
-	ch, err := dc.Propose(ctx, cloudtrust.PublishKind, "AWS production accounts", payload, "chris@hyde.ca")
+	ch, err := dc.Propose(ctx, cloudtrust.PublishKind, "AWS production accounts", payload, "admin@example.com")
 	if err != nil {
 		fatalf("seed cloud-trust propose: %v", err)
 	}
@@ -218,7 +218,7 @@ func cmdSeedDemo(args []string) {
 	// pending change is proposed by chris, leaving a distinct admin (e.g. the mock-IdP
 	// Ada Admin) able to approve it in the demo.
 	active := "allow group:laptops -> group:servers tcp 22\nallow any -> group:web tcp 443\n"
-	pch, err := dc.Propose(ctx, policy.PublishKind, "baseline access", []byte(active), "chris@hyde.ca")
+	pch, err := dc.Propose(ctx, policy.PublishKind, "baseline access", []byte(active), "admin@example.com")
 	if err != nil {
 		fatalf("seed policy propose: %v", err)
 	}
@@ -226,7 +226,7 @@ func cmdSeedDemo(args []string) {
 		fatalf("seed policy approve: %v", err)
 	}
 	pending := "allow group:contractors -> group:servers tcp 22\nallow any -> group:web tcp 443\n"
-	if _, err := dc.Propose(ctx, policy.PublishKind, "grant contractors SSH", []byte(pending), "chris@hyde.ca"); err != nil {
+	if _, err := dc.Propose(ctx, policy.PublishKind, "grant contractors SSH", []byte(pending), "admin@example.com"); err != nil {
 		fatalf("seed pending policy: %v", err)
 	}
 
@@ -243,7 +243,7 @@ func cmdSeedDemo(args []string) {
 		fatalf("seed ipam allocator: %v", err)
 	}
 	nbReg := netblock.New(s.DB, pool, nil, nbAlloc, audit)
-	if _, _, err := genesis.SeedNetblocks(ctx, nbReg, pool, netip.Prefix{}, netip.Prefix{}, "chris@hyde.ca"); err != nil {
+	if _, _, err := genesis.SeedNetblocks(ctx, nbReg, pool, netip.Prefix{}, netip.Prefix{}, "admin@example.com"); err != nil {
 		fatalf("seed netblocks (central+default): %v", err)
 	}
 	for _, nb := range []struct{ name, cidr, desc string }{
@@ -252,7 +252,7 @@ func cmdSeedDemo(args []string) {
 		{"sso-eng", "100.64.30.0/24", "SSO platform-engineering hosts"},
 		{"sso-contractors", "100.64.40.0/27", "SSO contractor hosts (small, near-exhausted)"},
 	} {
-		if _, err := nbReg.Add(ctx, nb.name, netip.MustParsePrefix(nb.cidr), nb.desc, "chris@hyde.ca"); err != nil {
+		if _, err := nbReg.Add(ctx, nb.name, netip.MustParsePrefix(nb.cidr), nb.desc, "admin@example.com"); err != nil {
 			fatalf("seed netblock %s: %v", nb.name, err)
 		}
 	}
@@ -343,7 +343,7 @@ func cmdSeedDemo(args []string) {
 		},
 	}
 	utPayload, _ := json.Marshal(utCfg)
-	utCh, err := dc.Propose(ctx, usertrust.PublishKind, "demo IdP user-trust", utPayload, "chris@hyde.ca")
+	utCh, err := dc.Propose(ctx, usertrust.PublishKind, "demo IdP user-trust", utPayload, "admin@example.com")
 	if err != nil {
 		fatalf("seed user-trust propose: %v", err)
 	}

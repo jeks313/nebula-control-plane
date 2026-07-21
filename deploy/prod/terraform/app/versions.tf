@@ -11,13 +11,13 @@ terraform {
     }
   }
 
-  # The app stack's state, in the SAME bucket the foundation stack created (under a
-  # different key). Fill in the bucket (foundation's `state_bucket` output) and run
-  # `terraform init`. Until then the app uses local state (gitignored). The foundation
-  # stack must be applied FIRST (this stack reads its remote state — see remote_state.tf).
-  #
+  # The app stack's state lives in the SAME bucket the foundation stack created (under a
+  # different key). The bucket name is intentionally NOT committed, so the repo can stay
+  # public: pass it at init via a gitignored backend config (copy backend.hcl.example to
+  # backend.hcl and set the foundation's `state_bucket` output), then run:
+  #     terraform init -backend-config=backend.hcl
+  # The foundation stack must be applied FIRST (this stack reads its remote state).
   backend "s3" {
-    bucket       = "ncp-tfstate-123456789012"
     key          = "nebula-control-plane/app.tfstate"
     region       = "ca-central-1"
     encrypt      = true

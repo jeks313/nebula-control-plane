@@ -6,6 +6,7 @@ coverage*
 
 # locally built command binaries (from `go build ./cmd/...`)
 /harbor
+/harbor.exe
 /pilot
 /pilot.exe
 /gateway
@@ -29,3 +30,14 @@ spike/m0/tools/
 
 # local SQLite dev databases
 *.db
+
+# local, real deployment identifiers (bucket / account / instance): keep the repo public
+# while deploying to your own environment. Copy the committed *.example templates to fill in.
+/deploy/prod/env.local
+/deploy/prod/terraform/app/backend.hcl
+/deploy/prod/terraform/foundation/backend.hcl
+
+# terraform local state + working dirs (never commit)
+*.tfstate
+*.tfstate.*
+.terraform/

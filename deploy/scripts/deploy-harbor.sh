@@ -13,9 +13,17 @@
 # bucket (the box pulls it), so no SSH key / ProxyCommand is needed.
 set -euo pipefail
 
-# --- POC environment (ca-central-1) -----------------------------------------------------------
+# --- Live-environment identifiers -------------------------------------------------------------
+# The real bucket / instance / region live in a LOCAL, gitignored file so this committed script
+# carries only placeholders and the repo can stay public. Copy the example and fill in your own:
+#   cp deploy/prod/env.local.example deploy/prod/env.local   # then edit
+_NCP_ENV="$(cd "$(dirname "${BASH_SOURCE[0]}")/../prod" && pwd)/env.local"
+# shellcheck disable=SC1090
+[ -f "$_NCP_ENV" ] && . "$_NCP_ENV"
+
+# --- POC environment (placeholders; overridden by env.local or NCP_* env vars) ----------------
 REGION="${NCP_REGION:-ca-central-1}"
-HARBOR_INSTANCE="${NCP_HARBOR_INSTANCE:-i-0123456789abcdef0}"   # ncp-harbor EC2
+HARBOR_INSTANCE="${NCP_HARBOR_INSTANCE:-i-0123456789abcdef0}"   # harbor EC2 (set in env.local)
 ARTIFACT_BUCKET="${NCP_ARTIFACT_BUCKET:-ncp-artifacts-123456789012}"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
