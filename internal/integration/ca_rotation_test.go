@@ -8,6 +8,7 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/bundle"
 	"github.com/jeks313/nebula-control-plane/internal/joinkey"
 	"github.com/jeks313/nebula-control-plane/internal/signer"
+	"github.com/jeks313/nebula-control-plane/internal/wire"
 )
 
 // mkStagedCA mints a fresh self-signed P256 CA (a would-be "CA2") and returns its PEM.
@@ -94,5 +95,46 @@ func TestEnrollBundleCarriesStagedCA(t *testing.T) {
 	}
 	if tb, _ := e.caReg.TrustBundle(ctx); len(tb) != 1 {
 		t.Fatalf("after abandon, trust bundle = %d, want 1 (only the active CA)", len(tb))
+	}
+}
+
+// TestHeartbeatDrivesCAAdoption is the M8.1 end-to-end acceptance across the full
+// wire -> coreapi -> query path: a host's heartbeat-reported trusted CA set is stored, and
+// ca.AdoptionStatus walks from 0% to 100% as the host starts reporting trust of a staged CA.
+func TestHeartbeatDrivesCAAdoption(t *testing.T) {
+	e := setupEnroll(t)
+	ctx := context.Background()
+	api := e.coreAPI()
+
+	ip, _ := enrolledHost(t, e, "host-adopt")
+	act, _ := e.caReg.Active(ctx) // the seeded CA1
+
+	// Stage CA2 (trusted, not yet signing).
+	ca2row, err := e.caReg.Stage(ctx, "ca-2", mkStagedCA(t, "ca-2"), "kms", "op")
+	if err != nil {
+		t.Fatalf("stage CA2: %v", err)
+	}
+
+	// The host heartbeats trusting only CA1 -> CA2 is NOT adopted.
+	heartbeatReq(t, api, ip, wire.HeartbeatRequest{
+		ProtocolVersion: wire.ProtocolVersion, Type: "heartbeat", Health: "ok",
+		TrustedCAFingerprints: []string{act.Fingerprint},
+	})
+	ad, err := e.caReg.AdoptionStatus(ctx, ca2row.Fingerprint, 5*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ad.Live != 1 || ad.Adopted != 0 || ad.FullyAdopted() {
+		t.Fatalf("pre-adoption: %+v (want 1 live, 0 adopted, not full)", ad)
+	}
+
+	// Now the host reports trusting CA2 too -> fully adopted (the upsert must UPDATE the row).
+	heartbeatReq(t, api, ip, wire.HeartbeatRequest{
+		ProtocolVersion: wire.ProtocolVersion, Type: "heartbeat", Health: "ok",
+		TrustedCAFingerprints: []string{act.Fingerprint, ca2row.Fingerprint},
+	})
+	ad, _ = e.caReg.AdoptionStatus(ctx, ca2row.Fingerprint, 5*time.Minute)
+	if ad.Live != 1 || ad.Adopted != 1 || !ad.FullyAdopted() {
+		t.Fatalf("post-adoption: %+v (want 1 live, 1 adopted, full — did the upsert update trusted_cas?)", ad)
 	}
 }

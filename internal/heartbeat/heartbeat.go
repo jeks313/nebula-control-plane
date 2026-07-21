@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"sort"
 	"time"
 
 	"github.com/jeks313/nebula-control-plane/internal/bundle"
@@ -160,6 +161,9 @@ func (r *Reporter) beat(ctx context.Context) {
 			if b, err := bundle.Verify(raw, r.cfg.PinnedConfigPub); err == nil {
 				req.AppliedBundleVersion = b.BundleVersion
 				req.AppliedBlocklistVersion = b.BlocklistVersion
+				// M8.1: report which CAs we trust (from the VERIFIED applied ca_bundle) so
+				// Core can gate a CA cut-over on 100% adoption (design §4.6).
+				req.TrustedCAFingerprints = trustedCAFingerprints(b.CABundle)
 			}
 		}
 	}
@@ -172,6 +176,37 @@ func (r *Reporter) beat(ctx context.Context) {
 	if err := Process(ctx, resp, r.cfg.Handlers); err != nil {
 		r.cfg.Logger.Warn("heartbeat: command processing", "err", err)
 	}
+}
+
+// trustedCAFingerprints returns the sorted, deduped lowercase-hex sha256 fingerprints of
+// every CA cert in the applied bundle's ca_bundle (M8.1). Robust to a multi-PEM element
+// and to one unparseable block among several — a heartbeat must never fail on a partial CA
+// set. Empty -> nil so the wire field omits (a pre-M8.1-shaped report).
+func trustedCAFingerprints(caPEMs []string) []string {
+	seen := map[string]struct{}{}
+	for _, p := range caPEMs {
+		rest := []byte(p)
+		for len(rest) > 0 {
+			var c cert.Certificate
+			var err error
+			c, rest, err = cert.UnmarshalCertificateFromPEM(rest)
+			if err != nil || c == nil {
+				break
+			}
+			if fp, err := c.Fingerprint(); err == nil {
+				seen[fp] = struct{}{}
+			}
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(seen))
+	for fp := range seen {
+		out = append(out, fp)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (r *Reporter) send(ctx context.Context, req wire.HeartbeatRequest) (wire.HeartbeatResponse, error) {

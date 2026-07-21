@@ -17,6 +17,8 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/jeks313/nebula-control-plane/internal/bundle"
@@ -49,6 +51,7 @@ type Heartbeat struct {
 	ClockOffsetMs           int    `gorm:"column:clock_offset_ms"`
 	Health                  string `gorm:"column:health"`
 	LastSeen                int64  `gorm:"column:last_seen"`
+	TrustedCAs              string `gorm:"column:trusted_cas"` // JSON array of CA fingerprints this host reported trusting (from its applied ca_bundle, M8.1)
 }
 
 // ReleaseSource is a binary-release registry Core consults to stamp a host's per-host
@@ -471,6 +474,21 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.PilotReleases != nil {
 		appliedPilot = s.cfg.PilotReleases.GenForSHA(ctx, req.PilotSHA256)
 	}
+	// M8.1: normalize the host's reported trusted-CA set to a byte-stable JSON array so
+	// ca.AdoptionStatus parses a uniform shape. A pre-M8.1 pilot omits the field (nil) ->
+	// store "[]" (NOT json.Marshal(nil)'s "null"), correctly counting as not-adopted until
+	// the pilot upgrades. Lower+trim matches ca_certs.fingerprint.
+	trustedCAs := "[]"
+	if len(req.TrustedCAFingerprints) > 0 {
+		fps := append([]string(nil), req.TrustedCAFingerprints...)
+		for i := range fps {
+			fps[i] = strings.ToLower(strings.TrimSpace(fps[i]))
+		}
+		sort.Strings(fps)
+		if b, err := json.Marshal(fps); err == nil {
+			trustedCAs = string(b)
+		}
+	}
 	hb := Heartbeat{
 		OverlayIP: dev.OverlayIP, DeviceName: dev.DeviceName,
 		PilotVersion: req.PilotVersion, NebulaVersion: req.NebulaVersion,
@@ -478,6 +496,7 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		AppliedBlocklistVersion: req.AppliedBlocklistVersion, AppliedNebulaVersion: appliedNebula,
 		AppliedPilotVersion: appliedPilot,
 		ClockOffsetMs:       req.ClockOffsetMs, Health: req.Health, LastSeen: s.now().UnixNano(),
+		TrustedCAs:          trustedCAs,
 	}
 	if err := s.cfg.Store.DB.WithContext(ctx).Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "overlay_ip"}},
@@ -485,6 +504,10 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 			"device_name", "pilot_version", "nebula_version", "cert_not_after",
 			"applied_bundle_version", "applied_blocklist_version", "applied_nebula_version",
 			"applied_pilot_version", "clock_offset_ms", "health", "last_seen",
+			// CRITICAL (M8.1): without trusted_cas here the per-overlay_ip upsert writes it
+			// only at INSERT and never updates it, so adoption freezes at each host's first
+			// beat and never converges after a CA is staged — the gate would block forever.
+			"trusted_cas",
 		}),
 	}).Create(&hb).Error; err != nil {
 		wire.WriteError(w, wire.CodeInternal, "persist heartbeat failed")

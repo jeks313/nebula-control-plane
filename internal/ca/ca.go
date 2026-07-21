@@ -25,9 +25,11 @@ package ca
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/slackhq/nebula/cert"
@@ -351,4 +353,73 @@ func (r *Registry) recordAudit(ctx context.Context, actor, action, target, detai
 		return
 	}
 	_ = r.audit(ctx, actor, action, target, details)
+}
+
+// Adoption is a point-in-time CA-trust snapshot for one CA (M8.1, design §4.6): of the LIVE
+// hosts, how many confirm — via their heartbeat-reported trusted_cas — that they trust this
+// CA. It answers the "100% of live hosts trust the staged CA" gate that must precede a
+// cut-over (Activate). Stale hosts are excluded from the gate population and surfaced only.
+type Adoption struct {
+	CAFingerprint string   // normalized lowercase hex
+	Live          int      // hosts heartbeated within staleAfter (the gate population)
+	Adopted       int      // live hosts confirming trust of CAFingerprint
+	Laggards      []string // live overlay IPs NOT yet confirming (sorted) — these block the gate
+	Stale         []string // overlay IPs beyond the freshness window (sorted) — EXCLUDED from the gate
+}
+
+// FullyAdopted reports whether every LIVE host confirms trust. An empty live fleet is
+// vacuously adopted (nothing to strand), so a bootstrap / first-CA activate is not
+// chicken-and-egg blocked; the CLI prints a "0 live hosts" note in that case.
+func (a Adoption) FullyAdopted() bool { return len(a.Laggards) == 0 }
+
+// AdoptionStatus is the M8.1 cut-over gate query. LIVE = last_seen >= now-staleAfter (the
+// same freshness window the fleet/reaper/IPAM code uses); staleAfter <= 0 means every
+// heartbeated host counts as live. A live host reporting no / empty / malformed trusted_cas
+// is a LAGGARD (fail-closed: unconfirmed == not adopted — the whole point of §4.6 is
+// confirmation VIA heartbeat, which is what -force exists to override). It reads the
+// heartbeats table by RAW NAME (no coreapi import — mirrors revocation.protectControlPlane)
+// and parses the JSON in Go (dialect-portable; the fleet is small at gate time).
+func (r *Registry) AdoptionStatus(ctx context.Context, caFingerprint string, staleAfter time.Duration) (Adoption, error) {
+	fp := strings.ToLower(strings.TrimSpace(caFingerprint))
+	out := Adoption{CAFingerprint: fp, Laggards: []string{}, Stale: []string{}}
+
+	var rows []struct {
+		OverlayIP  string `gorm:"column:overlay_ip"`
+		LastSeen   int64  `gorm:"column:last_seen"`
+		TrustedCAs string `gorm:"column:trusted_cas"`
+	}
+	if err := r.db.WithContext(ctx).Table("heartbeats").
+		Select("overlay_ip, last_seen, trusted_cas").Find(&rows).Error; err != nil {
+		return Adoption{}, fmt.Errorf("ca: adoption status: %w", err)
+	}
+
+	all := staleAfter <= 0 // mirror the liveFleet st>0 guard: 0 -> every heartbeated host is live
+	cutoff := r.now().UnixNano() - staleAfter.Nanoseconds()
+	for _, h := range rows {
+		if !all && h.LastSeen < cutoff {
+			out.Stale = append(out.Stale, h.OverlayIP)
+			continue
+		}
+		out.Live++
+		var trusted []string
+		_ = json.Unmarshal([]byte(h.TrustedCAs), &trusted) // '' / 'null' / malformed -> nil -> laggard
+		if containsFold(trusted, fp) {
+			out.Adopted++
+		} else {
+			out.Laggards = append(out.Laggards, h.OverlayIP)
+		}
+	}
+	sort.Strings(out.Laggards)
+	sort.Strings(out.Stale)
+	return out, nil
+}
+
+// containsFold reports whether fps (each normalized case-insensitively) contains fp.
+func containsFold(fps []string, fp string) bool {
+	for _, x := range fps {
+		if strings.ToLower(strings.TrimSpace(x)) == fp {
+			return true
+		}
+	}
+	return false
 }

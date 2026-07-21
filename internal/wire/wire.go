@@ -122,6 +122,12 @@ type HeartbeatRequest struct {
 	GOARCH                  string `json:"goarch,omitempty"` // runtime.GOARCH
 	ClockOffsetMs           int    `json:"clock_offset_ms"`
 	Health                  string `json:"health"`
+	// TrustedCAFingerprints is the set of CA cert fingerprints (lowercase hex sha256 — the
+	// same value ca_certs.fingerprint stores, sorted+deduped) this host currently trusts,
+	// derived from its VERIFIED applied ca_bundle (M8.1, design §4.6). Core stores it per
+	// host to gate a CA cut-over on 100% adoption. omitempty: a pre-M8.1 pilot omits it, so
+	// Core reads nil and conservatively counts the host as not-yet-adopted.
+	TrustedCAFingerprints []string `json:"trusted_ca_fingerprints,omitempty"`
 }
 
 // Command types — a CLOSED set (spec §8.2). Pilot executes only these and

@@ -85,6 +85,7 @@ var cliSurface = map[string]surfaceEntry{
 	"genesis":                {why: "cluster bootstrap — runs offline before any server/CA exists"},
 	"ca-init":                {why: "CA / HSM bootstrap — offline key ceremony"},
 	"ca list":                {why: "local inspection of the CA-rotation lifecycle (M8, design §4.6); the console CA-rotation view lands in a later M8 slice"},
+	"ca adoption":            {why: "local inspection of CA-rotation trust-adoption progress (M8.1, design §4.6) — reports which live hosts have confirmed via heartbeat that they trust a staged CA before `ca activate` cuts over; the console CA-rotation view lands in a later M8 slice"},
 	"ca stage":               {why: "security break-glass: stage a new CA into the trust bundle (M8, design §4.6) — mint-CA2 half of an operator-driven CA rotation, like ca-init/genesis it handles CA material; the console surface + the 100%-adoption gate land in later M8 slices"},
 	"ca activate":            {why: "security break-glass: cut fleet signing over to a staged CA (M8, design §4.6) — a CA-lifecycle transition run by an operator; console surface lands in a later M8 slice"},
 	"ca retire":              {why: "security break-glass: remove a drained CA from the trust bundle (M8, design §4.6); operator-driven, console surface lands in a later M8 slice"},

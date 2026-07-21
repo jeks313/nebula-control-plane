@@ -150,7 +150,7 @@ NOT handled by the script — do these manually when the change needs them:
 built, no console · 7.3 partial · 7.4 blocked on M9 OIDC); M8 (CA rotation) is 100% unbuilt; M9/M10
 PARTIAL. Development forked off the linear track into ADR-driven parallel streams — ADRs 0003–0011
 have all shipped or are code-complete (per-ADR built-state below).** A live demo (terraform apply + bootstrap-genesis.sh) can
-run now on the real off-mesh topology. Schema ceiling on disk is **000032** (next free: **000033**;
+run now on the real off-mesh topology. Schema ceiling on disk is **000033** (next free: **000034**;
 the older "000015" here was stale). M0 feasibility PASSED
 (2026-06-11: SoftHSM P256 CA,
 tunnel forms — design §M0 results; spike under `spike/m0/`, `make m0-*`). **The poc *is* the prod
@@ -283,11 +283,19 @@ The linear track forked into ADR streams. Net state (✅ built · ◐ code-compl
   `-ca-cert`) so every enroll/renew/`GET /v1/config` bundle's `ca_bundle` is sourced from `TrustBundle`
   live; core-api + enroll-worker **boot-seed the current CA as active** on start (race-tolerant);
   `harbor ca list|stage|activate|retire|abandon` break-glass CLI (classified in the CLI-surface guard).
-  Proven by integration `TestEnrollBundleCarriesStagedCA` (a staged CA2 reaches a new bundle's ca_bundle
-  while the leaf is still signed by the active CA). **Still open:** heartbeat **adoption tracking** (the
-  100%-trust gate that must precede a cut-over), 8.3 signing cut-over in the Signer + drain tracking
-  (which CA signed each leaf), 8.4 retirement + KMS deletion alarms, 8.5 config-signing-key rotation
-  (same overlap mechanism), 8.6 emergency path, 8.7 staging drill.
+  Proven by integration `TestEnrollBundleCarriesStagedCA`. ✅ **8.1 adoption tracking** (migration **000033**
+  `heartbeats.trusted_cas`): each pilot reports, on its heartbeat, the CA fingerprints it trusts (from its
+  VERIFIED applied `ca_bundle` — `wire.HeartbeatRequest.TrustedCAFingerprints`); coreapi stores it per host
+  (in the upsert's `DoUpdates`, so it converges each beat); `ca.Registry.AdoptionStatus` computes 100%-of-LIVE
+  adoption (stale hosts excluded + surfaced; empty/unreported = laggard, fail-closed; empty fleet = vacuously
+  adopted); **`harbor ca activate` now REFUSES cut-over until 100%** (pure `adoptionGate`, `-force` break-glass
+  override) + a `harbor ca adoption -id N` inspector. Reviewed adversarially (5-lens workflow, 0 defects).
+  ⚠ **DEPLOY ORDER:** apply migration 000033 (`harbor migrate up`) BEFORE swapping the binary; old pilots
+  omit the field and read as laggards until they re-beat under the new pilot, so the first post-ship
+  `activate` is blocked until the fleet re-reports (or use `-force`). **Still open:** 8.3 signing cut-over
+  in the Signer (select the active CA's backend) + drain tracking (which CA signed each leaf; a new
+  `enrollments.ca_fingerprint`) + force-renew stragglers, 8.4 retirement + KMS deletion alarms, 8.5
+  config-signing-key rotation (same overlap mechanism), 8.6 emergency path, 8.7 staging drill.
   *(The scheduled lighthouse-cert rotation above is 6.8-adjacent, NOT M8 CA rotation.)*
 - **M9 — hardening & operations: PARTIAL (delivered via ADR 0007, not per-step ticks).** The poc IS the
   prod stack (above); ✅ 9.6 signed waved self-update (ADR 0003); 🟡 HA substrate present but single-AZ;

@@ -5,11 +5,16 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"sort"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/jeks313/nebula-control-plane/internal/bundle"
+	"github.com/jeks313/nebula-control-plane/internal/jws"
 	"github.com/jeks313/nebula-control-plane/internal/paths"
+	"github.com/jeks313/nebula-control-plane/internal/signer"
 	"github.com/jeks313/nebula-control-plane/internal/wire"
 )
 
@@ -113,6 +118,56 @@ func TestReporterReportsHealth(t *testing.T) {
 	New(Config{CoreURL: srv.URL, Layout: paths.New(t.TempDir())}).beat(context.Background())
 	if got != "ok" {
 		t.Fatalf("reported health=%q with no HealthFn, want ok", got)
+	}
+}
+
+// TestReporterReportsTrustedCAFingerprints is the M8.1 pilot-side acceptance: the reporter
+// derives the trusted-CA fingerprints from its VERIFIED applied bundle's ca_bundle and sends
+// them (sorted, deduped) so Core can gate a CA cut-over on adoption (design §4.6).
+func TestReporterReportsTrustedCAFingerprints(t *testing.T) {
+	var got []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req wire.HeartbeatRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		got = req.TrustedCAFingerprints
+		_ = json.NewEncoder(w).Encode(wire.HeartbeatResponse{ProtocolVersion: wire.ProtocolVersion})
+	}))
+	defer srv.Close()
+
+	// A config-signing key the pilot pins, and two CAs to put in the bundle's ca_bundle.
+	cfgB, _ := signer.NewSoftwareBackend()
+	cfgPub, _ := cfgB.PublicKey()
+	pinned, _ := jws.ParseP256PublicPoint(cfgPub)
+	mkCA := func(name string) (pem, fp string) {
+		b, _ := signer.NewSoftwareBackend()
+		now := time.Now()
+		c, p, err := signer.SelfSignCA(b, signer.CATemplate{Name: name, NotBefore: now.Add(-time.Hour), NotAfter: now.Add(10 * 365 * 24 * time.Hour)})
+		if err != nil {
+			t.Fatalf("self-sign %s: %v", name, err)
+		}
+		f, _ := c.Fingerprint()
+		return string(p), f
+	}
+	ca1, fp1 := mkCA("ca-1")
+	ca2, fp2 := mkCA("ca-2")
+	jwsBytes, err := bundle.Sign(cfgB, "kid", bundle.Bundle{CABundle: []string{ca1, ca2}})
+	if err != nil {
+		t.Fatalf("sign bundle: %v", err)
+	}
+	layout := paths.New(t.TempDir())
+	if err := layout.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(layout.Bundle(), jwsBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	New(Config{CoreURL: srv.URL, Layout: layout, PinnedConfigPub: pinned}).beat(context.Background())
+
+	want := []string{fp1, fp2}
+	sort.Strings(want)
+	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("reported trusted CAs = %v, want sorted %v", got, want)
 	}
 }
 

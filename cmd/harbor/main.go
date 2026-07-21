@@ -150,7 +150,8 @@ usage:
   harbor ca-init           -ca-cert OUT [-backend software|pkcs11|kms] [-ca-key OUT] [... db flags]
   harbor ca list           [db flags]                          CA-rotation lifecycle (M8, design §4.6)
   harbor ca stage          -cert CA2.crt -name N [-kms-key-id ID] [-actor A] [db flags]   trust CA2 before it signs
-  harbor ca activate       -id N [-actor A] [db flags]         cut signing over to CA N (prior active -> draining)
+  harbor ca adoption       -id N [-stale-after D] [db flags]   how many live hosts trust CA N yet (the cut-over gate)
+  harbor ca activate       -id N [-force] [-stale-after D] [-actor A] [db flags]   cut over to CA N once 100% adopted
   harbor ca retire         -id N -dependents 0 [-actor A] [db flags]   remove a drained CA from trust
   harbor ca abandon        -id N [-actor A] [db flags]         cancel a staged CA
   harbor issue-cert        -name DEVICE -in-pub HOST.pub -ca-cert CA [-groups a,b] [... db flags]
