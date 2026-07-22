@@ -153,7 +153,7 @@ func adoptionGate(ad ca.Adoption, force bool) (proceed bool, refusal string) {
 // is enforced (M8.1: `ca adoption` + the gate); the console surface lands in a later slice.
 func cmdCA(args []string) {
 	if len(args) < 1 {
-		fatalf("ca: want list|stage|adoption|activate|retire|abandon|force-renew")
+		fatalf("ca: want list|stage|adoption|activate|retire|abandon|force-renew|schedule-key-deletion|cancel-key-deletion")
 	}
 	sub := args[0]
 	fs := flag.NewFlagSet("ca "+sub, flag.ExitOnError)
@@ -161,12 +161,15 @@ func cmdCA(args []string) {
 	certPath := fs.String("cert", "", "stage: CA certificate PEM file (the new CA to trust)")
 	name := fs.String("name", "", "stage: human label for the CA (e.g. ca-2027)")
 	kmsKeyID := fs.String("kms-key-id", "", "stage: how to reach its signing backend (KMS ARN / 'pkcs11:<label>' / 'software'); empty = trust-only")
-	id := fs.Int64("id", 0, "adoption/activate/retire/abandon/force-renew: the CA row id (see `ca list`)")
+	id := fs.Int64("id", 0, "adoption/activate/retire/abandon/force-renew/*-key-deletion: the CA row id (see `ca list`)")
 	actor := fs.String("actor", "operator", "admin identity for the audit trail")
 	force := fs.Bool("force", false, "activate: cut over even if <100% of LIVE hosts confirm trust of the target CA (break-glass — may strand laggards)")
 	staleAfter := fs.Duration("stale-after", 5*time.Minute, "activate/adoption: heartbeat freshness window defining a LIVE host (keep aligned with serve/admin-api -stale-after)")
 	window := fs.Duration("window", 30*time.Minute, "force-renew: spread the forced renewals of a draining CA's stragglers evenly over this window (waves)")
 	stop := fs.Bool("stop", false, "force-renew: cancel an in-progress accelerated drain (revert to natural renewal)")
+	pendingDays := fs.Int("pending-window-days", 30, "schedule-key-deletion: KMS pending window before the key is destroyed (7-30 days; cancellable until then)")
+	backend := fs.String("backend", envOr("HARBOR_BACKEND", "software"), "schedule/cancel-key-deletion: key custody backend (kms drives real KMS deletion; else software no-op) (default: $HARBOR_BACKEND, else software)")
+	kmsRegion := fs.String("kms-region", os.Getenv("HARBOR_KMS_REGION"), "schedule/cancel-key-deletion: AWS region for the KMS key deleter (kms backend) (default: $HARBOR_KMS_REGION)")
 	_ = fs.Parse(args[1:])
 
 	s := openStore(*driver, *dsn)
@@ -185,14 +188,18 @@ func cmdCA(args []string) {
 			fmt.Println("no CAs yet (the current CA is seeded on core-api / enroll-worker startup)")
 			return
 		}
-		fmt.Printf("%-4s %-18s %-9s %-12s %-9s %s\n", "ID", "NAME", "STATE", "NOT_AFTER", "LIVE-DEPS", "FINGERPRINT")
+		fmt.Printf("%-4s %-18s %-9s %-12s %-9s %-12s %s\n", "ID", "NAME", "STATE", "NOT_AFTER", "LIVE-DEPS", "KEY-DEL", "FINGERPRINT")
 		for _, c := range rows {
 			deps := "?" // "?" if the count read fails, so the table still prints
 			if n, derr := reg.LiveDependents(ctx, c.Fingerprint); derr == nil {
 				deps = strconv.Itoa(n)
 			}
-			fmt.Printf("%-4d %-18s %-9s %-12s %-9s %s\n", c.ID, c.Name, c.State,
-				time.Unix(0, c.NotAfter).UTC().Format("2006-01-02"), deps, c.Fingerprint)
+			keyDel := "-" // M8.4: the date the CA's signing key is destroyed, once scheduled
+			if c.KeyDeletionScheduledAt != 0 {
+				keyDel = time.Unix(0, c.KeyDeletionDate).UTC().Format("2006-01-02")
+			}
+			fmt.Printf("%-4d %-18s %-9s %-12s %-9s %-12s %s\n", c.ID, c.Name, c.State,
+				time.Unix(0, c.NotAfter).UTC().Format("2006-01-02"), deps, keyDel, c.Fingerprint)
 		}
 	case "stage":
 		if *certPath == "" || *name == "" {
@@ -312,7 +319,33 @@ func cmdCA(args []string) {
 		}
 		fmt.Printf("accelerated drain of CA id %d started — its %d remaining leaf holder(s) are force-renewed onto the active CA in waves over %s\n", *id, deps, window.String())
 		fmt.Printf("  watch `harbor ca list` LIVE-DEPS fall to 0, then `harbor ca retire -id %d`. `ca force-renew -id %d -stop` cancels.\n", *id, *id)
+	case "schedule-key-deletion":
+		if *id == 0 {
+			fatalf("ca schedule-key-deletion: -id is required (a RETIRED CA — see `ca list`)")
+		}
+		deleter, derr := caKeyDeleter(ctx, *backend, *kmsRegion)
+		if derr != nil {
+			fatalf("ca schedule-key-deletion: %v", derr)
+		}
+		delDate, err := reg.ScheduleKeyDeletion(ctx, *id, int32(*pendingDays), deleter, *actor)
+		if err != nil {
+			fatalf("ca schedule-key-deletion: %v", err)
+		}
+		fmt.Printf("scheduled CA id %d's signing key for deletion on %s (%d-day window)\n", *id, delDate.UTC().Format(time.RFC3339), *pendingDays)
+		fmt.Printf("  the key still exists until then — `harbor ca cancel-key-deletion -id %d` aborts it. Alarm on ncp_ca_key_deletion_seconds_remaining.\n", *id)
+	case "cancel-key-deletion":
+		if *id == 0 {
+			fatalf("ca cancel-key-deletion: -id is required")
+		}
+		deleter, derr := caKeyDeleter(ctx, *backend, *kmsRegion)
+		if derr != nil {
+			fatalf("ca cancel-key-deletion: %v", derr)
+		}
+		if err := reg.CancelKeyDeletion(ctx, *id, deleter, *actor); err != nil {
+			fatalf("ca cancel-key-deletion: %v", err)
+		}
+		fmt.Printf("cancelled the pending key deletion for CA id %d (key restored to usable)\n", *id)
 	default:
-		fatalf("ca: unknown subcommand %q (want list|stage|adoption|activate|retire|abandon|force-renew)", sub)
+		fatalf("ca: unknown subcommand %q (want list|stage|adoption|activate|retire|abandon|force-renew|schedule-key-deletion|cancel-key-deletion)", sub)
 	}
 }

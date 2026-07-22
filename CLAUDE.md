@@ -148,10 +148,10 @@ NOT handled by the script — do these manually when the change needs them:
 
 **Milestone track: M0–M4 + M6 complete; M5 PARTIAL; M7 is the frontier (7.1 done · 7.2 engine+CLI
 built, no console · 7.3 partial · 7.4 blocked on M9 OIDC); M8 (CA rotation) is the ACTIVE milestone
-(slice 1 + 8.1 + 8.3a drain-tracking + 8.3b zero-downtime cut-over + 8.3c waved force-renew built; 8.4 retire next); M9/M10
+(slice 1 + 8.1 + 8.3a-c + 8.4 retirement-local built; 8.4 KMS drill + 8.5 config-key rotation next); M9/M10
 PARTIAL. Development forked off the linear track into ADR-driven parallel streams — ADRs 0003–0011
 have all shipped or are code-complete (per-ADR built-state below).** A live demo (terraform apply + bootstrap-genesis.sh) can
-run now on the real off-mesh topology. Schema ceiling on disk is **000035** (next free: **000036**;
+run now on the real off-mesh topology. Schema ceiling on disk is **000036** (next free: **000037**;
 the older "000015" here was stale). M0 feasibility PASSED
 (2026-06-11: SoftHSM P256 CA,
 tunnel forms — design §M0 results; spike under `spike/m0/`, `make m0-*`). **The poc *is* the prod
@@ -335,8 +335,22 @@ The linear track forked into ADR streams. Net state (✅ built · ◐ code-compl
   `internal/ca` `TestForceRenewLifecycle`, `internal/coreapi` `TestInDrainWave`/`TestForceRenewStragglerGating`,
   integration `TestForceRenewDrainsStragglers`. Cost: one indexed active-CA lookup per non-renewing heartbeat
   (cheap; only for hosts carrying a fingerprint).
-  **Still open:** 8.4 retirement + KMS deletion alarms, 8.5 config-signing-key rotation (same overlap
-  mechanism), 8.6 emergency path, 8.7 staging drill.
+  🟡 **8.4 retirement + KMS deletion (LOCAL slice built; the KMS call + CloudWatch alarm are AWS-verified).**
+  migration **000036** `ca_certs.key_deletion_scheduled_at`/`key_deletion_date`. `ca.Registry.ScheduleKeyDeletion`
+  guardrails, fail-closed: ONLY a RETIRED CA (state check + CAS), NO live dependents (belt-and-suspenders over
+  Retire, fail-closed on read error), a real key backend (`kms_key_id` set), a 7-30-day KMS window, no
+  double-schedule. Calls the backend FIRST then persists; on a persist failure it rolls the backend schedule
+  back (and surfaces a failed rollback) so a key is never silently pending-deletion-but-unrecorded.
+  `CancelKeyDeletion` aborts within the window (cancel backend first). A `ca.KeyDeleter` seam keeps the package
+  AWS-free + testable: `ca.NoopKeyDeleter` (dev/software) is fully local-tested; **cmd/harbor `kmsKeyDeleter`**
+  drives real KMS `ScheduleKeyDeletion`/`CancelKeyDeletion` (wired, AWS-verified-later, never reads the key P2).
+  `ncp_ca_key_deletion_pending` + `_seconds_remaining` (the `ca.Collector`, on Core /metrics) is the alarm
+  signal; `harbor ca schedule-key-deletion|cancel-key-deletion` (break-glass) + a KEY-DEL column in `ca list`.
+  Proven by `internal/ca` `TestScheduleKeyDeletionGuardrails`/`TestScheduleAndCancelKeyDeletion`/
+  `TestScheduleKeyDeletionRejectsNoKeyAndLiveDeps`/`TestScheduleKeyDeletionBackendErrorNoPersist`/
+  `TestKeyDeletionCollector`. **Still AWS-only:** the CloudWatch alarm on the pending gauge (Terraform) + a live
+  KMS ScheduleKeyDeletion drill.
+  **Still open:** 8.5 config-signing-key rotation (same overlap mechanism), 8.6 emergency path, 8.7 staging drill.
   *(The scheduled lighthouse-cert rotation above is 6.8-adjacent, NOT M8 CA rotation.)*
 - **M9 — hardening & operations: PARTIAL (delivered via ADR 0007, not per-step ticks).** The poc IS the
   prod stack (above); ✅ 9.6 signed waved self-update (ADR 0003); 🟡 HA substrate present but single-AZ;

@@ -155,6 +155,8 @@ usage:
   harbor ca retire         -id N [-actor A] [db flags]   remove a drained CA from trust (refuses while any live leaf still chains to it)
   harbor ca abandon        -id N [-actor A] [db flags]         cancel a staged CA
   harbor ca force-renew    -id N [-window D] [-stop] [-actor A] [db flags]   accelerate a draining CA's drain (force-renew stragglers in waves)
+  harbor ca schedule-key-deletion  -id N [-pending-window-days 30] [-backend kms -kms-region R] [-actor A] [db flags]   schedule a retired CA's KMS key for deletion
+  harbor ca cancel-key-deletion    -id N [-backend kms -kms-region R] [-actor A] [db flags]   abort a pending CA key deletion (within the KMS window)
   harbor issue-cert        -name DEVICE -in-pub HOST.pub -ca-cert CA [-groups a,b] [... db flags]
   harbor backfill-cp-enrollment -cert HOST.crt -pool CIDR [-name N] [-groups a,b] [-overlay-ip IP] [db flags]
                            break-glass: record the missing issued enrollment row for a

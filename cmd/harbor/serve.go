@@ -21,6 +21,7 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/auditverify"
 	"github.com/jeks313/nebula-control-plane/internal/autotls"
 	"github.com/jeks313/nebula-control-plane/internal/bundle"
+	"github.com/jeks313/nebula-control-plane/internal/ca"
 	"github.com/jeks313/nebula-control-plane/internal/coreapi"
 	"github.com/jeks313/nebula-control-plane/internal/enrollment"
 	"github.com/jeks313/nebula-control-plane/internal/fleet"
@@ -181,6 +182,11 @@ func cmdCoreAPI(args []string) {
 		// nothing else observes their certs) + rotation liveness on /metrics. Idempotent.
 		if rerr := lighthouse.RegisterCollector(lighthouse.NewCollector(s.DB)); rerr != nil {
 			log.Warn("core-api: registering the lighthouse collector failed; ncp_lighthouse_* metrics will be absent", "err", rerr)
+		}
+		// M8.4: CA key-deletion pending gauge — the signal an alarm watches so an operator is paged
+		// while a retired CA's signing key sits in its cancellable pending-deletion window. Idempotent.
+		if rerr := ca.RegisterCollector(ca.NewCollector(s.DB)); rerr != nil {
+			log.Warn("core-api: registering the CA collector failed; ncp_ca_key_deletion_* metrics will be absent", "err", rerr)
 		}
 	}
 	sg, err := signer.New(signer.Config{

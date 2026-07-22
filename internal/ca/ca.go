@@ -77,6 +77,11 @@ type CA struct {
 	// deterministic widening waves over the window. Both 0 -> natural renewal only.
 	ForceRenewStartedAt int64 `gorm:"column:force_renew_started_at"` // unix ns; 0 = off
 	ForceRenewWindowNS  int64 `gorm:"column:force_renew_window_ns"`  // drain window in ns
+	// KeyDeletionScheduledAt/Date record that a RETIRED CA's signing key has been scheduled for
+	// deletion in its custody backend (KMS) — M8.4. Both 0 -> not scheduled. During the backend's
+	// pending window (KMS 7-30 days) the deletion can still be cancelled.
+	KeyDeletionScheduledAt int64 `gorm:"column:key_deletion_scheduled_at"` // unix ns; 0 = not scheduled
+	KeyDeletionDate        int64 `gorm:"column:key_deletion_date"`         // unix ns; backend-returned deletion date
 }
 
 // TableName pins the table.
@@ -495,6 +500,139 @@ func (r *Registry) DrainWave(ctx context.Context, caFingerprint string) (started
 		return 0, 0, false, nil
 	}
 	return c.ForceRenewStartedAt, c.ForceRenewWindowNS, true, nil
+}
+
+// KeyDeleter schedules (or cancels) deletion of a CA's non-exportable signing key in its custody
+// backend (M8.4). The pending-deletion WINDOW is enforced by the backend (KMS: 7-30 days), during
+// which the key still exists and deletion can be cancelled — the safety net before the key is
+// destroyed. cmd/harbor provides the KMS impl (the "their guarantee" half); NoopKeyDeleter is the
+// dev/software impl (no external key). Kept an interface so the ca package stays AWS-free + testable.
+type KeyDeleter interface {
+	// ScheduleDeletion schedules kmsKeyID for deletion after pendingDays and returns the backend's
+	// deletion date.
+	ScheduleDeletion(ctx context.Context, kmsKeyID string, pendingDays int32) (deletionDate time.Time, err error)
+	// CancelDeletion aborts a pending deletion of kmsKeyID, restoring the key to usable.
+	CancelDeletion(ctx context.Context, kmsKeyID string) error
+}
+
+// NoopKeyDeleter is the dev/software KeyDeleter: there is no external key to touch, so it schedules
+// nothing but returns the deletion date the pending window implies, keeping the local flow + audit
+// faithful. Now defaults to time.Now.
+type NoopKeyDeleter struct{ Now func() time.Time }
+
+// ScheduleDeletion returns now + pendingDays without deleting anything (dev/software CAs).
+func (n NoopKeyDeleter) ScheduleDeletion(_ context.Context, _ string, pendingDays int32) (time.Time, error) {
+	now := time.Now
+	if n.Now != nil {
+		now = n.Now
+	}
+	return now().UTC().Add(time.Duration(pendingDays) * 24 * time.Hour), nil
+}
+
+// CancelDeletion is a no-op for the software backend.
+func (NoopKeyDeleter) CancelDeletion(context.Context, string) error { return nil }
+
+// ScheduleKeyDeletion schedules a RETIRED CA's signing key for deletion in its custody backend
+// (M8.4). Guardrails, fail-closed: ONLY a retired CA (an active/draining/staged CA's key still
+// signs or is still trusted), only with NO live dependents (belt-and-suspenders over Retire's own
+// gate, in case of an out-of-band edit), and only when it has a real key backend (kms_key_id set;
+// a trust-only import has nothing to delete). The backend is called FIRST and the state persisted
+// only if it accepted; if the persist then fails the backend deletion is rolled back (best-effort)
+// so we never leave a key silently pending deletion that our state does not record. Audited.
+func (r *Registry) ScheduleKeyDeletion(ctx context.Context, id int64, pendingDays int32, deleter KeyDeleter, actor string) (time.Time, error) {
+	if deleter == nil {
+		return time.Time{}, fmt.Errorf("ca: schedule key deletion: a KeyDeleter is required")
+	}
+	if pendingDays < 7 || pendingDays > 30 {
+		return time.Time{}, fmt.Errorf("ca: schedule key deletion: pending window must be 7-30 days (KMS limit), got %d", pendingDays)
+	}
+	target, err := r.Get(ctx, id)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if target.State != StateRetired {
+		return time.Time{}, fmt.Errorf("%w: only a RETIRED CA's key may be scheduled for deletion (state %s)", ErrIllegalTransition, target.State)
+	}
+	if strings.TrimSpace(target.KMSKeyID) == "" {
+		return time.Time{}, fmt.Errorf("ca: schedule key deletion: CA %d has no key backend (trust-only import); nothing to delete", id)
+	}
+	if target.KeyDeletionScheduledAt != 0 {
+		return time.Time{}, fmt.Errorf("ca: key deletion already scheduled for CA %d (cancel first to reschedule)", id)
+	}
+	deps, derr := r.LiveDependents(ctx, target.Fingerprint)
+	if derr != nil {
+		return time.Time{}, derr // fail closed — never delete a key on an unknown dependent count
+	}
+	if deps > 0 {
+		return time.Time{}, fmt.Errorf("%w: %d live", ErrHasDependents, deps)
+	}
+	// Call the backend FIRST so our state never claims a deletion the backend refused.
+	delDate, err := deleter.ScheduleDeletion(ctx, target.KMSKeyID, pendingDays)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("ca: schedule key deletion: %w", err)
+	}
+	now := r.now().UTC().UnixNano()
+	res := r.db.WithContext(ctx).Model(&CA{}).Where("id = ? AND state = ? AND key_deletion_scheduled_at = 0", id, StateRetired).
+		Updates(map[string]any{"key_deletion_scheduled_at": now, "key_deletion_date": delDate.UTC().UnixNano(), "updated_at": now})
+	if res.Error != nil || res.RowsAffected == 0 {
+		// Roll back the backend schedule so we never leave a key silently pending deletion that our
+		// state does not record. If the rollback ALSO fails, the key is now pending deletion in the
+		// backend but unrecorded here — surface both so the operator cancels it directly (rare
+		// double-failure; the KMS window still gives days to react).
+		rb := ""
+		if cerr := deleter.CancelDeletion(ctx, target.KMSKeyID); cerr != nil {
+			rb = fmt.Sprintf(" — ROLLBACK FAILED (key %s is pending deletion in the backend; cancel it directly): %v", target.KMSKeyID, cerr)
+		}
+		if res.Error != nil {
+			return time.Time{}, fmt.Errorf("ca: schedule key deletion persist%s: %w", rb, res.Error)
+		}
+		return time.Time{}, fmt.Errorf("%w: retired -> key-deletion (raced; rolled back backend)%s", ErrIllegalTransition, rb)
+	}
+	r.recordAudit(ctx, actor, "ca-key-deletion-scheduled", fmt.Sprintf("id=%d", id),
+		fmt.Sprintf(`{"kms_key_id":%q,"deletion_date":%q,"pending_days":%d}`, target.KMSKeyID, delDate.UTC().Format(time.RFC3339), pendingDays))
+	return delDate, nil
+}
+
+// CancelKeyDeletion aborts a CA's pending key deletion (M8.4) during the backend's window, clearing
+// the recorded schedule and restoring the key to usable. Idempotent guard: refuses if none is
+// scheduled. Audited.
+func (r *Registry) CancelKeyDeletion(ctx context.Context, id int64, deleter KeyDeleter, actor string) error {
+	if deleter == nil {
+		return fmt.Errorf("ca: cancel key deletion: a KeyDeleter is required")
+	}
+	target, err := r.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if target.KeyDeletionScheduledAt == 0 {
+		return fmt.Errorf("ca: no key deletion scheduled for CA %d", id)
+	}
+	// Cancel in the backend FIRST; only clear our state if the key was actually restored.
+	if err := deleter.CancelDeletion(ctx, target.KMSKeyID); err != nil {
+		return fmt.Errorf("ca: cancel key deletion: %w", err)
+	}
+	now := r.now().UTC().UnixNano()
+	res := r.db.WithContext(ctx).Model(&CA{}).Where("id = ?", id).
+		Updates(map[string]any{"key_deletion_scheduled_at": 0, "key_deletion_date": 0, "updated_at": now})
+	if res.Error != nil {
+		return fmt.Errorf("ca: cancel key deletion persist: %w", res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	r.recordAudit(ctx, actor, "ca-key-deletion-cancelled", fmt.Sprintf("id=%d", id), "{}")
+	return nil
+}
+
+// PendingKeyDeletions lists CAs whose signing key is scheduled for deletion (M8.4), oldest schedule
+// first. Backs the pending-deletion metric (the alarm signal) and the `ca list` display.
+func (r *Registry) PendingKeyDeletions(ctx context.Context) ([]CA, error) {
+	var rows []CA
+	if err := r.db.WithContext(ctx).Where("key_deletion_scheduled_at > 0").
+		Order("key_deletion_date ASC").Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("ca: pending key deletions: %w", err)
+	}
+	return rows, nil
 }
 
 // containsFold reports whether fps (each normalized case-insensitively) contains fp.
