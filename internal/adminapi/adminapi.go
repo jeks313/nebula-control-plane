@@ -289,6 +289,10 @@ func (s *Server) routeTable() []route {
 		{"GET", "/admin/v1/audit", s.handleAudit},
 		{"GET", "/admin/v1/audit/verify", s.handleAuditVerify},
 		{"GET", "/admin/v1/lighthouses", s.handleLighthouses},
+		// M8 CA-rotation dashboard (read-only): the CA lifecycle + drain/key-deletion state,
+		// and per-CA trust-adoption progress (the activate gate). Actions stay break-glass CLI.
+		{"GET", "/admin/v1/ca", s.handleCAs},
+		{"GET", "/admin/v1/ca/{id}/adoption", s.handleCAAdoption},
 		// Dual-control approvals (generic) + policy publish (the showcase).
 		{"GET", "/admin/v1/approvals", s.handleApprovals},
 		{"GET", "/admin/v1/approvals/{id}", s.handleApproval},

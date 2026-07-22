@@ -78,6 +78,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/v1/ca": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * CA-rotation lifecycle (M8) for the console dashboard.
+         * @description Every certificate authority with its lifecycle state (staged/active/draining/retired) and the derived rotation signals: which one is the active signing CA, which are trusted (in every signed bundle), each one's drain count (leaf certs still chaining to it), any accelerated-drain window (M8.3c), and any pending signing-key deletion (M8.4). Drives the console's CA Rotation pane. Read-only; authenticated, no special permission. Actions stay on the break-glass CLI.
+         */
+        get: operations["listCAs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/ca/{id}/adoption": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Trust-adoption progress for one CA (M8.1) — the activate gate.
+         * @description How many LIVE hosts have confirmed via heartbeat that they trust this CA, the "trust before you sign" gate the CLI enforces before `ca activate` cuts signing over. Read-only.
+         */
+        get: operations["getCAAdoption"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/admin/v1/devices": {
         parameters: {
             query?: never;
@@ -800,6 +840,60 @@ export interface components {
                 unknown: number;
             };
         };
+        CA: {
+            id: number;
+            name: string;
+            /** @enum {string} */
+            state: "staged" | "active" | "draining" | "retired";
+            fingerprint: string;
+            /** Format: date-time */
+            not_after?: string;
+            /** @description the current signing CA */
+            is_active: boolean;
+            /** @description in the distributed trust bundle (non-retired) */
+            trusted: boolean;
+            /** @description leaf certs still chaining to this CA (drain count); -1 = read error */
+            live_dependents: number;
+            /** @description M8.3c accelerated drain, present only while active. */
+            force_renew?: {
+                window_seconds: number;
+                /** Format: date-time */
+                started_at: string;
+            };
+            /** @description M8.4 pending signing-key deletion, present only when scheduled. */
+            key_deletion?: {
+                /** Format: date-time */
+                date: string;
+                /** @description negative once the deletion date has passed */
+                seconds_remaining: number;
+            };
+        };
+        CAListResponse: {
+            cas: components["schemas"]["CA"][];
+            summary: {
+                total: number;
+                staged: number;
+                active: number;
+                draining: number;
+                retired: number;
+            };
+        };
+        CAAdoption: {
+            id: number;
+            name: string;
+            fingerprint: string;
+            state: string;
+            /** @description live hosts confirming trust of this CA */
+            adopted: number;
+            /** @description hosts heartbeated within the freshness window (the gate population) */
+            live: number;
+            fully_adopted: boolean;
+            percent: number;
+            /** @description live overlay IPs not yet confirming (block the gate) */
+            laggards: string[];
+            /** @description hosts beyond the freshness window (excluded from the gate) */
+            stale: string[];
+        };
         /** @enum {string} */
         Severity: "info" | "degraded" | "critical";
         Reason: {
@@ -1478,6 +1572,52 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
+        };
+    };
+    listCAs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The CAs + a state rollup. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CAListResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    getCAAdoption: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Adoption counts + laggards/stale hosts. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CAAdoption"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["Problem"];
         };
     };
     listDevices: {

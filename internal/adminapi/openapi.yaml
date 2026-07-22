@@ -73,6 +73,41 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/FleetHealth" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+  /admin/v1/ca:
+    get:
+      summary: CA-rotation lifecycle (M8) for the console dashboard.
+      description: >-
+        Every certificate authority with its lifecycle state (staged/active/draining/retired) and
+        the derived rotation signals: which one is the active signing CA, which are trusted (in every
+        signed bundle), each one's drain count (leaf certs still chaining to it), any accelerated-drain
+        window (M8.3c), and any pending signing-key deletion (M8.4). Drives the console's CA Rotation
+        pane. Read-only; authenticated, no special permission. Actions stay on the break-glass CLI.
+      operationId: listCAs
+      responses:
+        "200":
+          description: The CAs + a state rollup.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CAListResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /admin/v1/ca/{id}/adoption:
+    get:
+      summary: Trust-adoption progress for one CA (M8.1) — the activate gate.
+      description: >-
+        How many LIVE hosts have confirmed via heartbeat that they trust this CA, the "trust before
+        you sign" gate the CLI enforces before `ca activate` cuts signing over. Read-only.
+      operationId: getCAAdoption
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200":
+          description: Adoption counts + laggards/stale hosts.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CAAdoption" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/Problem" }
   /admin/v1/devices:
     get:
       summary: Device inventory (from heartbeats), keyset-paginated on overlay_ip.
@@ -948,6 +983,60 @@ components:
             degraded: { type: integer }
             down: { type: integer }
             unknown: { type: integer }
+    CA:
+      type: object
+      required: [id, name, state, fingerprint, is_active, trusted, live_dependents]
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        state: { type: string, enum: [staged, active, draining, retired] }
+        fingerprint: { type: string }
+        not_after: { type: string, format: date-time }
+        is_active: { type: boolean, description: "the current signing CA" }
+        trusted: { type: boolean, description: "in the distributed trust bundle (non-retired)" }
+        live_dependents: { type: integer, description: "leaf certs still chaining to this CA (drain count); -1 = read error" }
+        force_renew:
+          type: object
+          description: "M8.3c accelerated drain, present only while active."
+          required: [window_seconds, started_at]
+          properties:
+            window_seconds: { type: integer }
+            started_at: { type: string, format: date-time }
+        key_deletion:
+          type: object
+          description: "M8.4 pending signing-key deletion, present only when scheduled."
+          required: [date, seconds_remaining]
+          properties:
+            date: { type: string, format: date-time }
+            seconds_remaining: { type: integer, description: "negative once the deletion date has passed" }
+    CAListResponse:
+      type: object
+      required: [cas, summary]
+      properties:
+        cas: { type: array, items: { $ref: "#/components/schemas/CA" } }
+        summary:
+          type: object
+          required: [total, staged, active, draining, retired]
+          properties:
+            total: { type: integer }
+            staged: { type: integer }
+            active: { type: integer }
+            draining: { type: integer }
+            retired: { type: integer }
+    CAAdoption:
+      type: object
+      required: [id, name, fingerprint, state, adopted, live, fully_adopted, percent, laggards, stale]
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        fingerprint: { type: string }
+        state: { type: string }
+        adopted: { type: integer, description: "live hosts confirming trust of this CA" }
+        live: { type: integer, description: "hosts heartbeated within the freshness window (the gate population)" }
+        fully_adopted: { type: boolean }
+        percent: { type: number }
+        laggards: { type: array, items: { type: string }, description: "live overlay IPs not yet confirming (block the gate)" }
+        stale: { type: array, items: { type: string }, description: "hosts beyond the freshness window (excluded from the gate)" }
     Severity:
       type: string
       enum: [info, degraded, critical]

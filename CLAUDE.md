@@ -171,8 +171,9 @@ M10, PARTIAL):
   invariants, dual-control publish, canary rollout + auto-rollback, drift-revert, lighthouse
   registry.
 - **Admin UI** — React console UI-0..UI-4 (auth shell, devices, approvals + join keys, fleet
-  health, group/cloud-trust, policy designer + dual-control inbox) over a contract-tested
-  OpenAPI; the CLI is a strict subset (see `cmd/harbor/cli_surface_test.go`).
+  health, group/cloud-trust, policy designer + dual-control inbox) + a **CA Rotation** page (M8,
+  read-only) over a contract-tested OpenAPI; the CLI is a strict subset (see
+  `cmd/harbor/cli_surface_test.go`).
 
 ### M7 — Revocation & offboarding (current milestone)
 
@@ -350,6 +351,17 @@ The linear track forked into ADR streams. Net state (✅ built · ◐ code-compl
   `TestScheduleKeyDeletionRejectsNoKeyAndLiveDeps`/`TestScheduleKeyDeletionBackendErrorNoPersist`/
   `TestKeyDeletionCollector`. **Still AWS-only:** the CloudWatch alarm on the pending gauge (Terraform) + a live
   KMS ScheduleKeyDeletion drill.
+  ✅ **M8 console surface (read-only CA Rotation dashboard).** `GET /admin/v1/ca` (`listCAs`) + `GET
+  /admin/v1/ca/{id}/adoption` (`getCAAdoption`) in `internal/adminapi/ca.go` (compose `ca.Registry`; authed,
+  no special perm, like `/gateways`) surface the full lifecycle: state, active/trusted (trust-bundle
+  membership), drain count, force-renew window, key-deletion countdown, and per-CA trust-adoption (the
+  activate gate). New React **CA Rotation** page (`ui/src/pages/CARotation.tsx` + nav/route + `useCAs`/
+  `useCAAdoption`): state-badged rows, the signing CA highlighted, drain + key-deletion signals, and an
+  adoption progress bar for staged CAs. **Read-only by design** (user-chosen) — the lifecycle ACTIONS
+  (stage/activate/retire/force-renew/schedule-key-deletion) remain break-glass CLI; console-driven guarded
+  actions (dual-control + step-up MFA) are a deferred follow-up. OpenAPI schemas + contract test + handler
+  tests (`ca_test.go`); UI typechecks + builds (`-tags ui`). *("key bundles" in the dashboard = the CA trust
+  bundle every signed config bundle distributes = the non-retired CAs.)*
   **Still open:** 8.5 config-signing-key rotation (same overlap mechanism), 8.6 emergency path, 8.7 staging drill.
   *(The scheduled lighthouse-cert rotation above is 6.8-adjacent, NOT M8 CA rotation.)*
 - **M9 — hardening & operations: PARTIAL (delivered via ADR 0007, not per-step ticks).** The poc IS the

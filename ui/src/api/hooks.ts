@@ -26,6 +26,10 @@ export type ApprovalDetail = components['schemas']['ApprovalDetail']
 export type PolicyRule = components['schemas']['PolicyRule']
 export type CompileResult = components['schemas']['CompileResult']
 
+export type CA = components['schemas']['CA']
+export type CAListResponse = components['schemas']['CAListResponse']
+export type CAAdoption = components['schemas']['CAAdoption']
+
 export type EnrollmentStatus = 'pending' | 'issued' | 'denied'
 
 // unwrap (client.ts) parses problem+json into a typed ApiError; a 401 is left to the
@@ -71,6 +75,29 @@ export function useGateways() {
   return useQuery({
     queryKey: ['gateways'],
     queryFn: () => unwrap(api.GET('/admin/v1/gateways')),
+    refetchInterval: 15_000,
+  })
+}
+
+// useCAs — the M8 CA-rotation lifecycle (states, active/trusted, drain count, key-deletion) for the
+// CA Rotation dashboard. Polled so a live rotation (drain / adoption / key-deletion countdown) stays
+// fresh without a manual refresh.
+export function useCAs() {
+  return useQuery({
+    queryKey: ['ca'],
+    queryFn: () => unwrap(api.GET('/admin/v1/ca')),
+    refetchInterval: 15_000,
+  })
+}
+
+// useCAAdoption — per-CA trust-adoption progress (the "trust before you sign" gate the CLI enforces
+// before `ca activate`). Enabled only when an id is given, so the page fetches it just for the staged
+// CA an operator is watching toward 100%.
+export function useCAAdoption(id: number | null) {
+  return useQuery({
+    queryKey: ['ca-adoption', id],
+    queryFn: () => unwrap(api.GET('/admin/v1/ca/{id}/adoption', { params: { path: { id: id as number } } })),
+    enabled: id != null,
     refetchInterval: 15_000,
   })
 }
