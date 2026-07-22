@@ -1,1561 +1,1686 @@
 [
   {
-    "hash": "f3ee9b4",
+    "hash": "7f016a7",
+    "date": "2026-07-22",
+    "subject": "fix(ca): remediate 4 defects from the M8 adversarial review"
+  },
+  {
+    "hash": "c4b3aee",
+    "date": "2026-07-22",
+    "subject": "feat(console): M8 CA Rotation dashboard (read-only)"
+  },
+  {
+    "hash": "8bc095a",
+    "date": "2026-07-22",
+    "subject": "feat(ca): M8.4 CA key retirement — schedule/cancel KMS deletion (local slice)"
+  },
+  {
+    "hash": "d8b7446",
+    "date": "2026-07-22",
+    "subject": "feat(ca): M8.3c waved force-renew of draining-CA stragglers"
+  },
+  {
+    "hash": "3a8f5ef",
+    "date": "2026-07-21",
+    "subject": "feat(ca): M8.3b zero-downtime signing cut-over (hot-swap)"
+  },
+  {
+    "hash": "9de16d7",
+    "date": "2026-07-21",
+    "subject": "feat(ca): M8.3a CA drain tracking (per-CA live-leaf count)"
+  },
+  {
+    "hash": "76590ee",
+    "date": "2026-07-21",
+    "subject": "feat(ca): heartbeat CA-trust adoption tracking + cut-over gate (M8.1)"
+  },
+  {
+    "hash": "a5bca1d",
+    "date": "2026-07-21",
+    "subject": "feat(ca): distribute the CA trust bundle live from the rotation registry (M8.1)"
+  },
+  {
+    "hash": "7c1b1f2",
+    "date": "2026-07-21",
+    "subject": "feat(ca): CA trust-root registry and rotation state machine (M8 slice 1)"
+  },
+  {
+    "hash": "a50ff71",
+    "date": "2026-07-21",
+    "subject": "chore: scrub live-infra identifiers and parameterize deploy for public release"
+  },
+  {
+    "hash": "a88bafb",
+    "date": "2026-07-21",
+    "subject": "docs(readme): remove em-dashes in favor of plain punctuation"
+  },
+  {
+    "hash": "cbebc54",
+    "date": "2026-07-21",
+    "subject": "docs(readme): replace stale M0-only README with a full project overview"
+  },
+  {
+    "hash": "dae011a",
+    "date": "2026-07-17",
+    "subject": "fix(enrollclient): host-bind + anti-rollback the config-refresh apply path"
+  },
+  {
+    "hash": "f64037b",
+    "date": "2026-07-17",
+    "subject": "fix(enrollment): forbid reserved-group issuance via enrollment"
+  },
+  {
+    "hash": "89b5a84",
+    "date": "2026-07-17",
+    "subject": "fix(coreapi): refuse renewal of a revoked device"
+  },
+  {
+    "hash": "4fc681f",
+    "date": "2026-07-17",
+    "subject": "fix(revocation): reject non-64-hex fingerprints so a revoke can't silently no-op"
+  },
+  {
+    "hash": "11854a8",
+    "date": "2026-07-17",
+    "subject": "docs(plan): reconcile Implementation Plan step marks with code reality"
+  },
+  {
+    "hash": "6eddcf0",
+    "date": "2026-07-17",
+    "subject": "docs(claude): reconcile Current status with true repo state (code-verified)"
+  },
+  {
+    "hash": "75957dd",
+    "date": "2026-07-16",
+    "subject": "docs(claude): record ADR 0014 (DNS design) in Current status; fix schema pointer"
+  },
+  {
+    "hash": "f8d6ac7",
+    "date": "2026-07-16",
+    "subject": "docs(adr): ADR 0014 — add scale & production posture (1k-10k hosts)"
+  },
+  {
+    "hash": "1db3494",
+    "date": "2026-07-16",
+    "subject": "docs(adr): ADR 0014 — TLS on mesh names; prefer owned subdomain over .internal"
+  },
+  {
+    "hash": "f142300",
+    "date": "2026-07-16",
+    "subject": "docs(adr): ADR 0014 — add the default-forward path (per-netblock)"
+  },
+  {
+    "hash": "1929d0e",
+    "date": "2026-07-15",
+    "subject": "docs(adr): add ADR 0014 — overlay naming & split-horizon DNS"
+  },
+  {
+    "hash": "7e9df20",
+    "date": "2026-07-09",
+    "subject": "chore(deploy): add deploy-harbor.sh + POC deploy runbook in CLAUDE.md"
+  },
+  {
+    "hash": "063bcd5",
+    "date": "2026-07-09",
+    "subject": "chore(changelog): regenerate for floor-reconcile fix"
+  },
+  {
+    "hash": "7efbd04",
     "date": "2026-07-09",
     "subject": "fix(rollout): converge offline/re-enrolled hosts to the completed pilot/nebula floor"
   },
   {
-    "hash": "c97b26d",
+    "hash": "acf9a6b",
     "date": "2026-06-29",
     "subject": "feat(console): enrollment queue newest-first (keyset DESC + before cursor)"
   },
   {
-    "hash": "0251d9a",
+    "hash": "599b955",
     "date": "2026-06-28",
     "subject": "fix(gateway): route the collect (:9443) mTLS server through httpserve.Serve to drop TCP-healthcheck handshake noise"
   },
   {
-    "hash": "eb7f6f2",
+    "hash": "49cd1c4",
     "date": "2026-06-28",
     "subject": "refine(observability): tie Loki DNS branch to the record's gate + summary/test polish"
   },
   {
-    "hash": "9118ded",
+    "hash": "9e6353b",
     "date": "2026-06-28",
     "subject": "feat(observability): stable Loki DNS for log shippers + drop health-probe handshake noise"
   },
   {
-    "hash": "e4c4b29",
+    "hash": "2860af8",
     "date": "2026-06-28",
     "subject": "feat(gateway): re-enable HTTPS /healthz self-heal (now that autotls serves no-SNI)"
   },
   {
-    "hash": "edac252",
+    "hash": "f468f7b",
     "date": "2026-06-28",
     "subject": "feat(autotls): serve the primary cert on missing/unknown SNI (enables no-SNI LB health checks)"
   },
   {
-    "hash": "a7e500c",
+    "hash": "52dbc93",
     "date": "2026-06-28",
     "subject": "revert(gateway): drop the NLB HTTPS /healthz check — autocert needs SNI, NLB health checks don't send it"
   },
   {
-    "hash": "16be281",
+    "hash": "35fcd8e",
     "date": "2026-06-28",
     "subject": "feat(gateway): self-heal a wedged gateway via HTTPS /healthz + ECS replacement"
   },
   {
-    "hash": "fedb466",
+    "hash": "568a127",
     "date": "2026-06-28",
     "subject": "test(gateways): cover the collect health recorder state machine + document the down-threshold invariant"
   },
   {
-    "hash": "ea0461c",
+    "hash": "dbeed2b",
     "date": "2026-06-28",
     "subject": "feat(gateways): gateway health monitoring + dashboard pane"
   },
   {
-    "hash": "abbe290",
+    "hash": "04a3e5d",
     "date": "2026-06-28",
     "subject": "refine(console): typed /version schema, TZ-aligned CalVer, atomic changelog, badge polish"
   },
   {
-    "hash": "9641225",
+    "hash": "2bc1664",
     "date": "2026-06-28",
     "subject": "feat(console): version badge + changelog page (CalVer + commit, grouped by date)"
   },
   {
-    "hash": "63fde48",
+    "hash": "460e133",
     "date": "2026-06-27",
     "subject": "feat(ui): Devices recency tabs + age-based stale coloring"
   },
   {
-    "hash": "56c3224",
+    "hash": "4a3ddf4",
     "date": "2026-06-27",
     "subject": "feat(ui): tab Join Keys into Active / Revoked (defaults to Active)"
   },
   {
-    "hash": "cde764b",
+    "hash": "221b69f",
     "date": "2026-06-27",
     "subject": "feat(groups): make bulk re-group dual-control opt-in (off by default)"
   },
   {
-    "hash": "a04b5f8",
+    "hash": "698487b",
     "date": "2026-06-27",
     "subject": "fix(groups): bulk re-group counted superseded enrollments (inflated match count)"
   },
   {
-    "hash": "f87e204",
+    "hash": "b37cd62",
     "date": "2026-06-27",
     "subject": "feat(groups): live 'N devices match' hint in the bulk re-group dialog"
   },
   {
-    "hash": "873905d",
+    "hash": "0b492a5",
     "date": "2026-06-27",
     "subject": "fix(groups): bulk re-group preview blanked the console on an empty result"
   },
   {
-    "hash": "4cbde8b",
+    "hash": "fc4cfc3",
     "date": "2026-06-27",
     "subject": "feat(groups): bulk re-group UI — name-pattern dry-run preview + guarded apply (P2.8)"
   },
   {
-    "hash": "b274765",
+    "hash": "f7852d9",
     "date": "2026-06-27",
     "subject": "feat(groups): bulk device re-group — name-pattern dry-run + guarded apply + dual-control (P2.1-P2.7, P2.9)"
   },
   {
-    "hash": "33cb8f0",
+    "hash": "fcd5acb",
     "date": "2026-06-27",
     "subject": "test(groups): genesis brick regression + device-group endpoint tests (P1.9)"
   },
   {
-    "hash": "c09fef9",
+    "hash": "48f4652",
     "date": "2026-06-27",
     "subject": "feat(groups): Devices-view single-device group editing (P1.8)"
   },
   {
-    "hash": "8fe47bc",
+    "hash": "1d03c54",
     "date": "2026-06-27",
     "subject": "feat(groups): expose desired/pending on /devices; chokepoint + trigger tests (P1.7, P1.9)"
   },
   {
-    "hash": "cfca53f",
+    "hash": "d881c9d",
     "date": "2026-06-27",
     "subject": "feat(groups): single-device group-reassignment substrate (ADR 0002 P1.1-P1.6)"
   },
   {
-    "hash": "9dbc06a",
+    "hash": "3644db4",
     "date": "2026-06-27",
     "subject": "docs: rework group-reassignment plan Phase 1 per adversarial review"
   },
   {
-    "hash": "1403ad3",
+    "hash": "ed0f9ac",
     "date": "2026-06-27",
     "subject": "docs: add device group reassignment implementation plan (ADR 0002 + 0013)"
   },
   {
-    "hash": "2e8d9f8",
+    "hash": "b4da6b4",
     "date": "2026-06-27",
     "subject": "docs: add ADR 0013 — bulk device group reassignment by name pattern"
   },
   {
-    "hash": "71b22f5",
+    "hash": "e3a56f5",
     "date": "2026-06-26",
     "subject": "console: split version landscape into checking-in vs stale"
   },
   {
-    "hash": "9d432bd",
+    "hash": "76d8525",
     "date": "2026-06-26",
     "subject": "console: show overlay_ip in the renewal-cliff host list (consistency)"
   },
   {
-    "hash": "541014e",
+    "hash": "410da91",
     "date": "2026-06-26",
     "subject": "console: split fleet convergence into checking-in vs stale, show overlay_ip"
   },
   {
-    "hash": "e288e17",
+    "hash": "605a521",
     "date": "2026-06-26",
     "subject": "console: list the lagging hosts in the fleet-convergence card"
   },
   {
-    "hash": "08ae46c",
+    "hash": "c433370",
     "date": "2026-06-25",
     "subject": "console: convert Cloud/User Trust + Policy editors to the create-button + modal pattern"
   },
   {
-    "hash": "ee3e9c0",
+    "hash": "932b7ea",
     "date": "2026-06-25",
     "subject": "deploy: disable console step-up MFA freshness (-mfa-freshness 0)"
   },
   {
-    "hash": "a842329",
+    "hash": "157ddb9",
     "date": "2026-06-25",
     "subject": "Nebula: persist enrollment netblock so manual approval lands in the right block"
   },
   {
-    "hash": "93cb0e2",
+    "hash": "18aee93",
     "date": "2026-06-25",
     "subject": "Nebula: deliver manual approvals to the gateway via a collect reconcile lane"
   },
   {
-    "hash": "c6f7c48",
+    "hash": "e74598d",
     "date": "2026-06-25",
     "subject": "Nebula: bump VERSION 0.1.2 -> 0.1.3 (pilot enroll early-exit on pending)"
   },
   {
-    "hash": "1b2f69b",
+    "hash": "a8972b3",
     "date": "2026-06-25",
     "subject": "Nebula: pilot enroll early-exits on pending (no 60s poll wait)"
   },
   {
-    "hash": "fa8998d",
+    "hash": "e98fb50",
     "date": "2026-06-25",
     "subject": "Nebula: ncp-collect -interval 1s (faster enrollment pull)"
   },
   {
-    "hash": "040588e",
+    "hash": "10d2385",
     "date": "2026-06-25",
     "subject": "Nebula: env-default core CLI signing/queue flags (HARBOR_*)"
   },
   {
-    "hash": "60481af",
+    "hash": "fead418",
     "date": "2026-06-25",
     "subject": "Nebula: bump VERSION 0.1.1 -> 0.1.2 (pilot install --sso)"
   },
   {
-    "hash": "7ab9b59",
+    "hash": "401ae0b",
     "date": "2026-06-24",
     "subject": "Nebula: per-method node installers + console \"Copy install command\""
   },
   {
-    "hash": "c8ee68e",
+    "hash": "190e881",
     "date": "2026-06-24",
     "subject": "adminauth: recognize Entra MFA from the amr claim, not just AuthnContextClassRef"
   },
   {
-    "hash": "c4a438b",
+    "hash": "d92d992",
     "date": "2026-06-24",
     "subject": "rollout: completed-rollout target is the floor — drive stragglers up on check-in"
   },
   {
-    "hash": "4d023c3",
+    "hash": "6024d82",
     "date": "2026-06-24",
     "subject": "rollout: don't roll back on stale/missing hosts (exclude, don't fail)"
   },
   {
-    "hash": "3f24b23",
+    "hash": "25e8dc6",
     "date": "2026-06-24",
     "subject": "release: bump VERSION to 0.1.1 (relay-capable pilot)"
   },
   {
-    "hash": "34996ec",
+    "hash": "3f314a0",
     "date": "2026-06-24",
     "subject": "lighthouse: propagate registry changes to the running fleet + reseed recover from registry"
   },
   {
-    "hash": "6f3c3bd",
+    "hash": "f06717e",
     "date": "2026-06-24",
     "subject": "docs: add SSO user enrollment runbook (usertrust publish + harbor-side wiring)"
   },
   {
-    "hash": "2ab4f09",
+    "hash": "04fe298",
     "date": "2026-06-24",
     "subject": "console: surface stale devices + make token provenance a badge"
   },
   {
-    "hash": "f0a2e68",
+    "hash": "3cd1abb",
     "date": "2026-06-24",
     "subject": "docs: Outstanding TODOs — point pilot-metrics item at ADR 0012"
   },
   {
-    "hash": "33c31ba",
+    "hash": "83aa0c4",
     "date": "2026-06-24",
     "subject": "docs: add ADR 0012 — pilot fleet metrics, proposed"
   },
   {
-    "hash": "50de4c6",
+    "hash": "34c0f2d",
     "date": "2026-06-24",
     "subject": "deploy: ship grafana provisioning tree via tar, not scp -r"
   },
   {
-    "hash": "79b82d9",
+    "hash": "244f5a3",
     "date": "2026-06-24",
     "subject": "lighthouse: cert-rotation observability (metrics, alerts, dashboard) + netblock provenance fix (#15)"
   },
   {
-    "hash": "42b4078",
+    "hash": "e074e13",
     "date": "2026-06-24",
     "subject": "bootstrap: register lighthouses by NAME, not the derived overlay IP (#14)"
   },
   {
-    "hash": "4deccc9",
+    "hash": "ed99b23",
     "date": "2026-06-24",
     "subject": "bootstrap: make harbor faithfully replaceable (recover fidelity) (#13)"
   },
   {
-    "hash": "364c216",
+    "hash": "671d9d9",
     "date": "2026-06-24",
     "subject": "lighthouse: multi-lighthouse HA for blip-free cert rotation (#10)"
   },
   {
-    "hash": "b8549d7",
+    "hash": "0e6f6a7",
     "date": "2026-06-24",
     "subject": "netblock: stop clients leaking into the reserved central block (#11)"
   },
   {
-    "hash": "62428b9",
+    "hash": "7504a7d",
     "date": "2026-06-23",
     "subject": "lighthouse: scheduled cert rotation for the Fargate lighthouse (Option A) (#9)"
   },
   {
-    "hash": "011ee0b",
+    "hash": "b884810",
     "date": "2026-06-23",
     "subject": "genesis: run harbor's nebula under pilot supervise (managed mesh member) (#8)"
   },
   {
-    "hash": "4334092",
+    "hash": "4d951a4",
     "date": "2026-06-23",
     "subject": "bundle: control-plane host gets its invariant firewall even with no policy (#7)"
   },
   {
-    "hash": "f62a06b",
+    "hash": "f28eafd",
     "date": "2026-06-23",
     "subject": "console auth: login audit + signout fix (#6)"
   },
   {
-    "hash": "12d278d",
+    "hash": "2e2141a",
     "date": "2026-06-23",
     "subject": "bootstrap: register the lighthouse in the DB registry + read it (-lighthouse-db) (#5)"
   },
   {
-    "hash": "ac785c3",
+    "hash": "aa03022",
     "date": "2026-06-23",
     "subject": "deploy: build harbor with -tags ui in every deploy path (#4)"
   },
   {
-    "hash": "a6c21af",
+    "hash": "c2802d4",
     "date": "2026-06-23",
     "subject": "harbor CLI: default DB connection flags from HARBOR_DB_* env (#3)"
   },
   {
-    "hash": "fa25a0b",
+    "hash": "535131a",
     "date": "2026-06-22",
     "subject": "persist(sso): durable enrollment-portal SSO config via terraform vars + bootstrap fallback"
   },
   {
-    "hash": "f06eefc",
+    "hash": "0c11fdb",
     "date": "2026-06-22",
     "subject": "coreapi: tests for heartbeat self-heal + IP reconcile"
   },
   {
-    "hash": "99aad47",
+    "hash": "c644ecc",
     "date": "2026-06-22",
     "subject": "nebula relay: lighthouse as relay + use_relays for off-cloud hosts"
   },
   {
-    "hash": "f11cbcd",
+    "hash": "7ac55fd",
     "date": "2026-06-22",
     "subject": "coreapi: heartbeat self-heal + IP reconcile for reaped valid-cert hosts"
   },
   {
-    "hash": "19dab98",
+    "hash": "01e9721",
     "date": "2026-06-22",
     "subject": "reaper: never reap a valid-cert host; never blocklist"
   },
   {
-    "hash": "1956142",
+    "hash": "77b6393",
     "date": "2026-06-22",
     "subject": "feat(deploy): add opt-in SSM-only Windows client to the prod stack"
   },
   {
-    "hash": "cd2d165",
+    "hash": "7510a5a",
     "date": "2026-06-22",
     "subject": "docs: mark M10 Windows pilot parity PARTIAL — SCM + nebula/Wintun staging done"
   },
   {
-    "hash": "c02465e",
+    "hash": "957ee1a",
     "date": "2026-06-22",
     "subject": "docs: add Windows pilot demo runbook (join a Windows host to the mesh)"
   },
   {
-    "hash": "c59acd7",
+    "hash": "44447f8",
     "date": "2026-06-22",
     "subject": "fix(pilot): stage Wintun where nebula loads it + harden the embed/release path"
   },
   {
-    "hash": "e50d52e",
+    "hash": "a382f82",
     "date": "2026-06-22",
     "subject": "feat(pilot): stage nebula + Wintun on Windows so the data plane comes up"
   },
   {
-    "hash": "0ea5a51",
+    "hash": "9836c7f",
     "date": "2026-06-22",
     "subject": "docs: refresh README index — ADR 0011, revocation-guards log, Outstanding TODOs, two-app onboarding entry"
   },
   {
-    "hash": "6663194",
+    "hash": "f136ce6",
     "date": "2026-06-22",
     "subject": "docs: ADR 0005 — link the ADR 0006 reference (mirror parity with the vault)"
   },
   {
-    "hash": "6299355",
+    "hash": "314ae4d",
     "date": "2026-06-22",
     "subject": "docs: close the two-SAML-app gap across the SSO docs"
   },
   {
-    "hash": "b642335",
+    "hash": "8ed5208",
     "date": "2026-06-22",
     "subject": "docs: SSO onboarding — require two Entra SAML apps + fix poc validity"
   },
   {
-    "hash": "317e13c",
+    "hash": "dada176",
     "date": "2026-06-20",
-    "subject": "docs: ADR 0011 — mark Phase 1 shipped + deployed (5106646, poc 2026-06-20)"
+    "subject": "docs: ADR 0011 — mark Phase 1 shipped + deployed (884da07, poc 2026-06-20)"
   },
   {
-    "hash": "6bd6cf4",
+    "hash": "cfcc897",
     "date": "2026-06-20",
     "subject": "ADR 0011 Phase 1: declarative config API + privileged two-person carve-out"
   },
   {
-    "hash": "0a4851c",
+    "hash": "527369b",
     "date": "2026-06-19",
     "subject": "docs: reframe ADR 0011 around phasing (console CRUD -> config-as-code -> optional provider)"
   },
   {
-    "hash": "c9f76ab",
+    "hash": "598bec1",
     "date": "2026-06-19",
     "subject": "docs: add ADR 0011 — Terraform-managed mesh config (GitOps), proposed"
   },
   {
-    "hash": "66ac869",
+    "hash": "49e2c6c",
     "date": "2026-06-19",
     "subject": "harbor: add backfill-cp-enrollment for pre-fix genesis control-plane certs"
   },
   {
-    "hash": "afa4481",
+    "hash": "8e3ba71",
     "date": "2026-06-19",
     "subject": "docs: mark the M7 7.2 revocation-as-DoS guards P0 done in the backlog"
   },
   {
-    "hash": "d246755",
+    "hash": "803b42e",
     "date": "2026-06-19",
     "subject": "revocation: enforce control-plane protection + bulk-revoke dual-control/rate-limit (7.2/P10)"
   },
   {
-    "hash": "757eb55",
+    "hash": "587ce9a",
     "date": "2026-06-19",
     "subject": "prod: enable -blocklist-db on core-api + collect so revocations propagate"
   },
   {
-    "hash": "5e7c53f",
+    "hash": "c8ee78a",
     "date": "2026-06-19",
     "subject": "docs: status audit — bring all docs up to date with current state + add Outstanding TODOs backlog"
   },
   {
-    "hash": "657565c",
+    "hash": "7f1ccc0",
     "date": "2026-06-18",
     "subject": "prod bootstrap: always write empty gateway sso_* secret keys when SSO off"
   },
   {
-    "hash": "9275dd1",
+    "hash": "0b66357",
     "date": "2026-06-18",
     "subject": "prod: default lighthouse_runtime to fargate (override to ec2 still allowed)"
   },
   {
-    "hash": "8ef4f23",
+    "hash": "66879a4",
     "date": "2026-06-18",
     "subject": "prod bootstrap: build harbor with -tags ui (embed the console)"
   },
   {
-    "hash": "9708219",
+    "hash": "6a4f4e5",
     "date": "2026-06-18",
     "subject": "reaper: fix safety-review blockers (control-plane could be reaped)"
   },
   {
-    "hash": "c16c557",
+    "hash": "e0649ff",
     "date": "2026-06-18",
     "subject": "reaper: surface in the console — dashboard recent-reaps panel + Device API fields"
   },
   {
-    "hash": "26bc93d",
+    "hash": "c25889b",
     "date": "2026-06-18",
     "subject": "reaper: device-reaping backend (cert-expired+grace, IP reclaim, conservative)"
   },
   {
-    "hash": "612d21f",
+    "hash": "50aad7f",
     "date": "2026-06-18",
     "subject": "ephemeral hosts: record at issue + shorter cert TTL (first lifecycle slice)"
   },
   {
-    "hash": "cb47dcc",
+    "hash": "14f3e9f",
     "date": "2026-06-18",
     "subject": "seed-demo: IPAM + SSO demo data so the new UI lights up"
   },
   {
-    "hash": "d3ea2ff",
+    "hash": "0610396",
     "date": "2026-06-18",
     "subject": "SSO deploy: thread genesis/bootstrap/terraform so SSO is deployable (off by default)"
   },
   {
-    "hash": "e10deb2",
+    "hash": "5d4ecd9",
     "date": "2026-06-18",
     "subject": "SSO: ADR 0004 operator note — deployment topology (portal combined on the gateway)"
   },
   {
-    "hash": "3d07802",
+    "hash": "3977f91",
     "date": "2026-06-18",
     "subject": "SSO: ADR 0004 operator note — separate SAML app for the enrollment portal"
   },
   {
-    "hash": "9c9766a",
+    "hash": "84f78da",
     "date": "2026-06-18",
     "subject": "SSO: final security-review hardening (verdict holds, 0 blockers)"
   },
   {
-    "hash": "9cfddab",
+    "hash": "88828a8",
     "date": "2026-06-18",
     "subject": "SSO P2b: UserTrust admin UI + SSO provenance"
   },
   {
-    "hash": "7aeb33d",
+    "hash": "37d6b37",
     "date": "2026-06-18",
     "subject": "SSO P2a: user-trust admin API + publish CLI (closes B2)"
   },
   {
-    "hash": "b35b270",
+    "hash": "46e0ac3",
     "date": "2026-06-18",
     "subject": "SSO P1 review fixes: mandatory assertion expiry, exact-realm match, robust evidence"
   },
   {
-    "hash": "a3f53b1",
+    "hash": "94e2ca6",
     "date": "2026-06-18",
     "subject": "SSO P1e: wire gateway/Core/genesis end-to-end"
   },
   {
-    "hash": "98f0c8f",
+    "hash": "825b35b",
     "date": "2026-06-18",
     "subject": "SSO P1d: pilot enroll --sso (loopback browser flow)"
   },
   {
-    "hash": "be4260b",
+    "hash": "a529d51",
     "date": "2026-06-18",
     "subject": "SSO P1c: gateway SAML enrollment portal (off-mesh, no CA)"
   },
   {
-    "hash": "487f7af",
+    "hash": "945b10c",
     "date": "2026-06-18",
     "subject": "SSO P1b: Core enrollment.Consumer.processSSO"
   },
   {
-    "hash": "c53937c",
+    "hash": "830b73d",
     "date": "2026-06-18",
     "subject": "SSO P1a: usertrust config model + ssoassert (dedicated-key assertion)"
   },
   {
-    "hash": "84e2c90",
+    "hash": "8304278",
     "date": "2026-06-18",
     "subject": "SSO P0: issuance-mode startup guard (ADR 0009)"
   },
   {
-    "hash": "dd845fa",
+    "hash": "3ea09ea",
     "date": "2026-06-18",
     "subject": "IPAM polish: exclude expired quarantine from allocated; index heartbeats.last_seen"
   },
   {
-    "hash": "2ac8a3a",
+    "hash": "5e3b83f",
     "date": "2026-06-18",
     "subject": "pilot info: real service state + harbor probe for the -dir layout"
   },
   {
-    "hash": "6db3dd0",
+    "hash": "38c1e0d",
     "date": "2026-06-18",
     "subject": "pilot info: detect the single-mesh -dir layout (e.g. /etc/nebula)"
   },
   {
-    "hash": "2ea857c",
+    "hash": "63de69b",
     "date": "2026-06-18",
     "subject": "pilot: add `info` diagnostic + cloud-onboarding command"
   },
   {
-    "hash": "c2b80bc",
+    "hash": "bf730b7",
     "date": "2026-06-18",
     "subject": "IPAM: wire used% (live utilization) into API + Prometheus + dashboard"
   },
   {
-    "hash": "906651d",
+    "hash": "906089f",
     "date": "2026-06-18",
     "subject": "IPAM: boot-seed central/default for existing-mesh upgrade"
   },
   {
-    "hash": "3b0fad8",
+    "hash": "7af9c5f",
     "date": "2026-06-17",
     "subject": "IPAM review fixes: resolver cache race, unknown-name fallback, overlay pool, audit/quarantine"
   },
   {
-    "hash": "6a546c6",
+    "hash": "95bd77a",
     "date": "2026-06-17",
     "subject": "IPAM phase 4: admin console UI — page, live selector, overlay, dashboard"
   },
   {
-    "hash": "3d67390",
+    "hash": "1c11207",
     "date": "2026-06-17",
     "subject": "IPAM phase 3: admin API for netblock CRUD + suggest + allocations"
   },
   {
-    "hash": "674eed0",
+    "hash": "92d7c67",
     "date": "2026-06-17",
     "subject": "IPAM phase 2: cloud-trust netblock binding"
   },
   {
-    "hash": "8407bb0",
+    "hash": "99d6b2c",
     "date": "2026-06-17",
     "subject": "IPAM phase 1: netblocks, resolver-backed allocator, auto-grow, genesis reservations"
   },
   {
-    "hash": "f1e242b",
+    "hash": "03773ee",
     "date": "2026-06-17",
     "subject": "Nebula: add ADR 0010 — IPAM (named netblocks + per-join allocation)"
   },
   {
-    "hash": "1283dde",
+    "hash": "cd3b0d6",
     "date": "2026-06-17",
     "subject": "observability: harbor-collect domain metrics"
   },
   {
-    "hash": "b300c53",
+    "hash": "8c43dc4",
     "date": "2026-06-17",
     "subject": "observability: open the gateway /metrics path through the internal NLB"
   },
   {
-    "hash": "33fbcaa",
+    "hash": "727bacc",
     "date": "2026-06-17",
     "subject": "observability: gateway + harbor-collect metrics into Prometheus"
   },
   {
-    "hash": "656d0dd",
+    "hash": "707f535",
     "date": "2026-06-17",
     "subject": "observability: ship Fargate gateway logs to Loki via FireLens"
   },
   {
-    "hash": "436dd37",
+    "hash": "556bed6",
     "date": "2026-06-17",
     "subject": "observability: broaden Loki ingest SG + lighthouse egress for log shipping"
   },
   {
-    "hash": "8238bb0",
+    "hash": "b0542ec",
     "date": "2026-06-17",
     "subject": "nebula stats: non-standard port (4280) + fail-open if it conflicts"
   },
   {
-    "hash": "09a8a7e",
+    "hash": "799e586",
     "date": "2026-06-17",
     "subject": "observability: nebula data-plane metrics + node_exporter + Alloy on all EC2 nodes"
   },
   {
-    "hash": "fb592e2",
+    "hash": "e3fa0bf",
     "date": "2026-06-17",
     "subject": "monitoring/deploy.sh: use docker, not podman (AL2023 ships docker)"
   },
   {
-    "hash": "587ad0b",
+    "hash": "cd65d48",
     "date": "2026-06-17",
     "subject": "Harden EC2 nodes private + VPC interface endpoints + harbor-config recover"
   },
   {
-    "hash": "b75d819",
+    "hash": "cb0d80b",
     "date": "2026-06-17",
     "subject": "Nebula: harbor rollout status -lane (show non-policy lanes)"
   },
   {
-    "hash": "80c4256",
+    "hash": "0104425",
     "date": "2026-06-17",
     "subject": "Nebula: off-cloud curl|bash installer (install.sh) + sha256 sidecars"
   },
   {
-    "hash": "8c98e2d",
+    "hash": "ccf8603",
     "date": "2026-06-17",
     "subject": "Nebula: version builds at 0.1.0 (VERSION + ldflags) + release-pilot.sh"
   },
   {
-    "hash": "c903bca",
+    "hash": "4d533ee",
     "date": "2026-06-17",
     "subject": "Nebula: add the publish + AD-SSO-onboarding docs"
   },
   {
-    "hash": "77795e4",
+    "hash": "0851352",
     "date": "2026-06-16",
     "subject": "Nebula: prod terraform — wire the S3 state backend (foundation + app)"
   },
   {
-    "hash": "524b20e",
+    "hash": "cfb20e9",
     "date": "2026-06-16",
     "subject": "Nebula: prod app — split-horizon DNS so in-VPC clients reach the gateway"
   },
   {
-    "hash": "04e5255",
+    "hash": "c5ef0e2",
     "date": "2026-06-16",
     "subject": "Nebula: prod app — fix non-ASCII in AWS resource descriptions (apply-time)"
   },
   {
-    "hash": "13fecf2",
+    "hash": "f23576a",
     "date": "2026-06-16",
     "subject": "Nebula: init-secrets — fix env-format AWS creds detection (+ tolerate CRLF)"
   },
   {
-    "hash": "fdfc27a",
+    "hash": "1841775",
     "date": "2026-06-16",
     "subject": "Nebula: add init-secrets.sh; own the Cloudflare secret outside Terraform"
   },
   {
-    "hash": "8fded54",
+    "hash": "18c5ed3",
     "date": "2026-06-16",
     "subject": "Nebula: wire harbor to Aurora with rotating creds (no static password)"
   },
   {
-    "hash": "412c5cd",
+    "hash": "192fd92",
     "date": "2026-06-16",
     "subject": "Nebula: wire the Postgres pool flags into the bootstrap's core-api launch"
   },
   {
-    "hash": "e7b68ad",
+    "hash": "3977eee",
     "date": "2026-06-16",
     "subject": "Nebula: wire the Postgres pool Config fields to harbor flags"
   },
   {
-    "hash": "e40cada",
+    "hash": "efed270",
     "date": "2026-06-16",
     "subject": "Nebula: tune the Postgres pool + add real-Postgres dialect tests"
   },
   {
-    "hash": "2ee73d5",
+    "hash": "4d2042e",
     "date": "2026-06-16",
     "subject": "Nebula: rewrite the Genesis Runbook as an ELI5 end-to-end AWS stand-up runbook"
   },
   {
-    "hash": "1c2b670",
+    "hash": "6a4f433",
     "date": "2026-06-16",
     "subject": "Nebula: fix console-443 port drift in the monitoring stack + prod READMEs"
   },
   {
-    "hash": "b159758",
+    "hash": "ef89d70",
     "date": "2026-06-16",
     "subject": "Nebula: move the admin console to the default 443 (clean SAML URLs over the mesh)"
   },
   {
-    "hash": "ecfd054",
+    "hash": "8eb82c3",
     "date": "2026-06-16",
     "subject": "Nebula: SAML group-claim knob + ELI5 runbook rewrite (correct RSA key, ';' role-map)"
   },
   {
-    "hash": "37a802a",
+    "hash": "0837c92",
     "date": "2026-06-16",
     "subject": "Nebula: bootstrap SAML — require HTTPS base-url + print the Entra values to register"
   },
   {
-    "hash": "02dbb2c",
+    "hash": "180bfbd",
     "date": "2026-06-16",
     "subject": "Nebula: wire KMS trust root + Entra SAML into the genesis bootstrap"
   },
   {
-    "hash": "d853b3a",
+    "hash": "4e86ca0",
     "date": "2026-06-16",
     "subject": "Nebula ADR 0007: note arch affinity in release rollouts (+ tidy per-arch wording)"
   },
   {
-    "hash": "de8532a",
+    "hash": "6c07a1d",
     "date": "2026-06-16",
     "subject": "Nebula: arch affinity in release-rollout wave assignment"
   },
   {
-    "hash": "0c479e3",
+    "hash": "63de0ee",
     "date": "2026-06-16",
     "subject": "Nebula: per-arch release URL support — one generation serves a mixed-arch fleet"
   },
   {
-    "hash": "116206e",
+    "hash": "318d5b6",
     "date": "2026-06-16",
     "subject": "Nebula: add artifact-hosting S3 bucket for pilot/nebula self-update distribution"
   },
   {
-    "hash": "278847c",
+    "hash": "6cea958",
     "date": "2026-06-16",
     "subject": "Nebula: Phase 7d — DR terraform (secret recovery windows, log retention, S3 Object-Lock audit export)"
   },
   {
-    "hash": "6c2988d",
+    "hash": "470f063",
     "date": "2026-06-16",
     "subject": "Nebula: Phase 7c — harbor log aggregation to Loki via Grafana Alloy (ADR 0007)"
   },
   {
-    "hash": "4fc3886",
+    "hash": "741c762",
     "date": "2026-06-16",
     "subject": "Nebula: Phase 7b part 2 — monitoring node + deploy.sh (Prometheus/Alertmanager/Grafana)"
   },
   {
-    "hash": "8376a6f",
+    "hash": "e100795",
     "date": "2026-06-16",
     "subject": "Nebula: Phase 7b (part 1) — monitoring stack config (Prometheus/Alertmanager/Grafana)"
   },
   {
-    "hash": "ff7100a",
+    "hash": "b5866b0",
     "date": "2026-06-16",
     "subject": "Nebula: Phase 7a — observability endpoints + alarm-source metrics (ADR 0007)"
   },
   {
-    "hash": "baf865f",
+    "hash": "2965ef4",
     "date": "2026-06-15",
     "subject": "Nebula: mesh-name DNS convention for component domains (poc-gateway.<domain>)"
   },
   {
-    "hash": "0186dc2",
+    "hash": "de0b6c2",
     "date": "2026-06-15",
     "subject": "Nebula: HA shared-state fixes — Core safe to run as ≥2 processes (ADR 0007 Phase 4)"
   },
   {
-    "hash": "d5eb983",
+    "hash": "a68a7fd",
     "date": "2026-06-15",
     "subject": "Nebula: wire harbor's ACME into the genesis bootstrap (finish TLS pivot)"
   },
   {
-    "hash": "23fb175",
+    "hash": "0d181d9",
     "date": "2026-06-15",
     "subject": "Nebula: end-to-end edge TLS (ACME) + distroless Fargate images"
   },
   {
-    "hash": "85b597c",
+    "hash": "8027f8c",
     "date": "2026-06-15",
     "subject": "autotls: per-component Let's Encrypt TLS (ACME DNS-01 via Cloudflare)"
   },
   {
-    "hash": "638e5f0",
+    "hash": "b84561e",
     "date": "2026-06-15",
     "subject": "deploy/prod: pin EBS root volumes to a customer-managed CMK (EC2 security review)"
   },
   {
-    "hash": "0a240da",
+    "hash": "830377e",
     "date": "2026-06-15",
     "subject": "deploy/prod: terraform compute layer — Core instance role (KMS sign + DB secret)"
   },
   {
-    "hash": "6bda3bf",
+    "hash": "25578c2",
     "date": "2026-06-15",
     "subject": "deploy/prod: terraform data layer — Aurora PostgreSQL Multi-AZ + Secrets Manager (Phase 1)"
   },
   {
-    "hash": "252dd1f",
+    "hash": "89cca38",
     "date": "2026-06-15",
     "subject": "deploy/prod: terraform app stack — network layer (relocate + foundation-wire + harden)"
   },
   {
-    "hash": "2f23da4",
+    "hash": "b8be2f9",
     "date": "2026-06-15",
     "subject": "deploy/prod: terraform foundation stack — state bucket + KMS trust root (layer 0)"
   },
   {
-    "hash": "d0c279b",
+    "hash": "5e2685e",
     "date": "2026-06-15",
     "subject": "signer: AWS KMS backend (full-AWS trust root); SoftHSM/software unchanged"
   },
   {
-    "hash": "a19914d",
+    "hash": "10d3b47",
     "date": "2026-06-15",
     "subject": "pilot: real heartbeat health + end-to-end bundle-driven self-update test"
   },
   {
-    "hash": "e3596a9",
+    "hash": "2494143",
     "date": "2026-06-15",
     "subject": "docs: ADR 0003 — pilotupdate quarantine finding fixed + re-validated in situ"
   },
   {
-    "hash": "f238dd1",
+    "hash": "204f2e5",
     "date": "2026-06-15",
     "subject": "pilotupdate: quarantine a failed sha so a reverted bad pilot isn't re-applied"
   },
   {
-    "hash": "70cf336",
+    "hash": "420667b",
     "date": "2026-06-15",
     "subject": "docs: ADR 0003 — 3b re-exec self-update live-validated (2026-06-15)"
   },
   {
-    "hash": "5a439d3",
+    "hash": "a3e77d8",
     "date": "2026-06-15",
     "subject": "docs: mark #39 Releases console built (ADR 0003 + Admin UI Plan)"
   },
   {
-    "hash": "80c85aa",
+    "hash": "eadf3ec",
     "date": "2026-06-15",
     "subject": "#39 review fixes: live-host fleet read, honest list errors, banner/label polish"
   },
   {
-    "hash": "91366a1",
+    "hash": "9796ed2",
     "date": "2026-06-15",
     "subject": "ui: Releases page — registries + per-lane fleet upgrades (#39)"
   },
   {
-    "hash": "55d274a",
+    "hash": "82a60be",
     "date": "2026-06-15",
     "subject": "adminapi: release-registry list + fleet-upgrade endpoints (#39 backend)"
   },
   {
-    "hash": "087b4ec",
+    "hash": "5caf093",
     "date": "2026-06-15",
     "subject": "harbor nebula/pilot add: best-effort URL reachability HEAD check"
   },
   {
-    "hash": "669d243",
+    "hash": "33b8375",
     "date": "2026-06-15",
     "subject": "harbor nebula/pilot add -file: hash a local binary at ingest"
   },
   {
-    "hash": "53f9e9d",
+    "hash": "502d47b",
     "date": "2026-06-15",
     "subject": "ADR 0003 Phase 3c: pilot-version distribution (canary-staged self-update)"
   },
   {
-    "hash": "29c8fe4",
+    "hash": "df7da37",
     "date": "2026-06-15",
     "subject": "ADR 0003 Phase 3 (#42): run a managed pilot binary in a writable dir"
   },
   {
-    "hash": "93fc43e",
+    "hash": "1cbf050",
     "date": "2026-06-15",
     "subject": "Nebula: ADR 0003 Phase 3 — document service-manager interaction + the read-only-binary gap"
   },
   {
-    "hash": "010d860",
+    "hash": "a5e7e48",
     "date": "2026-06-15",
     "subject": "ADR 0003 Phase 3: service units preserve nebula across a pilot restart"
   },
   {
-    "hash": "124d0a2",
+    "hash": "26cf74f",
     "date": "2026-06-15",
     "subject": "Nebula: gofmt the windows adopt stubs (alignment)"
   },
   {
-    "hash": "a24a434",
+    "hash": "3d9ba59",
     "date": "2026-06-15",
     "subject": "ADR 0003 Phase 3 (2/2): pilot re-exec self-update + last-good revert"
   },
   {
-    "hash": "156ecc3",
+    "hash": "f2a1ba0",
     "date": "2026-06-15",
     "subject": "Nebula: ADR 0003 Phase 3 — record 3a done, scope 3b/3c + live-test gate"
   },
   {
-    "hash": "6ffbea5",
+    "hash": "1c258a6",
     "date": "2026-06-15",
     "subject": "ADR 0003 Phase 3 (1/2): supervisor adopt-PID mode"
   },
   {
-    "hash": "c0486fb",
+    "hash": "1798dcb",
     "date": "2026-06-15",
     "subject": "ADR 0003 Phase 2: go:embed nebula bootstrap (offline first-boot)"
   },
   {
-    "hash": "1c4c899",
+    "hash": "7ea21c6",
     "date": "2026-06-15",
     "subject": "Nebula: add ADR 0009 — control-plane trust-zone separation"
   },
   {
-    "hash": "d164cf2",
+    "hash": "1d9f044",
     "date": "2026-06-15",
     "subject": "ADR 0003 Phase 1c (3/3): activate per-host nebula staging end-to-end"
   },
   {
-    "hash": "b070939",
+    "hash": "09b1201",
     "date": "2026-06-15",
     "subject": "ADR 0003 Phase 1c (2/3): pilot-local nebula auto-rollback"
   },
   {
-    "hash": "019b976",
+    "hash": "e9ad0bc",
     "date": "2026-06-15",
     "subject": "ADR 0003 Phase 1c (1/3): nebula release registry + rollout lane"
   },
   {
-    "hash": "28b3c3f",
+    "hash": "6dd0409",
     "date": "2026-06-15",
     "subject": "ADR 0003 Phase 1b: pilot-side nebula updater"
   },
   {
-    "hash": "cb86041",
+    "hash": "395e069",
     "date": "2026-06-15",
     "subject": "ADR 0003 Phase 1a: carry the desired nebula version/sha/url in the signed bundle"
   },
   {
-    "hash": "66476ad",
+    "hash": "9243e4d",
     "date": "2026-06-15",
     "subject": "build: add fmt / vet / lint / check targets to the Makefile"
   },
   {
-    "hash": "af1ceef",
+    "hash": "38a2a2e",
     "date": "2026-06-15",
     "subject": "Nebula: ADR 0008 — park binary notarization (CLI/SSH installs need no signing)"
   },
   {
-    "hash": "89f8816",
+    "hash": "ed281dd",
     "date": "2026-06-15",
     "subject": "gateway: close the durable queue + join the collect server on shutdown (#35)"
   },
   {
-    "hash": "cc13961",
+    "hash": "e687e4d",
     "date": "2026-06-15",
     "subject": "multi-mesh: disjoint-CIDR warning in pilot install (#29, ADR 0008 Phase 3)"
   },
   {
-    "hash": "c034b34",
+    "hash": "b87ccda",
     "date": "2026-06-15",
     "subject": "chore: clear the golangci-lint baseline to zero (#35)"
   },
   {
-    "hash": "2bb1d19",
+    "hash": "0de4849",
     "date": "2026-06-15",
     "subject": "refactor: adminauth.New returns an error instead of panicking (#35)"
   },
   {
-    "hash": "1e4cd82",
+    "hash": "e048525",
     "date": "2026-06-15",
     "subject": "perf/cleanup: pool collector http.Clients + drop the KindPolicyPublish alias (#35)"
   },
   {
-    "hash": "4b28d43",
+    "hash": "9dd85f8",
     "date": "2026-06-15",
     "subject": "refactor: idiom cleanup -- IMDS error, name clashes (#35)"
   },
   {
-    "hash": "9c6e157",
+    "hash": "dddd833",
     "date": "2026-06-15",
     "subject": "fix: close the one-time-bundle TOCTOU in queue.GetResult (#35)"
   },
   {
-    "hash": "194c536",
+    "hash": "8219cad",
     "date": "2026-06-15",
     "subject": "fix: migrate off deprecated crypto APIs (SA1019, #34)"
   },
   {
-    "hash": "de94ca8",
+    "hash": "accac6b",
     "date": "2026-06-14",
     "subject": "refactor: split cmd/harbor/main.go god-file into per-command files (#33 part 2)"
   },
   {
-    "hash": "b6161f6",
+    "hash": "98c4923",
     "date": "2026-06-14",
     "subject": "refactor: dedup the dual-control commit-time validators (#33 part 1)"
   },
   {
-    "hash": "4514ee6",
+    "hash": "5515e58",
     "date": "2026-06-14",
     "subject": "fix: pilot runtime concurrency hardening (#31)"
   },
   {
-    "hash": "5ef9204",
+    "hash": "661d40b",
     "date": "2026-06-14",
     "subject": "fix: don't deliver enrollment bundles / renewed certs that weren't recorded (#32)"
   },
   {
-    "hash": "edc4fc8",
+    "hash": "678c500",
     "date": "2026-06-14",
     "subject": "docs: first-pass code review (golangci-lint setup + 29 structural findings)"
   },
   {
-    "hash": "b463a9f",
+    "hash": "56813d9",
     "date": "2026-06-14",
     "subject": "chore: add golangci-lint config + first-pass lint cleanup"
   },
   {
-    "hash": "aaa44aa",
+    "hash": "c4fc9f9",
     "date": "2026-06-14",
     "subject": "pilot: record live Windows Server 2022 validation of the SCM backend"
   },
   {
-    "hash": "655ac4b",
+    "hash": "198180e",
     "date": "2026-06-14",
     "subject": "deploy: drop key_name from the Windows test client (ed25519 rejected by Windows AMIs)"
   },
   {
-    "hash": "706cfdd",
+    "hash": "cbbfb8c",
     "date": "2026-06-14",
     "subject": "deploy: Windows Server test client for the pilot SCM backend"
   },
   {
-    "hash": "f8c51c8",
+    "hash": "5f58808",
     "date": "2026-06-14",
     "subject": "pilot: Windows SCM service backend (ADR 0008 Phase 4)"
   },
   {
-    "hash": "188bdf9",
+    "hash": "5d5cdac",
     "date": "2026-06-14",
     "subject": "pilot: add `install -dry-run` + validate launchd backend on real macOS"
   },
   {
-    "hash": "0160c35",
+    "hash": "35cb207",
     "date": "2026-06-14",
     "subject": "pilot: macOS launchd service backend (ADR 0008 Phase 4)"
   },
   {
-    "hash": "22032c9",
+    "hash": "d214b4b",
     "date": "2026-06-14",
     "subject": "deploy: dogfood `pilot install` in the genesis bootstrap"
   },
   {
-    "hash": "24cf728",
+    "hash": "8892233",
     "date": "2026-06-14",
     "subject": "multi-mesh: mesh-wide TUN device + listen port in the signed bundle (ADR 0008 / task #27)"
   },
   {
-    "hash": "f115833",
+    "hash": "9031ead",
     "date": "2026-06-14",
     "subject": "pilot: full uninstall/cleanup (last-mesh + -all remove the shared unit)"
   },
   {
-    "hash": "5ce64b5",
+    "hash": "42d65dd",
     "date": "2026-06-14",
     "subject": "pilot: implement install / status / uninstall (ADR 0008 Phase 1)"
   },
   {
-    "hash": "0dfbbd4",
+    "hash": "aa35b4a",
     "date": "2026-06-14",
     "subject": "Nebula: ADR 0008 — note per-mesh tun device name for multi-mesh"
   },
   {
-    "hash": "3e4ca2a",
+    "hash": "f134c12",
     "date": "2026-06-14",
     "subject": "Nebula: ADR 0008 — meshinfo served from the console, not a public gateway endpoint"
   },
   {
-    "hash": "3a0712f",
+    "hash": "2d007e5",
     "date": "2026-06-14",
     "subject": "Nebula: add ADR 0008 — client install & bootstrap"
   },
   {
-    "hash": "fec31a9",
+    "hash": "a4fd518",
     "date": "2026-06-14",
     "subject": "Nebula: production deploy scaffold (deploy/prod) + ADR 0007 + Entra ID SAML runbook"
   },
   {
-    "hash": "8063285",
+    "hash": "c7ba00b",
     "date": "2026-06-14",
     "subject": "deploy: mint the admin queue key in the bootstrap (console never started — found live)"
   },
   {
-    "hash": "563197f",
+    "hash": "5f43eec",
     "date": "2026-06-14",
     "subject": "deploy: wire the Fargate lighthouse path into the bootstrap (proven live)"
   },
   {
-    "hash": "45254ed",
+    "hash": "23617e7",
     "date": "2026-06-14",
     "subject": "Nebula: add ADR 0006 — distroless Fargate container images"
   },
   {
-    "hash": "f9d2ea2",
+    "hash": "830fbdf",
     "date": "2026-06-14",
     "subject": "deploy: fix core-api startup + harbor nebula firewall for mesh heartbeat (found live)"
   },
   {
-    "hash": "afbefa4",
+    "hash": "fa0569f",
     "date": "2026-06-14",
     "subject": "deploy: client SG must allow egress to the gateway enroll port (found live)"
   },
   {
-    "hash": "88697c1",
+    "hash": "b125094",
     "date": "2026-06-14",
     "subject": "deploy: pre-flight audit fixes for the live Fargate apply (two-NLB split, podman)"
   },
   {
-    "hash": "da0e3b2",
+    "hash": "aada11d",
     "date": "2026-06-14",
     "subject": "deploy: Fargate by default for the gateway + spike a Fargate lighthouse"
   },
   {
-    "hash": "4a61927",
+    "hash": "ecee7ff",
     "date": "2026-06-14",
     "subject": "spike: Fargate gateway runtime (gateway_runtime = ec2 | fargate)"
   },
   {
-    "hash": "344999c",
+    "hash": "c5e6c2d",
     "date": "2026-06-14",
     "subject": "deploy/local: single-instance personal deploy (GitHub console, co-located)"
   },
   {
-    "hash": "240207e",
+    "hash": "f423d1c",
     "date": "2026-06-14",
     "subject": "deploy: isolate the gateway in its own network (dedicated VPC + tiered subnets + NACL + egress lockdown)"
   },
   {
-    "hash": "329e3c6",
+    "hash": "df0e186",
     "date": "2026-06-14",
     "subject": "ADR-0005 Phase 3: off-mesh gateway demo node (terraform + bootstrap)"
   },
   {
-    "hash": "f4d8d53",
+    "hash": "9626b13",
     "date": "2026-06-14",
     "subject": "ADR-0005 Phase 2: gateway registry + registry-driven collect"
   },
   {
-    "hash": "05fc862",
+    "hash": "a17d91a",
     "date": "2026-06-14",
     "subject": "ADR-0005 Phase 1: pull-based gateway transport (leaf-pinned mTLS)"
   },
   {
-    "hash": "f3d535a",
+    "hash": "2e35b64",
     "date": "2026-06-14",
     "subject": "7.1b: fast staged blocklist propagation (concurrent rollout lane)"
   },
   {
-    "hash": "344ca37",
+    "hash": "52d3e38",
     "date": "2026-06-14",
     "subject": "7.1a: blocklist distribution via the signed config bundle"
   },
   {
-    "hash": "564bc2b",
+    "hash": "be289af",
     "date": "2026-06-13",
     "subject": "ADR 0005: pull-based enrollment gateways"
   },
   {
-    "hash": "7b4d129",
+    "hash": "2ff16de",
     "date": "2026-06-13",
     "subject": "Demo refresh: control plane on the mesh + keyless attestation"
   },
   {
-    "hash": "b3b6fa1",
+    "hash": "878ee27",
     "date": "2026-06-13",
     "subject": "ADR 0004: SSO-driven user enrollment"
   },
   {
-    "hash": "99e587f",
+    "hash": "5bb96a4",
     "date": "2026-06-13",
     "subject": "ADR 0003: pilot + nebula self-update & distribution"
   },
   {
-    "hash": "d2d8b4f",
+    "hash": "386cd00",
     "date": "2026-06-13",
     "subject": "Genesis issues Core control-plane cert + boot-time invariant"
   },
   {
-    "hash": "7a31746",
+    "hash": "db0a633",
     "date": "2026-06-13",
     "subject": "Security posture: public enrollment endpoint"
   },
   {
-    "hash": "7647bb6",
+    "hash": "6e63875",
     "date": "2026-06-13",
     "subject": "ADR 0002: post-enrollment group reassignment"
   },
   {
-    "hash": "5c9dc94",
+    "hash": "4511027",
     "date": "2026-06-13",
     "subject": "Editable join keys + cloud trust; shared \"Joined via\" cell"
   },
   {
-    "hash": "6859d9b",
+    "hash": "e80e4d5",
     "date": "2026-06-13",
     "subject": "A1.2a: policy flow-diff + blast-radius"
   },
   {
-    "hash": "e5f5c10",
+    "hash": "eb78d14",
     "date": "2026-06-13",
     "subject": "Device provenance + /devices filtering (keystone slice)"
   },
   {
-    "hash": "867f579",
+    "hash": "1c29a4b",
     "date": "2026-06-13",
     "subject": "Nebula: ADR 0001 — policy scoping (adopt namespaced-single-policy; defer document split)"
   },
   {
-    "hash": "29bc1a7",
+    "hash": "41b36f9",
     "date": "2026-06-13",
     "subject": "Nebula plan: document 5 planned UI changes (device provenance + filters, editable join keys, editable cloud-trust, join-key name on enrollments, dashboard why drill-downs)"
   },
   {
-    "hash": "13fc123",
+    "hash": "01cec01",
     "date": "2026-06-13",
     "subject": "A1.1: policy-analysis engine (reachability / matrix / tests)"
   },
   {
-    "hash": "a176ca2",
+    "hash": "fd8657c",
     "date": "2026-06-13",
     "subject": "UI-4a: dual-control publish pipeline (approvals inbox + policy designer)"
   },
   {
-    "hash": "105d193",
+    "hash": "f08ea1f",
     "date": "2026-06-13",
     "subject": "M5.3: AWS SigV4 attestation end-to-end + dual-control cloud-trust (UI-3 predecessor)"
   },
   {
-    "hash": "47d81e1",
+    "hash": "296238c",
     "date": "2026-06-13",
     "subject": "seed-demo: self-migrate; admin-api: fail fast on an unmigrated DB"
   },
   {
-    "hash": "3e89ff2",
+    "hash": "76297ed",
     "date": "2026-06-13",
     "subject": "UI-2: fleet health dashboard + synthetic demo harness"
   },
   {
-    "hash": "794b0e8",
+    "hash": "c301053",
     "date": "2026-06-13",
     "subject": "UI-1: enrollment approval queue + join keys (first mutating screens)"
   },
   {
-    "hash": "35f5bce",
+    "hash": "f0648a1",
     "date": "2026-06-13",
     "subject": "UI-0b: web console auth shell (real session auth + step-up + CSRF)"
   },
   {
-    "hash": "103d5bb",
+    "hash": "e87a4bf",
     "date": "2026-06-13",
     "subject": "UI-0: web console foundation (React SPA) + HTTPS/TLS + console hardening"
   },
   {
-    "hash": "0011c65",
+    "hash": "51db1de",
     "date": "2026-06-13",
     "subject": "A0.8: admin API tokens (non-interactive machine auth for /admin/v1)"
   },
   {
-    "hash": "64811e4",
+    "hash": "ca25d10",
     "date": "2026-06-13",
     "subject": "A0.7: structured logging + polish for the CLIs (text on a TTY, JSON as a service)"
   },
   {
-    "hash": "2622eaf",
+    "hash": "0789b5d",
     "date": "2026-06-13",
     "subject": "2.11: step-up MFA enforcement for privileged dual-control actions"
   },
   {
-    "hash": "986ee09",
+    "hash": "e9b94fa",
     "date": "2026-06-13",
     "subject": "2.11: SAML 2.0 SP authenticator (enterprise AD: AD FS / Entra / Okta)"
   },
   {
-    "hash": "1cc2435",
+    "hash": "c0dd623",
     "date": "2026-06-13",
     "subject": "2.11: admin SSO + RBAC foundation (bring-your-own-IdP session auth)"
   },
   {
-    "hash": "a99319a",
+    "hash": "7cfc8f0",
     "date": "2026-06-13",
     "subject": "A0.6: CLI ⊆ OpenAPI surface guardrail (no UI backdoor, tested not asserted)"
   },
   {
-    "hash": "70b8474",
+    "hash": "804c0ec",
     "date": "2026-06-13",
     "subject": "A0.5: enrollment approval queue (list / approve / deny) over the admin API"
   },
   {
-    "hash": "577bb31",
+    "hash": "ae4c503",
     "date": "2026-06-12",
     "subject": "A0.4: fleet-management mutating endpoints (lighthouse, rollout, join keys)"
   },
   {
-    "hash": "056d3c0",
+    "hash": "315c95a",
     "date": "2026-06-12",
     "subject": "A0.3: dual-control policy-publish mutating endpoints + engine hardening"
   },
   {
-    "hash": "cf737a3",
+    "hash": "edb6f46",
     "date": "2026-06-12",
     "subject": "A0.2: OpenAPI spec + drift-proof contract test for the admin API"
   },
   {
-    "hash": "8a1f469",
+    "hash": "693c27a",
     "date": "2026-06-12",
     "subject": "A0.1: admin HTTP API foundation + server-computed fleet health rollup"
   },
   {
-    "hash": "83208a0",
+    "hash": "6de5c27",
     "date": "2026-06-12",
     "subject": "UI plan v2: fold in multi-perspective critique"
   },
   {
-    "hash": "895653f",
+    "hash": "4c75a32",
     "date": "2026-06-12",
     "subject": "Add UI Implementation Plan (design + firewall designer + 12 decisions resolved)"
   },
   {
-    "hash": "d8e8349",
+    "hash": "6089ce9",
     "date": "2026-06-12",
     "subject": "deploy: run gateway/worker as ec2-user (fixes manual-approval bundle delivery)"
   },
   {
-    "hash": "f5bf333",
+    "hash": "5e5e4cf",
     "date": "2026-06-12",
     "subject": "deploy: parameterize overlay pool + avoid Tailscale CGNAT collision (proven on live AWS)"
   },
   {
-    "hash": "cdc83cb",
+    "hash": "1b39c3a",
     "date": "2026-06-12",
     "subject": "deploy: 3-node test topology (lighthouse/harbor/client) + genesis bootstrap"
   },
   {
-    "hash": "ca3a1f4",
+    "hash": "90a1a98",
     "date": "2026-06-12",
     "subject": "Add AWS deploy scaffold: minimal EC2 Terraform + secure key-rotation script"
   },
   {
-    "hash": "226d809",
+    "hash": "401e9c7",
     "date": "2026-06-12",
     "subject": "Add repeatable demo: make demo (enrollment spine + control-plane walkthrough)"
   },
   {
-    "hash": "4abc099",
+    "hash": "14e9734",
     "date": "2026-06-12",
     "subject": "M5.1/5.2: AWS SigV4 instance attestation primitive (Pilot sign + Core verify)"
   },
   {
-    "hash": "7c6c0ad",
+    "hash": "d0efdab",
     "date": "2026-06-12",
     "subject": "M6.6: staged canary rollout + auto-rollback (closes M6)"
   },
   {
-    "hash": "1fac992",
+    "hash": "fdda4ab",
     "date": "2026-06-12",
     "subject": "M6.8: lighthouse fleet lifecycle (DB registry + live bundle propagation)"
   },
   {
-    "hash": "ffe53e6",
+    "hash": "317a5fb",
     "date": "2026-06-12",
     "subject": "M6.5: dual-control policy publish (+ reusable 2.11 two-person primitive)"
   },
   {
-    "hash": "f73f519",
+    "hash": "44c8174",
     "date": "2026-06-12",
     "subject": "M6.7: Pilot config drift detection + revert"
   },
   {
-    "hash": "54a1fac",
+    "hash": "d438532",
     "date": "2026-06-12",
     "subject": "M6.4: signed firewall in the config bundle + Pilot verify-before-apply"
   },
   {
-    "hash": "7947865",
+    "hash": "af3b97b",
     "date": "2026-06-12",
     "subject": "M6.1/6.2/6.3: central firewall policy — DSL, compiler, invariants"
   },
   {
-    "hash": "5a36800",
+    "hash": "a8126db",
     "date": "2026-06-12",
     "subject": "M4.9: P3 chaos test + outage runbook"
   },
   {
-    "hash": "57dbfc2",
+    "hash": "c0357a7",
     "date": "2026-06-12",
     "subject": "M4.7: fleet expiry/health dashboard + alerts"
   },
   {
-    "hash": "2d2fbbd",
+    "hash": "c1ba7cf",
     "date": "2026-06-12",
     "subject": "M4.6: heartbeat + typed command channel"
   },
   {
-    "hash": "92ae118",
+    "hash": "8caaa7c",
     "date": "2026-06-12",
     "subject": "M4.4: Pilot proactive renewal at ~2/3 life with jitter"
   },
   {
-    "hash": "2190bcf",
+    "hash": "a9a5fd2",
     "date": "2026-06-12",
     "subject": "M4.2/4.3: mesh-only Core API — tunnel-identity auth + cert renewal"
   },
   {
-    "hash": "ab6789b",
+    "hash": "7051839",
     "date": "2026-06-12",
     "subject": "M3.8: end-to-end enrollment harness (make m3-demo)"
   },
   {
-    "hash": "2c4cbbe",
+    "hash": "c45a2a6",
     "date": "2026-06-12",
     "subject": "M3.10: per-join-key enrollment rate quota"
   },
   {
-    "hash": "345d9a0",
+    "hash": "13e1115",
     "date": "2026-06-12",
     "subject": "Harbor Core CLIs: enroll worker/pending/approve + pilot ticket resume"
   },
   {
-    "hash": "60312ba",
+    "hash": "9bef496",
     "date": "2026-06-12",
     "subject": "M3.7: pilot enroll — full async join client"
   },
   {
-    "hash": "7dffa79",
+    "hash": "556a178",
     "date": "2026-06-12",
     "subject": "M3.6/3.6a: signed config bundle + result store + poll delivery"
   },
   {
-    "hash": "7706007",
+    "hash": "ef5d898",
     "date": "2026-06-12",
     "subject": "M3.3a: durable enrollment queue + gateway<->Core trust"
   },
   {
-    "hash": "22b3a7f",
+    "hash": "e2e660f",
     "date": "2026-06-12",
     "subject": "M3.4/3.4a/3.5: join-key enrollment with manual-approval-by-default"
   },
   {
-    "hash": "2fede70",
+    "hash": "65fe9e1",
     "date": "2026-06-12",
     "subject": "M3.3: gateway POST /v1/enroll (JWS PoP + nonce + ticket + queue)"
   },
   {
-    "hash": "294bc55",
+    "hash": "9e05a53",
     "date": "2026-06-12",
     "subject": "M3.2: enrollment gateway GET /v1/nonce (stateless HMAC nonce)"
   },
   {
-    "hash": "7f28dc4",
+    "hash": "66a344c",
     "date": "2026-06-12",
     "subject": "M3.1: genesis ceremony — CA + config-signing roots + first lighthouse cert"
   },
   {
-    "hash": "52f0ebc",
+    "hash": "45a6fa4",
     "date": "2026-06-12",
     "subject": "M3.0: Pilot<->Harbor wire protocol spec (v1)"
   },
   {
-    "hash": "d91ba37",
+    "hash": "7d3600a",
     "date": "2026-06-12",
     "subject": "M2.8: harbor issue-cert — allocate IP + sign cert v2 + chained audit, end to end"
   },
   {
-    "hash": "11023a8",
+    "hash": "be4927c",
     "date": "2026-06-12",
     "subject": "M2.6: IPAM allocator — collision-free overlay IPs with quarantine"
   },
   {
-    "hash": "4ad6e63",
+    "hash": "68ac269",
     "date": "2026-06-12",
     "subject": "M2.3/2.4/2.5: signer spine — cert v2 signing, template validation, circuit breaker"
   },
   {
-    "hash": "75455d7",
+    "hash": "e522b4e",
     "date": "2026-06-12",
     "subject": "M2.1/2.2: Harbor data layer — SQLite/Postgres via GORM, migrations, hash-chained audit"
   },
   {
-    "hash": "633504b",
+    "hash": "f644400",
     "date": "2026-06-12",
     "subject": "M1.13: clock/NTP sanity + plan v3 (Linux-first, Windows/macOS -> M10)"
   },
   {
-    "hash": "b35e077",
+    "hash": "16c23e6",
     "date": "2026-06-12",
     "subject": "M1.9: hardened systemd packaging for Pilot"
   },
   {
-    "hash": "309a0a7",
+    "hash": "8ae2a37",
     "date": "2026-06-12",
     "subject": "M1.8: reload vs restart matrix (SIGHUP hot-reload + supervised restart)"
   },
   {
-    "hash": "c231eb8",
+    "hash": "302d5a2",
     "date": "2026-06-12",
     "subject": "M1: pilot init — host key gen, secure layout, config render (M1.3 floor/1.4/1.7)"
   },
   {
-    "hash": "cc4a38e",
+    "hash": "0b06ed6",
     "date": "2026-06-11",
     "subject": "M1: pilot supervises nebula (M1.1/1.5/1.6)"
   },
   {
-    "hash": "e8c44b7",
+    "hash": "7381826",
     "date": "2026-06-11",
     "subject": "docs: record M0 results (HSM/PKCS#11 feasibility passed)"
   },
   {
-    "hash": "e079c18",
+    "hash": "f091110",
     "date": "2026-06-11",
     "subject": "M0 spike working: netns overlay + SoftHSM CA proven (M0.1/0.2/0.3/0.5)"
   },
   {
-    "hash": "3c77a4e",
+    "hash": "2906aa9",
     "date": "2026-06-11",
     "subject": "Add in-repo copies of planning docs (docs/); point CLAUDE.md at them"
   },
   {
-    "hash": "14ddab4",
+    "hash": "0de610f",
     "date": "2026-06-11",
     "subject": "M0 spike scaffold: netns + SoftHSM Nebula feasibility harness, CLAUDE.md"
   }
