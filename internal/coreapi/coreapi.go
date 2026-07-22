@@ -614,6 +614,15 @@ func (s *Server) forceRenewStraggler(ctx context.Context, overlayIP, hostCAFp st
 	if err != nil || activeFp == "" || strings.EqualFold(hostCAFp, activeFp) {
 		return false // no active CA known, or the host is already on it
 	}
+	// Only force-renew once THIS process's signer has actually cut over to the active CA. handleRenew
+	// signs with the LOCAL signer's current identity (not the registry's active CA), so if this Core
+	// has not swapped yet — the fail-safe states force-renew exists to rescue: -ca-cutover-interval=0,
+	// a refused software swap, a stuck BackendFactory/KMS — a forced renewal would re-sign the
+	// straggler under the SAME draining CA, leaving it a straggler that is force-renewed every beat
+	// forever (an unbounded self-inflicted re-key storm that never drains).
+	if s.cfg.Signer == nil || !strings.EqualFold(s.cfg.Signer.CurrentFingerprint(), activeFp) {
+		return false
+	}
 	startedNS, windowNS, accelerated, err := s.cfg.CADrain.DrainWave(ctx, hostCAFp)
 	if err != nil || !accelerated || !inDrainWave(overlayIP, startedNS, windowNS, s.now().UnixNano()) {
 		return false

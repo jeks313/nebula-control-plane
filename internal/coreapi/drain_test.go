@@ -5,7 +5,36 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/jeks313/nebula-control-plane/internal/signer"
+	"github.com/slackhq/nebula/cert"
 )
+
+// newSignerOn builds a real software-backed signer over a fresh self-signed CA and returns it plus
+// the fingerprint it currently signs with (used to satisfy the M8.3c "local signer has cut over"
+// gate). Each call mints a distinct CA, so two signers never share a fingerprint.
+func newSignerOn(t *testing.T) (*signer.Signer, string) {
+	t.Helper()
+	b, err := signer.NewSoftwareBackend()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, _ := b.PublicKey()
+	caC, err := signer.SignTBS(b, &cert.TBSCertificate{
+		Version: cert.Version2, Name: "ca", IsCA: true,
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(10 * 365 * 24 * time.Hour),
+		PublicKey: pub, Curve: cert.Curve_P256,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pem, _ := caC.MarshalPEM()
+	sg, err := signer.New(signer.Config{CACertPEM: pem, Backend: b, Audit: func(context.Context, string, string, string, string) error { return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sg, sg.CurrentFingerprint()
+}
 
 // TestInDrainWave: the M8.3c wave gate opens buckets linearly with elapsed time — nothing before
 // start, a growing fraction across the window, and every straggler once the window has elapsed.
@@ -83,33 +112,47 @@ func TestForceRenewStragglerGating(t *testing.T) {
 	ctx := context.Background()
 	now := int64(1_700_000_000) * int64(time.Second) // a realistic unix-ns clock (so now-1h stays positive)
 	clock := func() time.Time { return time.Unix(0, now) }
+
+	// This process's signer HAS cut over to the active CA; the drain's active fp is that signer's.
+	sg, activeFp := newSignerOn(t)
 	// started far enough back that the window is complete -> every straggler is in-wave, isolating
 	// the CADrain GATING logic (the wave math is covered by TestInDrainWave).
-	drained := fakeDrain{active: "aaaa", started: now - int64(time.Hour), window: int64(time.Minute), accel: true}
+	drained := fakeDrain{active: activeFp, started: now - int64(time.Hour), window: int64(time.Minute), accel: true}
 
-	srv := func(d CADrainSource) *Server {
-		return &Server{cfg: Config{CADrain: d, Now: clock}, now: clock}
+	srv := func(d CADrainSource, sig *signer.Signer) *Server {
+		return &Server{cfg: Config{CADrain: d, Signer: sig, Now: clock}, now: clock}
 	}
 
-	// Straggler on draining CA "bbbb" (!= active "aaaa"), accelerated, window complete -> renew.
-	if !srv(drained).forceRenewStraggler(ctx, "100.64.0.7", "bbbb") {
-		t.Fatal("a straggler on a force-drained CA in an open wave must be force-renewed")
+	// Straggler on draining CA "bbbb" (!= active), accelerated, in-wave, and our signer has cut over
+	// -> renew.
+	if !srv(drained, sg).forceRenewStraggler(ctx, "100.64.0.7", "bbbb") {
+		t.Fatal("a straggler on a force-drained CA (our signer cut over, open wave) must be force-renewed")
+	}
+	// #3 fix: our signer has NOT cut over (still on a different CA) -> NO renew, else a forced renewal
+	// re-signs the straggler under the same draining CA forever.
+	otherSg, _ := newSignerOn(t)
+	if srv(drained, otherSg).forceRenewStraggler(ctx, "100.64.0.7", "bbbb") {
+		t.Fatal("must NOT force-renew until THIS process's signer has cut over to the active CA")
+	}
+	// A nil signer -> no renew.
+	if srv(drained, nil).forceRenewStraggler(ctx, "100.64.0.7", "bbbb") {
+		t.Fatal("a nil signer must not force-renew")
 	}
 	// Already on the active CA -> no renew.
-	if srv(drained).forceRenewStraggler(ctx, "100.64.0.7", "aaaa") {
+	if srv(drained, sg).forceRenewStraggler(ctx, "100.64.0.7", activeFp) {
 		t.Fatal("a host already on the active CA must not be force-renewed")
 	}
 	// Empty host CA fingerprint -> no renew.
-	if srv(drained).forceRenewStraggler(ctx, "100.64.0.7", "") {
+	if srv(drained, sg).forceRenewStraggler(ctx, "100.64.0.7", "") {
 		t.Fatal("an unknown host CA fingerprint must not be force-renewed")
 	}
 	// CADrain disabled -> no renew.
-	if srv(nil).forceRenewStraggler(ctx, "100.64.0.7", "bbbb") {
+	if srv(nil, sg).forceRenewStraggler(ctx, "100.64.0.7", "bbbb") {
 		t.Fatal("no CADrain source must not force-renew")
 	}
 	// Draining but NOT accelerated -> no renew (natural renewal only).
-	notAccel := fakeDrain{active: "aaaa", started: now - int64(time.Hour), window: int64(time.Minute), accel: false}
-	if srv(notAccel).forceRenewStraggler(ctx, "100.64.0.7", "bbbb") {
+	notAccel := fakeDrain{active: activeFp, started: now - int64(time.Hour), window: int64(time.Minute), accel: false}
+	if srv(notAccel, sg).forceRenewStraggler(ctx, "100.64.0.7", "bbbb") {
 		t.Fatal("a draining CA without an active force-renew must not be force-renewed")
 	}
 }

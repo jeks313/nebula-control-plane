@@ -71,9 +71,57 @@ func seedEnroll(t *testing.T, db *gorm.DB, eid, status, certPEM, caFP string) {
 		"status":         status,
 		"cert_pem":       []byte(certPEM),
 		"ca_fingerprint": caFP,
+		"overlay_ip":     eid, // unique per row, so a heartbeat can be joined to it
 		"created_at":     time.Now().UnixNano(),
 	}).Error; err != nil {
 		t.Fatalf("seed enrollment %s: %v", eid, err)
+	}
+}
+
+// seedHeartbeat records a heartbeat carrying the host's CURRENT (live) cert expiry for overlayIP —
+// the authoritative liveness source LiveDependents must use (enrollments.cert_pem is frozen).
+func seedHeartbeat(t *testing.T, db *gorm.DB, overlayIP string, certNotAfter time.Time) {
+	t.Helper()
+	if err := db.Table("heartbeats").Create(map[string]any{
+		"overlay_ip":     overlayIP,
+		"device_name":    overlayIP,
+		"cert_not_after": certNotAfter.UnixNano(),
+		"last_seen":      time.Now().UnixNano(),
+	}).Error; err != nil {
+		t.Fatalf("seed heartbeat %s: %v", overlayIP, err)
+	}
+}
+
+// TestLiveDependentsUsesHeartbeatExpiry is the #1 (ship-blocker) regression: a host alive on a
+// RENEWED leaf still chaining to the CA, whose FROZEN enroll cert_pem has long expired, must still
+// count — otherwise a mature fleet undercounts to zero and its CA is retired / key-deleted while
+// hosts still depend on it (fleet-wide tunnel loss). Liveness comes from the heartbeat, not cert_pem.
+func TestLiveDependentsUsesHeartbeatExpiry(t *testing.T) {
+	s, r := setup(t)
+	ctx := context.Background()
+	_, fp1, ca1, bk1 := mkCAWithBackend(t, "ca-1")
+	past := time.Now().Add(-48 * time.Hour)   // the frozen enroll cert lapsed 2 days ago
+	future := time.Now().Add(20 * 24 * time.Hour) // but the live (renewed) cert is valid 20 days out
+
+	// A renewed host: expired enroll cert_pem, ca_fingerprint = CA1, and a heartbeat proving its
+	// CURRENT leaf is still valid -> a LIVE dependent (the pre-fix code missed this).
+	seedEnroll(t, s.DB, "e-renewed", "issued", mkLeafPEM(t, ca1, bk1, "host-r", past), fp1)
+	seedHeartbeat(t, s.DB, "e-renewed", future)
+
+	// A genuinely dead host: expired enroll cert AND a heartbeat whose live cert also lapsed -> NOT
+	// a dependent (peers already reject its expired leaf; retiring the CA does not harm it).
+	seedEnroll(t, s.DB, "e-dead", "issued", mkLeafPEM(t, ca1, bk1, "host-d", past), fp1)
+	seedHeartbeat(t, s.DB, "e-dead", past)
+
+	// A never-checked-in host with a still-valid enroll cert (no heartbeat) -> counted via fallback.
+	seedEnroll(t, s.DB, "e-fresh", "issued", mkLeafPEM(t, ca1, bk1, "host-f", future), fp1)
+
+	n, err := r.LiveDependents(ctx, fp1)
+	if err != nil {
+		t.Fatalf("LiveDependents: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("LiveDependents(ca-1) = %d, want 2 (renewed-live + never-checked-in; dead excluded)", n)
 	}
 }
 

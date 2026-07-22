@@ -362,6 +362,20 @@ The linear track forked into ADR streams. Net state (✅ built · ◐ code-compl
   actions (dual-control + step-up MFA) are a deferred follow-up. OpenAPI schemas + contract test + handler
   tests (`ca_test.go`); UI typechecks + builds (`-tags ui`). *("key bundles" in the dashboard = the CA trust
   bundle every signed config bundle distributes = the non-retired CAs.)*
+  ✅ **M8 adversarial review remediation (8-lens multi-agent + verify).** A deep review of the whole 8.3-8.4 +
+  dashboard cluster found **4 real defects, all fixed**: (1) **CRITICAL ship-blocker** — `LiveDependents` filtered
+  on the FROZEN `enrollments.cert_pem` (renewal re-stamps ca_fingerprint but never rewrites cert_pem), so a fleet
+  older than one cert lifetime undercounted toward 0 and a still-depended-on CA could be retired / its key
+  deleted (fleet-wide tunnel loss). Now derives liveness from the maintained `heartbeats.cert_not_after`
+  (fallback to the frozen cert only for a never-checked-in host). (2) HIGH — **admin-api (issuance mode) never
+  started the cut-over reconciler**, so console enroll-approvals kept signing under the old CA and a rotation
+  could never drain; now `cmdAdminAPI` starts it on `consumer.Signer()`. (3) MEDIUM — `forceRenewStraggler` gated
+  on the REGISTRY's active CA, not THIS process's signer, so in a fail-safe state (`-ca-cutover-interval=0` /
+  refused software swap / stuck KMS) it re-signed a straggler under the same draining CA forever; now also
+  requires `s.cfg.Signer.CurrentFingerprint() == activeFp`. (4) LOW — the reconciler's first poll was one interval
+  late; `startCACutoverReconciler` now does one **eager synchronous reconcile before serving** so a restart with a
+  stale `-ca-cert` argv doesn't sign under a since-retired CA for ~30s. Regression tests added
+  (`TestLiveDependentsUsesHeartbeatExpiry` + updated `TestForceRenewStragglerGating`).
   **Still open:** 8.5 config-signing-key rotation (same overlap mechanism), 8.6 emergency path, 8.7 staging drill.
   *(The scheduled lighthouse-cert rotation above is 6.8-adjacent, NOT M8 CA rotation.)*
 - **M9 — hardening & operations: PARTIAL (delivered via ADR 0007, not per-step ticks).** The poc IS the

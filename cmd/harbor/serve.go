@@ -398,6 +398,15 @@ func cmdAdminAPI(args []string) {
 	sessionIdP, authHandler, csrfWrap, authCleanup := buildAdminAuth(ctx, af, *addr, s.DB)
 	defer authCleanup()
 
+	// M8.3b: admin-api ALSO signs (console enroll-approve) in issuance mode, so its OWN signer must
+	// hot-swap to a newly-activated CA exactly like core-api / the worker / collect — otherwise
+	// console approvals keep minting leaves under the old CA (re-adding drain dependents, then
+	// minting untrusted certs once it is retired), and a rotation can never fully drain.
+	var caReconcileWG sync.WaitGroup
+	if canIssue && consumer != nil {
+		cf.startCACutoverReconciler(ctx, &caReconcileWG, consumer.Signer(), s, audit, log)
+	}
+
 	// Bearer-token auth (A0.8) is always available for non-interactive callers
 	// (automation/CI/curl); a human session (or the dev seam) is chained behind it.
 	tokenProvider := adminauth.NewTokenProvider(adminauth.NewTokenStore(s.DB, nil))
@@ -508,6 +517,7 @@ func cmdAdminAPI(args []string) {
 	if err := httpserve.Serve(srv, *tlsCert, *tlsKey); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		fatalf("admin-api: %v", err)
 	}
+	caReconcileWG.Wait() // drain the CA cut-over reconciler before exit (ctx already cancelled)
 	log.Info("admin-api stopped")
 }
 

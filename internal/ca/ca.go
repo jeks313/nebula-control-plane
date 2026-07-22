@@ -656,26 +656,67 @@ func containsFold(fps []string, fp string) bool {
 func (r *Registry) LiveDependents(ctx context.Context, caFingerprint string) (int, error) {
 	fp := strings.ToLower(strings.TrimSpace(caFingerprint))
 	var rows []struct {
+		OverlayIP     string `gorm:"column:overlay_ip"`
 		CAFingerprint string `gorm:"column:ca_fingerprint"`
 		CertPEM       string `gorm:"column:cert_pem"`
 	}
 	if err := r.db.WithContext(ctx).Table("enrollments").
-		Select("ca_fingerprint, cert_pem").
+		Select("overlay_ip, ca_fingerprint, cert_pem").
 		Where("status = ?", "issued").Find(&rows).Error; err != nil {
 		return 0, fmt.Errorf("ca: live dependents: %w", err)
 	}
-	now := r.now()
+	// A host's LIVE cert expiry comes from its heartbeat, NOT enrollments.cert_pem: renewal
+	// re-stamps fingerprint/ca_fingerprint but NEVER rewrites cert_pem (it stays the frozen
+	// enroll-time cert), so cert_pem lapses after one cert lifetime even for a host that is alive
+	// on a renewed leaf still chaining to this CA. Filtering on cert_pem's expiry would undercount
+	// a mature fleet toward zero and let a still-depended-on CA be retired / its key destroyed
+	// (fleet-wide tunnel loss). Prefer heartbeats.cert_not_after (maintained each beat); fall back
+	// to the frozen cert only for a host that has never checked in.
+	liveExp := map[string]int64{}
+	var hbs []struct {
+		OverlayIP    string `gorm:"column:overlay_ip"`
+		CertNotAfter int64  `gorm:"column:cert_not_after"`
+	}
+	if err := r.db.WithContext(ctx).Table("heartbeats").
+		Select("overlay_ip, cert_not_after").Find(&hbs).Error; err != nil {
+		return 0, fmt.Errorf("ca: live dependents (heartbeats): %w", err)
+	}
+	for _, h := range hbs {
+		liveExp[h.OverlayIP] = h.CertNotAfter
+	}
+	nowNS := r.now().UnixNano()
 	n := 0
 	for _, e := range rows {
-		c, _, perr := cert.UnmarshalCertificateFromPEM([]byte(e.CertPEM))
-		if perr != nil || c == nil || !c.NotAfter().After(now) {
-			continue // unparseable or expired -> not a live dependent
-		}
+		// CA match: the stored CURRENT-leaf CA fingerprint (maintained on renewal), or — for a
+		// pre-8.3 row whose column is still empty — the enroll leaf's own Issuer().
 		rowFP := strings.ToLower(strings.TrimSpace(e.CAFingerprint))
+		var parsed cert.Certificate
 		if rowFP == "" {
-			rowFP = strings.ToLower(strings.TrimSpace(c.Issuer())) // pre-8.3 backfill fallback
+			c, _, perr := cert.UnmarshalCertificateFromPEM([]byte(e.CertPEM))
+			if perr != nil || c == nil {
+				continue
+			}
+			parsed = c
+			rowFP = strings.ToLower(strings.TrimSpace(c.Issuer()))
 		}
-		if rowFP == fp {
+		if rowFP != fp {
+			continue
+		}
+		// Liveness: the host's CURRENT leaf is still valid. Use the heartbeat-reported expiry when
+		// present (and reported); otherwise fall back to the frozen enroll cert (never-checked-in).
+		var expNS int64
+		if exp, ok := liveExp[e.OverlayIP]; ok && exp > 0 {
+			expNS = exp
+		} else {
+			c := parsed
+			if c == nil {
+				c, _, _ = cert.UnmarshalCertificateFromPEM([]byte(e.CertPEM))
+			}
+			if c != nil {
+				expNS = c.NotAfter().UnixNano()
+			}
+		}
+		if expNS > nowNS {
 			n++
 		}
 	}

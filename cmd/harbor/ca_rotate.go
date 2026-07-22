@@ -127,6 +127,16 @@ func (cf *coreFlags) startCACutoverReconciler(ctx context.Context, wg *sync.Wait
 	}
 	src := cf.activeCASource(s, audit)
 	factory := cf.activeCABackendFactory()
+	// Eager reconcile BEFORE this process starts serving: a restart/deploy may boot with a stale
+	// -ca-cert argv naming a since-retired CA (signer.New validates the cert but not that it is still
+	// the active/trusted CA), and the ticker's first tick is a whole interval away. Cut over now so we
+	// never sign under a stale CA while already serving. No-op (no KMS call) when the boot CA is
+	// already active; fail-safe on any error (keep signing with the boot CA until a later tick).
+	if swapped, err := sg.ReconcileActiveCA(ctx, src, factory); err != nil {
+		log.Warn("ca: initial cut-over reconcile failed; signing with the boot CA until it succeeds", "err", err)
+	} else if swapped {
+		log.Info("ca: hot-swapped signing to the active CA on startup", "fingerprint", sg.CurrentFingerprint())
+	}
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
