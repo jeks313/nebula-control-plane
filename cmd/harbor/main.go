@@ -154,6 +154,7 @@ usage:
   harbor ca activate       -id N [-force] [-stale-after D] [-actor A] [db flags]   cut over to CA N once 100% adopted
   harbor ca retire         -id N [-actor A] [db flags]   remove a drained CA from trust (refuses while any live leaf still chains to it)
   harbor ca abandon        -id N [-actor A] [db flags]         cancel a staged CA
+  harbor ca force-renew    -id N [-window D] [-stop] [-actor A] [db flags]   accelerate a draining CA's drain (force-renew stragglers in waves)
   harbor issue-cert        -name DEVICE -in-pub HOST.pub -ca-cert CA [-groups a,b] [... db flags]
   harbor backfill-cp-enrollment -cert HOST.crt -pool CIDR [-name N] [-groups a,b] [-overlay-ip IP] [db flags]
                            break-glass: record the missing issued enrollment row for a

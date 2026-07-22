@@ -148,10 +148,10 @@ NOT handled by the script — do these manually when the change needs them:
 
 **Milestone track: M0–M4 + M6 complete; M5 PARTIAL; M7 is the frontier (7.1 done · 7.2 engine+CLI
 built, no console · 7.3 partial · 7.4 blocked on M9 OIDC); M8 (CA rotation) is the ACTIVE milestone
-(slice 1 + 8.1 + 8.3a drain-tracking + 8.3b zero-downtime signing cut-over built; 8.3c force-renew next); M9/M10
+(slice 1 + 8.1 + 8.3a drain-tracking + 8.3b zero-downtime cut-over + 8.3c waved force-renew built; 8.4 retire next); M9/M10
 PARTIAL. Development forked off the linear track into ADR-driven parallel streams — ADRs 0003–0011
 have all shipped or are code-complete (per-ADR built-state below).** A live demo (terraform apply + bootstrap-genesis.sh) can
-run now on the real off-mesh topology. Schema ceiling on disk is **000034** (next free: **000035**;
+run now on the real off-mesh topology. Schema ceiling on disk is **000035** (next free: **000036**;
 the older "000015" here was stale). M0 feasibility PASSED
 (2026-06-11: SoftHSM P256 CA,
 tunnel forms — design §M0 results; spike under `spike/m0/`, `make m0-*`). **The poc *is* the prod
@@ -322,8 +322,21 @@ The linear track forked into ADR streams. Net state (✅ built · ◐ code-compl
   renew re-signs under CA2, drain moves CA1->CA2, no restart). ⚠ **runbook (8.4):** keep `-ca-cert` pointed at a
   still-trusted CA — booting with a *retired* CA in `-ca-cert` would briefly sign untrusted leaves until the
   first reconcile tick (a draining CA is fine — still trusted).
-  **Still open:** 8.3c force-renew stragglers (accelerate drain), 8.4 retirement + KMS deletion alarms, 8.5
-  config-signing-key rotation (same overlap mechanism), 8.6 emergency path, 8.7 staging drill.
+  ✅ **8.3c force-renew stragglers (operator-triggered, waved -- user-chosen).** `harbor ca force-renew -id N
+  [-window 30m] [-stop]` (migration **000035** `ca_certs.force_renew_started_at`/`force_renew_window_ns`, only
+  on a DRAINING CA). Core's heartbeat path (`coreapi.forceRenewStraggler` + the `CADrain` seam; `ca.Registry`
+  implements it) answers a host still chaining to the force-drained CA (`dev.ca_fingerprint` != the active CA)
+  with a `renew` command in **deterministic widening waves** (`inDrainWave`: an `fnv32a(overlay_ip)` bucket opens
+  linearly over the window -- ~1% renew at t0 growing to 100% at window end, no storm) so the host re-keys onto
+  the ACTIVE CA and the drain finishes in ~a window instead of a full cert lifetime. **Pauses widening while the
+  signing breaker is open** (`signer.BreakerOpen`) so a force-drain never piles onto a halted signer; fail-safe
+  (any read error -> no forced renew; natural renewal still drains). Self-terminating: a renewed straggler
+  re-stamps to the active CA (8.3a) and drops out; when `LiveDependents` hits 0 the operator retires. Proven by
+  `internal/ca` `TestForceRenewLifecycle`, `internal/coreapi` `TestInDrainWave`/`TestForceRenewStragglerGating`,
+  integration `TestForceRenewDrainsStragglers`. Cost: one indexed active-CA lookup per non-renewing heartbeat
+  (cheap; only for hosts carrying a fingerprint).
+  **Still open:** 8.4 retirement + KMS deletion alarms, 8.5 config-signing-key rotation (same overlap
+  mechanism), 8.6 emergency path, 8.7 staging drill.
   *(The scheduled lighthouse-cert rotation above is 6.8-adjacent, NOT M8 CA rotation.)*
 - **M9 — hardening & operations: PARTIAL (delivered via ADR 0007, not per-step ticks).** The poc IS the
   prod stack (above); ✅ 9.6 signed waved self-update (ADR 0003); 🟡 HA substrate present but single-AZ;
@@ -428,9 +441,9 @@ Note: the durable queue (`internal/queue`) is now safe for concurrent first-open
 - **7.3** — an explicit `harbor decommission` + a cloud-terminate/CloudTrail-driven auto-reap (today's
   reaper triggers on cert-lapse, not cloud inventory) + hard-delete.
 - **M8 — CA & key rotation** — the ACTIVE milestone. Registry + lifecycle (slice 1), 8.1 trust distribution +
-  adoption gate, 8.3a drain tracking, and **8.3b signing cut-over (zero-downtime hot-swap)** are built; next is
-  **8.3c force-renew stragglers** (accelerate the drain), then 8.4 retirement + KMS deletion alarms, 8.5
-  config-key rotation, 8.6 emergency path, 8.7 staging drill.
+  adoption gate, 8.3a drain tracking, **8.3b signing cut-over (zero-downtime hot-swap)**, and **8.3c waved
+  force-renew** are built; next is **8.4 retirement + KMS deletion alarms**, then 8.5 config-key rotation, 8.6
+  emergency path, 8.7 staging drill.
 - **7.4 / M9 9.1** — laptop OIDC device-code flow (unblocks IdP offboarding).
 - **ADR 0012** (pilot fleet metrics) and **ADR 0014** (overlay DNS) are design-only.
 - **M10** — the Windows/macOS hardening tail (DACL/DPAPI, Authenticode/notarization, CI runners, least-priv).

@@ -209,6 +209,7 @@ func cmdCoreAPI(args []string) {
 		Store: s, Signer: sg, ConfigBackend: cfgB, ConfigKeyID: wire.PubkeyHash(cfgPub),
 		CABundlePEM: caPEM, Lighthouses: parseLighthouses(*cf.lighthouse), LighthouseSource: cf.lighthouseSource(s), Policy: cf.policy(s),
 		CABundleSource:  cf.caTrustSource(s, caPEM, audit), // M8: live CA-rotation trust bundle (seeds the current CA)
+		CADrain:         cf.caDrainSource(s, audit),        // M8.3c: force-renew stragglers off a draining CA
 		BlocklistSource: cf.blocklistSource(s),
 		Rollout:         rollout.New(s.DB, audit),
 		NebulaReleases:  nebularelease.New(s.DB),

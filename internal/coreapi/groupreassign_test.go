@@ -84,17 +84,18 @@ func TestCommandsForRegroupTrigger(t *testing.T) {
 	}
 
 	// Rollout is nil + RenewCommandThreshold 0 in the fixture, so only the regroup trigger fires.
-	if n := count(f.srv.commandsFor(ctx, "100.64.0.1", "", "", 0, 0, 0, 0, 0 /*certNotAfter*/, 2 /*groupsGen*/, 1 /*issuedGen*/)); n != 1 {
+	// hostCAFp "" (M8.3c) means no force-renew straggler check contributes here.
+	if n := count(f.srv.commandsFor(ctx, "100.64.0.1", "", "", "", 0, 0, 0, 0, 0 /*certNotAfter*/, 2 /*groupsGen*/, 1 /*issuedGen*/)); n != 1 {
 		t.Fatalf("pending regroup: want 1 CmdRenew, got %d", n)
 	}
-	if n := count(f.srv.commandsFor(ctx, "100.64.0.1", "", "", 0, 0, 0, 0, 0, 1, 1)); n != 0 {
+	if n := count(f.srv.commandsFor(ctx, "100.64.0.1", "", "", "", 0, 0, 0, 0, 0, 1, 1)); n != 0 {
 		t.Fatalf("converged device: want 0 CmdRenew, got %d", n)
 	}
 
 	// Near-expiry AND pending → still exactly one CmdRenew (no duplicate).
 	f.srv.cfg.RenewCommandThreshold = time.Hour
 	nearExpiry := time.Now().Add(time.Minute).UnixNano()
-	if n := count(f.srv.commandsFor(ctx, "100.64.0.1", "", "", 0, 0, 0, 0, nearExpiry, 2, 1)); n != 1 {
+	if n := count(f.srv.commandsFor(ctx, "100.64.0.1", "", "", "", 0, 0, 0, 0, nearExpiry, 2, 1)); n != 1 {
 		t.Fatalf("near-expiry + pending: want exactly 1 CmdRenew (deduped), got %d", n)
 	}
 }

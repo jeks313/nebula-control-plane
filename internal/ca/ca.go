@@ -72,6 +72,11 @@ type CA struct {
 	CreatedBy string `gorm:"column:created_by"`
 	CreatedAt int64  `gorm:"column:created_at"` // unix ns
 	UpdatedAt int64  `gorm:"column:updated_at"` // unix ns
+	// ForceRenewStartedAt/WindowNS drive the M8.3c accelerated drain: when a DRAINING CA is
+	// force-drained, heartbeats push its remaining leaf holders to renew (onto the active CA) in
+	// deterministic widening waves over the window. Both 0 -> natural renewal only.
+	ForceRenewStartedAt int64 `gorm:"column:force_renew_started_at"` // unix ns; 0 = off
+	ForceRenewWindowNS  int64 `gorm:"column:force_renew_window_ns"`  // drain window in ns
 }
 
 // TableName pins the table.
@@ -410,6 +415,86 @@ func (r *Registry) AdoptionStatus(ctx context.Context, caFingerprint string, sta
 	sort.Strings(out.Laggards)
 	sort.Strings(out.Stale)
 	return out, nil
+}
+
+// ForceRenew starts an accelerated drain on a DRAINING CA (M8.3c): heartbeats will push its
+// remaining leaf holders to renew onto the active CA in deterministic widening waves over window,
+// so an operator can drain + retire it in ~window instead of a full cert lifetime. Only a draining
+// CA can be force-drained (an active CA still signs; a staged one has no dependents). Idempotent:
+// re-running resets the window/start. Audited.
+func (r *Registry) ForceRenew(ctx context.Context, id int64, window time.Duration, actor string) error {
+	if window <= 0 {
+		return fmt.Errorf("ca: force-renew: window must be > 0")
+	}
+	target, err := r.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if target.State != StateDraining {
+		return fmt.Errorf("%w: only a draining CA can be force-drained (state %s)", ErrIllegalTransition, target.State)
+	}
+	now := r.now().UTC().UnixNano()
+	res := r.db.WithContext(ctx).Model(&CA{}).Where("id = ? AND state = ?", id, StateDraining).
+		Updates(map[string]any{"force_renew_started_at": now, "force_renew_window_ns": int64(window), "updated_at": now})
+	if res.Error != nil {
+		return fmt.Errorf("ca: force-renew: %w", res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return fmt.Errorf("%w: draining -> force-drain (no longer draining)", ErrIllegalTransition)
+	}
+	r.recordAudit(ctx, actor, "ca-force-renew", fmt.Sprintf("id=%d", id), fmt.Sprintf(`{"window_ns":%d}`, int64(window)))
+	return nil
+}
+
+// StopForceRenew cancels an accelerated drain (M8.3c), reverting a draining CA to natural renewal.
+func (r *Registry) StopForceRenew(ctx context.Context, id int64, actor string) error {
+	now := r.now().UTC().UnixNano()
+	res := r.db.WithContext(ctx).Model(&CA{}).Where("id = ?", id).
+		Updates(map[string]any{"force_renew_started_at": 0, "force_renew_window_ns": 0, "updated_at": now})
+	if res.Error != nil {
+		return fmt.Errorf("ca: stop force-renew: %w", res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return ErrNotFound
+	}
+	r.recordAudit(ctx, actor, "ca-force-renew-stop", fmt.Sprintf("id=%d", id), "{}")
+	return nil
+}
+
+// ActiveFingerprint returns the current signing CA's fingerprint, or "" (no error) when no CA is
+// active. Lets the heartbeat force-renew path (M8.3c) recognize a host already on the active CA
+// without importing the ca package's error sentinels.
+func (r *Registry) ActiveFingerprint(ctx context.Context) (string, error) {
+	c, err := r.Active(ctx)
+	if err != nil {
+		if errors.Is(err, ErrNoActive) {
+			return "", nil
+		}
+		return "", err
+	}
+	return c.Fingerprint, nil
+}
+
+// DrainWave returns the accelerated-drain parameters for the CA identified by caFingerprint, and
+// accelerated=true only when that CA is DRAINING and under an active force-renew (M8.3c). A missing
+// CA or one not being force-drained returns accelerated=false with no error (the caller then leaves
+// the host to natural renewal).
+func (r *Registry) DrainWave(ctx context.Context, caFingerprint string) (startedNS, windowNS int64, accelerated bool, err error) {
+	fp := strings.ToLower(strings.TrimSpace(caFingerprint))
+	if fp == "" {
+		return 0, 0, false, nil
+	}
+	var c CA
+	if e := r.db.WithContext(ctx).Where("fingerprint = ?", fp).First(&c).Error; e != nil {
+		if errors.Is(e, gorm.ErrRecordNotFound) {
+			return 0, 0, false, nil
+		}
+		return 0, 0, false, fmt.Errorf("ca: drain wave: %w", e)
+	}
+	if c.State != StateDraining || c.ForceRenewStartedAt == 0 || c.ForceRenewWindowNS <= 0 {
+		return 0, 0, false, nil
+	}
+	return c.ForceRenewStartedAt, c.ForceRenewWindowNS, true, nil
 }
 
 // containsFold reports whether fps (each normalized case-insensitively) contains fp.

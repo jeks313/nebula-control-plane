@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log/slog"
 	"net"
@@ -151,6 +152,22 @@ type Config struct {
 	Revocation *revocation.Registry
 	Allocator  *ipam.Allocator
 	Central    netip.Prefix
+
+	// CADrain, if set, enables the M8.3c accelerated drain: a heartbeat from a host whose current
+	// leaf still chains to a DRAINING CA under force-renew is answered with a `renew` command, in
+	// deterministic widening waves, so the CA drains in ~a window instead of a full cert lifetime.
+	// nil disables force-renew (natural renewal still drains). ca.Registry satisfies it.
+	CADrain CADrainSource
+}
+
+// CADrainSource surfaces the M8.3c accelerated-drain state to the heartbeat path without coreapi
+// importing the ca package. ca.Registry implements it.
+type CADrainSource interface {
+	// ActiveFingerprint is the current signing CA's fingerprint, or "" when none is active.
+	ActiveFingerprint(ctx context.Context) (string, error)
+	// DrainWave reports the force-renew window for the CA identified by caFingerprint; accelerated
+	// is true only when that CA is draining AND under an active force-renew.
+	DrainWave(ctx context.Context, caFingerprint string) (startedNS, windowNS int64, accelerated bool, err error)
 }
 
 // Server is the mesh-only Core API.
@@ -537,21 +554,27 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 
 	wire.WriteJSON(w, http.StatusOK, wire.HeartbeatResponse{
 		ProtocolVersion: wire.ProtocolVersion,
-		Commands:        s.commandsFor(ctx, dev.OverlayIP, dev.GOOS, dev.GOARCH, req.AppliedBundleVersion, req.AppliedBlocklistVersion, appliedNebula, appliedPilot, certNotAfter, dev.GroupsGeneration, dev.IssuedGeneration),
+		Commands:        s.commandsFor(ctx, dev.OverlayIP, dev.GOOS, dev.GOARCH, dev.CAFingerprint, req.AppliedBundleVersion, req.AppliedBlocklistVersion, appliedNebula, appliedPilot, certNotAfter, dev.GroupsGeneration, dev.IssuedGeneration),
 	})
 }
 
 // commandsFor decides the typed commands to return: the near-expiry renew
 // backstop (4.6) plus, for 6.6, an apply_bundle that drives the host toward its
 // rollout target version (or back to prev after a rollback).
-func (s *Server) commandsFor(ctx context.Context, overlayIP, goos, goarch string, appliedVersion, appliedBlocklist, appliedNebula, appliedPilot int, certNotAfter, groupsGen, issuedGen int64) []wire.Command {
+func (s *Server) commandsFor(ctx context.Context, overlayIP, goos, goarch, hostCAFp string, appliedVersion, appliedBlocklist, appliedNebula, appliedPilot int, certNotAfter, groupsGen, issuedGen int64) []wire.Command {
 	var cmds []wire.Command
 	// Renew backstop: near cert expiry (4.6) OR a pending group reassignment
-	// (groups_generation > issued_generation — ADR 0002). One CmdRenew covers both (renew
-	// re-keys AND re-signs from desired_groups), so emit at most one even if both fire.
+	// (groups_generation > issued_generation — ADR 0002) OR an M8.3c accelerated drain of the
+	// draining CA this host still chains to. One CmdRenew covers all (renew re-keys AND re-signs
+	// from desired_groups under the ACTIVE CA), so emit at most one even if several fire. The
+	// force-renew check does DB work, so it is only run when a cheaper trigger has not already fired.
 	nearExpiry := s.cfg.RenewCommandThreshold > 0 && certNotAfter > 0 &&
 		time.Unix(0, certNotAfter).Sub(s.now()) < s.cfg.RenewCommandThreshold
-	if nearExpiry || groupsGen > issuedGen {
+	renew := nearExpiry || groupsGen > issuedGen
+	if !renew {
+		renew = s.forceRenewStraggler(ctx, overlayIP, hostCAFp)
+	}
+	if renew {
 		cmds = append(cmds, wire.Command{Type: wire.CmdRenew})
 	}
 	if s.cfg.Rollout != nil {
@@ -576,6 +599,54 @@ func (s *Server) commandsFor(ctx context.Context, overlayIP, goos, goarch string
 		}
 	}
 	return cmds
+}
+
+// forceRenewStraggler reports whether this host should be force-renewed to accelerate a draining
+// CA's drain (M8.3c): its current leaf chains to a NON-active CA that is under an active force-renew,
+// and its deterministic wave bucket has opened. It PAUSES (returns false) while the signing breaker
+// is open, so a force-drain never piles renewals onto a halted signer. Fail-safe: any read error
+// returns false — the host simply keeps draining at its natural renewal cadence.
+func (s *Server) forceRenewStraggler(ctx context.Context, overlayIP, hostCAFp string) bool {
+	if s.cfg.CADrain == nil || hostCAFp == "" {
+		return false
+	}
+	activeFp, err := s.cfg.CADrain.ActiveFingerprint(ctx)
+	if err != nil || activeFp == "" || strings.EqualFold(hostCAFp, activeFp) {
+		return false // no active CA known, or the host is already on it
+	}
+	startedNS, windowNS, accelerated, err := s.cfg.CADrain.DrainWave(ctx, hostCAFp)
+	if err != nil || !accelerated || !inDrainWave(overlayIP, startedNS, windowNS, s.now().UnixNano()) {
+		return false
+	}
+	// Pause widening while signing is halted (breaker open) — don't add to a halted signer.
+	if s.cfg.Signer != nil {
+		if open, berr := s.cfg.Signer.BreakerOpen(ctx); berr == nil && open {
+			return false
+		}
+	}
+	return true
+}
+
+// inDrainWave reports whether overlayIP's deterministic bucket has opened in an accelerated drain
+// that started startedNS ago and completes over windowNS (M8.3c). Buckets [0,100) open linearly
+// with elapsed time, so renewals spread evenly across the window instead of storming at t0. Once
+// the window has fully elapsed, every remaining straggler is admitted (the drain must still finish).
+func inDrainWave(overlayIP string, startedNS, windowNS, nowNS int64) bool {
+	if startedNS <= 0 || windowNS <= 0 {
+		return false
+	}
+	elapsed := nowNS - startedNS
+	if elapsed < 0 {
+		return false // clock skew: not started yet
+	}
+	if elapsed >= windowNS {
+		return true // window complete -> admit every remaining straggler
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(overlayIP))
+	bucket := int64(h.Sum32() % 100)   // stable per-host in [0,99]
+	admitted := elapsed * 100 / windowNS // grows 0..99 as the window elapses
+	return bucket <= admitted
 }
 
 // floorReconcile returns a single apply_bundle when the host is running below the

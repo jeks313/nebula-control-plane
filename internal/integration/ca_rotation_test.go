@@ -269,6 +269,75 @@ func TestSigningCutsOverToActivatedCA(t *testing.T) {
 	}
 }
 
+// TestForceRenewDrainsStragglers is the M8.3c acceptance: after cut-over, `harbor ca force-renew`
+// on the draining CA makes heartbeats from hosts STILL chaining to it return a `renew` command (so
+// they re-key onto the active CA and the drain completes), while a host already on the active CA is
+// left alone. Before force-renew, no straggler is pushed (natural drain).
+func TestForceRenewDrainsStragglers(t *testing.T) {
+	e := setupEnroll(t)
+	ctx := context.Background()
+	api := e.coreAPI()
+	hb := wire.HeartbeatRequest{ProtocolVersion: wire.ProtocolVersion, Type: "heartbeat", Health: "ok"}
+
+	// host-straggler enrolls under CA1.
+	secret, _, _ := joinkey.Create(ctx, e.store, joinkey.Params{Name: "k", Groups: []string{"web"}, MaxUses: 0, AutoIssue: true}, time.Now())
+	res1, err := e.cons.Process(ctx, e.candidate(t, secret, "host-straggler"))
+	if err != nil || res1.Status != "issued" {
+		t.Fatalf("enroll straggler: %v %s", err, res1.Status)
+	}
+	stragglerIP := res1.OverlayIP
+	ca1, err := e.caReg.Active(ctx) // CA1, about to become draining
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Stage + activate CA2 and hot-swap the signer (8.3b).
+	ca2PEM, ca2backend := mkStagedCAWithBackend(t, "ca-2")
+	ca2row, err := e.caReg.Stage(ctx, "ca-2", ca2PEM, "software", "op")
+	if err != nil {
+		t.Fatalf("stage CA2: %v", err)
+	}
+	if err := e.caReg.Activate(ctx, ca2row.ID, "op"); err != nil {
+		t.Fatalf("activate CA2: %v", err)
+	}
+	if err := e.sg.SwapCA([]byte(ca2PEM), ca2backend); err != nil {
+		t.Fatalf("swap: %v", err)
+	}
+
+	// host-fresh enrolls AFTER the swap -> already signed by CA2 (not a straggler).
+	res2, err := e.cons.Process(ctx, e.candidate(t, secret, "host-fresh"))
+	if err != nil || res2.Status != "issued" {
+		t.Fatalf("enroll fresh: %v %s", err, res2.Status)
+	}
+	freshIP := res2.OverlayIP
+
+	// Before force-renew: the straggler is NOT pushed (drain is natural, renew on its own cadence).
+	if resp := heartbeatReq(t, api, stragglerIP, hb); hasCmd(resp.Commands, wire.CmdRenew) {
+		t.Fatal("no force-renew active: the straggler must not be told to renew")
+	}
+
+	// Start an accelerated drain of CA1 with a tiny window so every straggler is immediately in-wave.
+	if err := e.caReg.ForceRenew(ctx, ca1.ID, time.Nanosecond, "op"); err != nil {
+		t.Fatalf("force-renew CA1: %v", err)
+	}
+
+	// The straggler (still on CA1) is now force-renewed; the fresh host (on CA2) is left alone.
+	if resp := heartbeatReq(t, api, stragglerIP, hb); !hasCmd(resp.Commands, wire.CmdRenew) {
+		t.Fatal("a straggler on the force-drained CA must be told to renew")
+	}
+	if resp := heartbeatReq(t, api, freshIP, hb); hasCmd(resp.Commands, wire.CmdRenew) {
+		t.Fatal("a host already on the active CA must not be force-renewed")
+	}
+
+	// Stopping the drain reverts the straggler to natural renewal.
+	if err := e.caReg.StopForceRenew(ctx, ca1.ID, "op"); err != nil {
+		t.Fatalf("stop force-renew: %v", err)
+	}
+	if resp := heartbeatReq(t, api, stragglerIP, hb); hasCmd(resp.Commands, wire.CmdRenew) {
+		t.Fatal("after -stop, the straggler must not be force-renewed")
+	}
+}
+
 // TestHeartbeatDrivesCAAdoption is the M8.1 end-to-end acceptance across the full
 // wire -> coreapi -> query path: a host's heartbeat-reported trusted CA set is stored, and
 // ca.AdoptionStatus walks from 0% to 100% as the host starts reporting trust of a staged CA.

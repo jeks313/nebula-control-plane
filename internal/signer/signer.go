@@ -399,6 +399,13 @@ func (s *Signer) Issue(ctx context.Context, actor string, t Template) (cert.Cert
 	return c, pem, nil
 }
 
+// BreakerOpen reports the authoritative signing-breaker state (the shared fleet-wide latch for the
+// SQL breaker). Callers pause work that would add signing load while issuance is halted — e.g. the
+// M8.3c accelerated drain stops widening its renew waves when the breaker is open.
+func (s *Signer) BreakerOpen(ctx context.Context) (bool, error) {
+	return s.breaker.isOpen(ctx)
+}
+
 // ResetBreaker clears a tripped circuit breaker (an admin action; should itself
 // be dual-controlled when wired into the API, M2.11).
 func (s *Signer) ResetBreaker(ctx context.Context) error {

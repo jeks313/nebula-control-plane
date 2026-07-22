@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jeks313/nebula-control-plane/internal/ca"
+	"github.com/jeks313/nebula-control-plane/internal/coreapi"
 	"github.com/jeks313/nebula-control-plane/internal/signer"
 	"github.com/jeks313/nebula-control-plane/internal/store"
 	"github.com/slackhq/nebula/cert"
@@ -84,6 +85,12 @@ func (cf *coreFlags) activeCASource(s *store.Store, audit ca.AuditFunc) func(con
 	}
 }
 
+// caDrainSource returns the M8.3c accelerated-drain source core-api consults on each heartbeat to
+// force-renew a draining CA's remaining leaf holders. ca.Registry implements coreapi.CADrainSource.
+func (cf *coreFlags) caDrainSource(s *store.Store, audit ca.AuditFunc) coreapi.CADrainSource {
+	return ca.New(s.DB, audit)
+}
+
 // activeCABackendFactory builds the signing backend for a rotated-in active CA (M8.3b), reading
 // its stored signing-backend id EXACTLY as caSeedIdentity records it: a "pkcs11:<label>" URI, the
 // literal "software", or otherwise a KMS key id/ARN. Non-fatal (the reconciler logs + retries).
@@ -146,7 +153,7 @@ func adoptionGate(ad ca.Adoption, force bool) (proceed bool, refusal string) {
 // is enforced (M8.1: `ca adoption` + the gate); the console surface lands in a later slice.
 func cmdCA(args []string) {
 	if len(args) < 1 {
-		fatalf("ca: want list|stage|adoption|activate|retire|abandon")
+		fatalf("ca: want list|stage|adoption|activate|retire|abandon|force-renew")
 	}
 	sub := args[0]
 	fs := flag.NewFlagSet("ca "+sub, flag.ExitOnError)
@@ -154,10 +161,12 @@ func cmdCA(args []string) {
 	certPath := fs.String("cert", "", "stage: CA certificate PEM file (the new CA to trust)")
 	name := fs.String("name", "", "stage: human label for the CA (e.g. ca-2027)")
 	kmsKeyID := fs.String("kms-key-id", "", "stage: how to reach its signing backend (KMS ARN / 'pkcs11:<label>' / 'software'); empty = trust-only")
-	id := fs.Int64("id", 0, "adoption/activate/retire/abandon: the CA row id (see `ca list`)")
+	id := fs.Int64("id", 0, "adoption/activate/retire/abandon/force-renew: the CA row id (see `ca list`)")
 	actor := fs.String("actor", "operator", "admin identity for the audit trail")
 	force := fs.Bool("force", false, "activate: cut over even if <100% of LIVE hosts confirm trust of the target CA (break-glass — may strand laggards)")
 	staleAfter := fs.Duration("stale-after", 5*time.Minute, "activate/adoption: heartbeat freshness window defining a LIVE host (keep aligned with serve/admin-api -stale-after)")
+	window := fs.Duration("window", 30*time.Minute, "force-renew: spread the forced renewals of a draining CA's stragglers evenly over this window (waves)")
+	stop := fs.Bool("stop", false, "force-renew: cancel an in-progress accelerated drain (revert to natural renewal)")
 	_ = fs.Parse(args[1:])
 
 	s := openStore(*driver, *dsn)
@@ -281,7 +290,29 @@ func cmdCA(args []string) {
 			fatalf("ca abandon: %v", err)
 		}
 		fmt.Printf("abandoned staged CA id %d\n", *id)
+	case "force-renew":
+		if *id == 0 {
+			fatalf("ca force-renew: -id is required (a draining CA — see `ca list`)")
+		}
+		if *stop {
+			if err := reg.StopForceRenew(ctx, *id, *actor); err != nil {
+				fatalf("ca force-renew -stop: %v", err)
+			}
+			fmt.Printf("stopped the accelerated drain of CA id %d (reverted to natural renewal)\n", *id)
+			return
+		}
+		if err := reg.ForceRenew(ctx, *id, *window, *actor); err != nil {
+			fatalf("ca force-renew: %v", err)
+		}
+		deps := -1
+		if row, gerr := reg.Get(ctx, *id); gerr == nil {
+			if n, lerr := reg.LiveDependents(ctx, row.Fingerprint); lerr == nil {
+				deps = n
+			}
+		}
+		fmt.Printf("accelerated drain of CA id %d started — its %d remaining leaf holder(s) are force-renewed onto the active CA in waves over %s\n", *id, deps, window.String())
+		fmt.Printf("  watch `harbor ca list` LIVE-DEPS fall to 0, then `harbor ca retire -id %d`. `ca force-renew -id %d -stop` cancels.\n", *id, *id)
 	default:
-		fatalf("ca: unknown subcommand %q (want list|stage|adoption|activate|retire|abandon)", sub)
+		fatalf("ca: unknown subcommand %q (want list|stage|adoption|activate|retire|abandon|force-renew)", sub)
 	}
 }

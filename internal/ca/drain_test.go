@@ -2,6 +2,7 @@ package ca
 
 import (
 	"context"
+	"errors"
 	"net/netip"
 	"testing"
 	"time"
@@ -73,6 +74,55 @@ func seedEnroll(t *testing.T, db *gorm.DB, eid, status, certPEM, caFP string) {
 		"created_at":     time.Now().UnixNano(),
 	}).Error; err != nil {
 		t.Fatalf("seed enrollment %s: %v", eid, err)
+	}
+}
+
+// TestForceRenewLifecycle: an accelerated drain (M8.3c) can be started only on a DRAINING CA, is
+// reflected by DrainWave, and is cleared by StopForceRenew; ActiveFingerprint tracks the signing CA.
+func TestForceRenewLifecycle(t *testing.T) {
+	_, r := setup(t)
+	ctx := context.Background()
+	pem1, fp1, _, _ := mkCAWithBackend(t, "ca-1")
+	pem2, _, _, _ := mkCAWithBackend(t, "ca-2")
+	ca1, _, _ := r.SeedActive(ctx, "ca-1", pem1, "software", "boot")
+	ca2, _ := r.Stage(ctx, "ca-2", pem2, "kms", "op")
+	if err := r.Activate(ctx, ca2.ID, "op"); err != nil { // ca-1 draining, ca-2 active
+		t.Fatal(err)
+	}
+
+	// Only a draining CA can be force-drained: the active CA-2 is refused.
+	if err := r.ForceRenew(ctx, ca2.ID, time.Hour, "op"); !errors.Is(err, ErrIllegalTransition) {
+		t.Fatalf("force-renew the active CA err = %v, want ErrIllegalTransition", err)
+	}
+	// A non-positive window is refused.
+	if err := r.ForceRenew(ctx, ca1.ID, 0, "op"); err == nil {
+		t.Fatal("force-renew with window 0 must be refused")
+	}
+	// The draining CA-1 accepts it, and DrainWave reflects the window.
+	if err := r.ForceRenew(ctx, ca1.ID, 30*time.Minute, "op"); err != nil {
+		t.Fatalf("force-renew draining CA-1: %v", err)
+	}
+	started, window, accel, err := r.DrainWave(ctx, fp1)
+	if err != nil || !accel || window != int64(30*time.Minute) || started == 0 {
+		t.Fatalf("DrainWave(ca-1) = (%d,%d,%v,%v), want accelerated with a 30m window", started, window, accel, err)
+	}
+	// ActiveFingerprint is CA-2; the active CA is never itself accelerated-draining.
+	if af, _ := r.ActiveFingerprint(ctx); af != ca2.Fingerprint {
+		t.Fatalf("ActiveFingerprint = %s, want CA-2 %s", af, ca2.Fingerprint)
+	}
+	if _, _, accel2, _ := r.DrainWave(ctx, ca2.Fingerprint); accel2 {
+		t.Fatal("the active CA must not report an accelerated drain")
+	}
+	// An unknown fingerprint is simply not accelerated (no error).
+	if _, _, accel3, derr := r.DrainWave(ctx, "deadbeef"); derr != nil || accel3 {
+		t.Fatalf("DrainWave(unknown) = (%v,%v), want (false,nil)", accel3, derr)
+	}
+	// Stop reverts to natural renewal.
+	if err := r.StopForceRenew(ctx, ca1.ID, "op"); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if _, _, accel4, _ := r.DrainWave(ctx, fp1); accel4 {
+		t.Fatal("after stop, CA-1 must not report an accelerated drain")
 	}
 }
 
