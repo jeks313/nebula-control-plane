@@ -149,7 +149,8 @@ NOT handled by the script — do these manually when the change needs them:
 **Milestone track: M0–M4 + M6 complete; M5 PARTIAL; M7 is the frontier (7.1 done · 7.2 engine+CLI
 built, no console · 7.3 partial · 7.4 blocked on M9 OIDC); M8 (CA rotation) is the ACTIVE milestone
 (slice 1 + 8.1 + 8.3a-c + 8.4 retirement-local built and **DEPLOYED to the POC 2026-07-23 @
-`v0.1.3-62-g08ee74a`**; 8.4 KMS drill + 8.5 config-key rotation next); M9/M10
+`v0.1.3-62-g08ee74a`**; **8.5 config-key rotation BUILT + harness-drilled 2026-07-24, NOT yet deployed**;
+8.4 KMS drill + the POC rotation drill + 8.6 emergency path next); M9/M10
 PARTIAL. Development forked off the linear track into ADR-driven parallel streams — ADRs 0003–0011
 have all shipped or are code-complete (per-ADR built-state below).** A live demo (terraform apply + bootstrap-genesis.sh) can
 run now on the real off-mesh topology. Schema ceiling on disk is **000036** (next free: **000037**;
@@ -389,7 +390,30 @@ The linear track forked into ADR streams. Net state (✅ built · ◐ code-compl
   logs "started", all three units active `NRestarts=0`. (Recovery also surfaced + fixed a
   `deploy-harbor.sh` bug where a trailing `rm -f` masked the remote exit code → false "deploy OK",
   now fixed to propagate the inner exit code.)
-  **Still open:** 8.5 config-signing-key rotation (same overlap mechanism), 8.6 emergency path, 8.7 staging drill.
+  ✅ **8.5 config-signing-key rotation — BUILT + reviewed + harness-drilled (2026-07-24, commits `297ff15`
+  + `49a5aab`; NOT yet deployed).** Rotates the config-signing key (Pilot's PINNED bundle-trust ROOT, a
+  co-equal TCB root — fails CLOSED, unlike `ca_bundle`) by the identical staged→active→draining→retired
+  overlap. New `internal/configkey` (registry+lifecycle+adoption/drain gate+KMS key-deletion+collector,
+  migrations **000037** `config_signing_keys` + **000038** `heartbeats.trusted_config_keys`); new
+  `internal/configsign` (atomic hot-swap `ConfigSigner`, snapshot-per-Sign so a swap never tears a Kid
+  across a signature; reconciler mirroring the CA cut-over, wired on ALL 4 signing procs: core-api, enroll
+  worker, collector, admin-api-issuance); `bundle.ConfigSigningKeys`+`ConfigKeyVersion` (byte-stable,
+  fail-open source) + **`bundle.TrustedSet`/trust-file** (`<base>/config-signing-trust.json` = pin UNION
+  learned, RE-READ per verify so a running pilot adopts K2 mid-run; fail-safe monotonic anti-rollback;
+  fsynced); `jws.VerifyAny` + set-based `bundle.Verify` across all 9 pilot verify sites; heartbeat
+  `TrustedConfigKeyFingerprints` sourced from the trust file (the exact set Verify consults) + coreapi
+  `trusted_config_keys` in the `OnConflict DoUpdates`; `harbor config-key {list,stage,adoption,activate,
+  retire,abandon,schedule/cancel-key-deletion}` break-glass CLI + read-only console page + `ncp_configkey_*`
+  metrics. Acceptance `TestConfigKeyOverlapVerifiesNoRejection` (enroll K1→stage→adopt→activate+hot-swap→
+  renew K2→retire K1, zero rejections) + `TestFullRotationDrillBothRoots` (CA **and** config-key rotated in
+  one host's life, zero data-plane discontinuity). **Adversarial 5-lens review fixed 2 defects:** the
+  heartbeat now reports config-key trust from the trust FILE not the last bundle's advertised keys (which,
+  written first, could over-report adoption and strand a host at cut-over — regression-tested); trust file
+  fsynced. **Fingerprint invariant (load-bearing):** registry fp == JWS Kid == pilot-reported == stored ==
+  `wire.PubkeyHash(65-byte P256 point)`, CASE-SENSITIVE base64url (never lowercased, unlike hex CA fps).
+  ⚠ **DEPLOY ORDER:** apply **000037 + 000038** (`harbor migrate up`) BEFORE swapping the binary.
+  **Still open:** DEPLOY 8.5 to the POC + a **controlled POC rotation drill** (needs a 2nd KMS config key —
+  and a 2nd KMS CA key for the CA half), then 8.4 KMS deletion drill + CloudWatch alarm, 8.6 emergency path.
   *(The scheduled lighthouse-cert rotation above is 6.8-adjacent, NOT M8 CA rotation.)*
 - **M9 — hardening & operations: PARTIAL (delivered via ADR 0007, not per-step ticks).** The poc IS the
   prod stack (above); ✅ 9.6 signed waved self-update (ADR 0003); 🟡 HA substrate present but single-AZ;
@@ -494,9 +518,10 @@ Note: the durable queue (`internal/queue`) is now safe for concurrent first-open
 - **7.3** — an explicit `harbor decommission` + a cloud-terminate/CloudTrail-driven auto-reap (today's
   reaper triggers on cert-lapse, not cloud inventory) + hard-delete.
 - **M8 — CA & key rotation** — the ACTIVE milestone. Registry + lifecycle (slice 1), 8.1 trust distribution +
-  adoption gate, 8.3a drain tracking, **8.3b signing cut-over (zero-downtime hot-swap)**, and **8.3c waved
-  force-renew** are built; next is **8.4 retirement + KMS deletion alarms**, then 8.5 config-key rotation, 8.6
-  emergency path, 8.7 staging drill.
+  adoption gate, 8.3a drain tracking, **8.3b signing cut-over (zero-downtime hot-swap)**, **8.3c waved
+  force-renew**, 8.4 retirement-local, and **8.5 config-key rotation (built + harness-drilled, NOT deployed)**
+  are done; next is **deploy 8.5 + a controlled POC rotation drill** (needs 2nd KMS CA + config keys), the
+  8.4 KMS-deletion drill + CloudWatch alarm, then 8.6 emergency path, 8.7 full staging drill.
 - **7.4 / M9 9.1** — laptop OIDC device-code flow (unblocks IdP offboarding).
 - **ADR 0012** (pilot fleet metrics) and **ADR 0014** (overlay DNS) are design-only.
 - **M10** — the Windows/macOS hardening tail (DACL/DPAPI, Authenticode/notarization, CI runners, least-priv).
