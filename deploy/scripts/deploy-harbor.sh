@@ -136,7 +136,10 @@ REMOTE
 } > "$remote_sh"
 
 B64="$(base64 -w0 "$remote_sh")"
-CMD="printf %s '$B64' | base64 -d > /tmp/deploy-harbor.sh; sudo -iu ec2-user bash -l /tmp/deploy-harbor.sh; rm -f /tmp/deploy-harbor.sh"
+# Propagate the inner script's exit code: a bare trailing `rm -f` (exit 0) would mask an inner
+# `exit 1`, so SSM would report Success and this script would falsely print "deploy OK" on a
+# remote abort. Capture rc before cleanup and re-exit it so STATUS reflects the real outcome.
+CMD="printf %s '$B64' | base64 -d > /tmp/deploy-harbor.sh; sudo -iu ec2-user bash -l /tmp/deploy-harbor.sh; rc=\$?; rm -f /tmp/deploy-harbor.sh; exit \$rc"
 params="$(jq -nc --arg c "$CMD" '{commands:[$c]}')"
 
 log "SSM RunShellScript -> $HARBOR_INSTANCE"
