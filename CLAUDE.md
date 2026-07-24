@@ -149,8 +149,9 @@ NOT handled by the script — do these manually when the change needs them:
 **Milestone track: M0–M4 + M6 complete; M5 PARTIAL; M7 is the frontier (7.1 done · 7.2 engine+CLI
 built, no console · 7.3 partial · 7.4 blocked on M9 OIDC); M8 (CA rotation) is the ACTIVE milestone
 (slice 1 + 8.1 + 8.3a-c + 8.4 retirement-local built and **DEPLOYED to the POC 2026-07-23 @
-`v0.1.3-62-g08ee74a`**; **8.5 config-key rotation BUILT + harness-drilled 2026-07-24, NOT yet deployed**;
-8.4 KMS drill + the POC rotation drill + 8.6 emergency path next); M9/M10
+`v0.1.3-62-g08ee74a`**; **8.5 config-key rotation BUILT + harness-drilled + DEPLOYED to the POC 2026-07-24
+@ `v0.1.3-68-g187e4c8` + live trust-distribution dry-run done**; 8.4 KMS drill + a real POC cut-over (needs
+the fleet's pilots updated to M8.5 first) + 8.6 emergency path next); M9/M10
 PARTIAL. Development forked off the linear track into ADR-driven parallel streams — ADRs 0003–0011
 have all shipped or are code-complete (per-ADR built-state below).** A live demo (terraform apply + bootstrap-genesis.sh) can
 run now on the real off-mesh topology. Schema ceiling on disk is **000036** (next free: **000037**;
@@ -412,8 +413,16 @@ The linear track forked into ADR streams. Net state (✅ built · ◐ code-compl
   fsynced. **Fingerprint invariant (load-bearing):** registry fp == JWS Kid == pilot-reported == stored ==
   `wire.PubkeyHash(65-byte P256 point)`, CASE-SENSITIVE base64url (never lowercased, unlike hex CA fps).
   ⚠ **DEPLOY ORDER:** apply **000037 + 000038** (`harbor migrate up`) BEFORE swapping the binary.
-  **Still open:** DEPLOY 8.5 to the POC + a **controlled POC rotation drill** (needs a 2nd KMS config key —
-  and a 2nd KMS CA key for the CA half), then 8.4 KMS deletion drill + CloudWatch alarm, 8.6 emergency path.
+  ✅ **DEPLOYED to the POC — 2026-07-24, `v0.1.3-68-g187e4c8`** (migrate-first then swap; genesis config key
+  boot-seeded active, `config-key list` works, the M8.5 cut-over reconciler logs "started"). ✅ **Live
+  trust-distribution DRY-RUN done:** staged a TRUST-ONLY 2nd config key, it entered the trust set
+  (`TRUSTED=yes`), `config-key adoption` showed **0/5 live hosts** (the fail-closed gate working — the live
+  fleet runs **pre-M8.5 pilots** that don't report `trusted_config_keys`, so all laggards), then abandoned it
+  (genesis untouched). **FINDING:** a real POC config-key cut-over is (correctly) BLOCKED by the 100%-adoption
+  gate until the fleet's pilots are updated to an M8.5 build (they must ship the set-based verify + trust-file
+  + heartbeat report) — do that via the ADR-0003 pilot self-update lane before any live `config-key activate`.
+  **Still open:** update fleet pilots to M8.5 → a real POC cut-over; the 8.4 KMS-deletion drill + CloudWatch
+  alarm; 8.6 emergency path.
   *(The scheduled lighthouse-cert rotation above is 6.8-adjacent, NOT M8 CA rotation.)*
 - **M9 — hardening & operations: PARTIAL (delivered via ADR 0007, not per-step ticks).** The poc IS the
   prod stack (above); ✅ 9.6 signed waved self-update (ADR 0003); 🟡 HA substrate present but single-AZ;
