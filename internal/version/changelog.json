@@ -1,5 +1,35 @@
 [
   {
+    "hash": "dd154b1",
+    "date": "2026-07-24",
+    "subject": "docs(claude): record M8.5 config-key rotation built + harness-drilled (POC deploy/drill pending)"
+  },
+  {
+    "hash": "49a5aab",
+    "date": "2026-07-24",
+    "subject": "test(integration): M8.7 harness rotation drill across BOTH trust roots"
+  },
+  {
+    "hash": "297ff15",
+    "date": "2026-07-24",
+    "subject": "feat(configkey): M8.5 config-signing-key rotation (dual-key overlap)"
+  },
+  {
+    "hash": "149d395",
+    "date": "2026-07-24",
+    "subject": "docs(claude): record M8 deploy to the POC (v0.1.3-62-g08ee74a, 2026-07-23)"
+  },
+  {
+    "hash": "1574809",
+    "date": "2026-07-24",
+    "subject": "fix(deploy): propagate remote exit code in deploy-harbor.sh (no more false \"deploy OK\")"
+  },
+  {
+    "hash": "08ee74a",
+    "date": "2026-07-22",
+    "subject": "chore(changelog): regenerate embedded changelog for deploy"
+  },
+  {
     "hash": "7f016a7",
     "date": "2026-07-22",
     "subject": "fix(ca): remediate 4 defects from the M8 adversarial review"
