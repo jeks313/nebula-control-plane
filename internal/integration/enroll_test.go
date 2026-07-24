@@ -16,6 +16,8 @@ import (
 
 	"github.com/jeks313/nebula-control-plane/internal/bundle"
 	"github.com/jeks313/nebula-control-plane/internal/ca"
+	"github.com/jeks313/nebula-control-plane/internal/configkey"
+	"github.com/jeks313/nebula-control-plane/internal/configsign"
 	"github.com/jeks313/nebula-control-plane/internal/enrollment"
 	"github.com/jeks313/nebula-control-plane/internal/ipam"
 	"github.com/jeks313/nebula-control-plane/internal/joinkey"
@@ -39,13 +41,16 @@ type enrollEnv struct {
 	caPEM       []byte
 	pool        netip.Prefix
 	d           *queue.Durable   // shared gateway↔Core store (queue + results)
-	pinned      *ecdsa.PublicKey // config-signing pubkey (Pilot pins this)
+	pinned      []*ecdsa.PublicKey // config-signing pubkey trusted set (Pilot pins this)
 	configKeyID string
 	sg          *signer.Signer
 	cfgB        signer.Backend
 	policy      *policy.Policy
 	rev         *revocation.Registry // cert blocklist (7.1); wired as BlocklistSource
 	caReg       *ca.Registry         // CA rotation registry (M8); wired as CABundleSource, seeded with the current CA
+	ckReg        *configkey.Registry     // config-key rotation registry (M8.5); wired as ConfigKeySource, seeded with the genesis config key
+	configSigner *configsign.ConfigSigner // hot-swappable config-signing key (M8.5); shared by enroll + coreAPI
+	cfgPubPEM    []byte                   // the genesis config-signing PUBLIC key PEM (the pilot pin)
 }
 
 func setupEnroll(t *testing.T) enrollEnv {
@@ -105,6 +110,17 @@ func setupEnroll(t *testing.T) enrollEnv {
 	if _, _, err := caReg.SeedActive(context.Background(), "test-ca", string(caPEM), "software", "boot"); err != nil {
 		t.Fatalf("seed CA: %v", err)
 	}
+	// M8.5: the config-key rotation registry, seeded with the genesis config key as active + the
+	// hot-swappable ConfigSigner (shared by enroll + coreAPI), exactly as the live serve path wires it.
+	cfgPubPEM := cert.MarshalSigningPublicKeyToPEM(cert.Curve_P256, cfgPub)
+	ckReg := configkey.New(s.DB, audit)
+	if _, _, err := ckReg.SeedActive(context.Background(), "config-genesis", string(cfgPubPEM), "software", "boot"); err != nil {
+		t.Fatalf("seed config key: %v", err)
+	}
+	configSigner, err := configsign.New(cfgB, audit, nil)
+	if err != nil {
+		t.Fatalf("config signer: %v", err)
+	}
 	cons := enrollment.New(enrollment.Config{
 		Store: s, Nonces: ring, Replay: replay.New(2 * time.Minute),
 		Signer: sg, Allocator: alloc, Pool: pool, CertLifetime: 24 * time.Hour,
@@ -112,13 +128,14 @@ func setupEnroll(t *testing.T) enrollEnv {
 		// ephemeral tests can assert the validity window differs.
 		EphemeralCertTTL: 2 * time.Hour,
 		ConfigBackend:    cfgB, ConfigKeyID: configKeyID, CABundlePEM: caPEM,
+		ConfigSigner: configSigner, ConfigKeyPEM: cfgPubPEM, ConfigKeySource: ckReg.TrustedKeys, ConfigKeyVersionSource: ckReg.Generation,
 		Lighthouses:     []bundle.Lighthouse{{OverlayIP: "100.64.0.1", PublicAddrs: []string{"198.51.100.1:4242"}}},
 		Policy:          &pol,
 		BlocklistSource: rev.ActiveFingerprints,
 		CABundleSource:  caReg.TrustBundle,
 		Results:         d, ResultTTL: time.Hour,
 	})
-	return enrollEnv{cons: cons, store: s, ring: ring, caPEM: caPEM, pool: pool, d: d, pinned: pinned, configKeyID: configKeyID, sg: sg, cfgB: cfgB, policy: &pol, rev: rev, caReg: caReg}
+	return enrollEnv{cons: cons, store: s, ring: ring, caPEM: caPEM, pool: pool, d: d, pinned: []*ecdsa.PublicKey{pinned}, configKeyID: configKeyID, sg: sg, cfgB: cfgB, policy: &pol, rev: rev, caReg: caReg, ckReg: ckReg, configSigner: configSigner, cfgPubPEM: cfgPubPEM}
 }
 
 // fresh generates a host key and a nonce bound to it.

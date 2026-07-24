@@ -36,6 +36,7 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/store"
 	"github.com/jeks313/nebula-control-plane/internal/usertrust"
 	"github.com/jeks313/nebula-control-plane/internal/wire"
+	nebulacert "github.com/slackhq/nebula/cert"
 )
 
 // Harbor enrollment consumer wiring (coreFlags) + the enroll worker/collect/pending/approve commands (split from main.go).
@@ -255,6 +256,11 @@ func (cf *coreFlags) buildConsumer(s *store.Store, results enrollment.ResultSink
 		fatalf("nonce key: %v", err)
 	}
 	cfgPub, _ := cfgB.PublicKey()
+	// M8.5 config-key rotation: this consumer's hot-swappable config signer + the live trust source
+	// (boot-seeds the current config key; drives every bundle's config_signing_keys + its version).
+	cfgPubPEM := nebulacert.MarshalSigningPublicKeyToPEM(nebulacert.Curve_P256, cfgPub)
+	configSigner := cf.newConfigSigner(cfgB, audit)
+	configKeysSource, configKeyVersionSource := cf.configKeyTrustSource(s, cfgPubPEM, audit)
 	ct := cf.cloudTrust(s) // nil unless -cloudtrust-db && a config is published
 	// A newly enrolling host joins on the CURRENT fleet-desired nebula release (the
 	// latest completed nebula-lane rollout, 6.6/1c), falling back to the static flags
@@ -296,6 +302,8 @@ func (cf *coreFlags) buildConsumer(s *store.Store, results enrollment.ResultSink
 		PilotVersion:     *cf.pilotVersion, PilotSHA256: *cf.pilotSHA256, PilotURL: *cf.pilotURL,
 		PilotReleaseFor: pilotReleaseFor,
 		ConfigBackend:   cfgB, ConfigKeyID: wire.PubkeyHash(cfgPub),
+		ConfigSigner: configSigner,                                                        // M8.5: hot-swappable config-signing key
+		ConfigKeyPEM: cfgPubPEM, ConfigKeySource: configKeysSource, ConfigKeyVersionSource: configKeyVersionSource, // M8.5 trust distribution
 		CABundlePEM: caPEM, Lighthouses: parseLighthouses(*cf.lighthouse), LighthouseSource: cf.lighthouseSource(s), Policy: cf.policy(s),
 		CABundleSource:  cf.caTrustSource(s, caPEM, audit), // M8: live CA-rotation trust bundle (seeds the current CA)
 		BlocklistSource: cf.blocklistSource(s),
@@ -403,6 +411,7 @@ func enrollWorker(args []string) {
 	audit := func(c context.Context, a, ac, t, d string) error { _, e := s.AppendAudit(c, a, ac, t, d); return e }
 	var wg sync.WaitGroup
 	cf.startCACutoverReconciler(ctx, &wg, cons.Signer(), s, audit, log)
+	cf.startConfigKeyCutoverReconciler(ctx, &wg, cons.ConfigSigner(), s, audit, log) // M8.5
 	log.Info("enroll worker started", "batch", *batch, "interval", interval.String(), "lease", lease.String())
 	var total int
 	for ctx.Err() == nil {
@@ -533,6 +542,7 @@ func cmdCollect(args []string) {
 	audit := func(c context.Context, a, ac, t, d string) error { _, e := s.AppendAudit(c, a, ac, t, d); return e }
 	var wg sync.WaitGroup
 	cf.startCACutoverReconciler(ctx, &wg, cons.Signer(), s, audit, log)
+	cf.startConfigKeyCutoverReconciler(ctx, &wg, cons.ConfigSigner(), s, audit, log) // M8.5
 	log.Info("harbor collect running", "mode", mode, "interval", interval.String())
 	_ = coll.Run(ctx, gateways, *interval)
 	wg.Wait()

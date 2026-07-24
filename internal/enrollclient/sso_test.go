@@ -148,7 +148,7 @@ func ssoTestParams(t *testing.T, g *fakeGateway) SSOParams {
 		Layout:          paths.New(dir),
 		RequestedName:   "laptop-1",
 		RequestedGroups: []string{"eng"},
-		PinnedConfigPub: dummyPinnedKey(t),
+		PinnedConfigPub: []*ecdsa.PublicKey{dummyPinnedKey(t)},
 		SSOWait:         5 * time.Second,
 		PollTimeout:     2 * time.Second,
 		OpenBrowser:     browserGET(t),
@@ -343,7 +343,7 @@ func TestEnrollSSOStartNotEnabled(t *testing.T) {
 	opened := false
 	_, err := EnrollSSO(context.Background(), SSOParams{
 		GatewayURL: srv.URL, Layout: paths.New(t.TempDir()),
-		PinnedConfigPub: dummyPinnedKey(t), SSOWait: time.Second,
+		PinnedConfigPub: []*ecdsa.PublicKey{dummyPinnedKey(t)}, SSOWait: time.Second,
 		OpenBrowser: func(string) error { opened = true; return nil },
 	})
 	if err == nil {

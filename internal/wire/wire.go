@@ -128,6 +128,13 @@ type HeartbeatRequest struct {
 	// host to gate a CA cut-over on 100% adoption. omitempty: a pre-M8.1 pilot omits it, so
 	// Core reads nil and conservatively counts the host as not-yet-adopted.
 	TrustedCAFingerprints []string `json:"trusted_ca_fingerprints,omitempty"`
+	// TrustedConfigKeyFingerprints is the set of config-signing-key fingerprints (base64url
+	// wire.PubkeyHash — the same value config_signing_keys.fingerprint / the JWS Kid, sorted+deduped,
+	// CASE-SENSITIVE) this host currently trusts, derived from its VERIFIED applied config_signing_keys
+	// UNION its permanent pin (M8.5, design §4.6/§4.8). Core stores it per host to gate a config-key
+	// cut-over on 100% adoption and to drain the old key. omitempty: a pre-M8.5 pilot omits it, so Core
+	// reads nil and conservatively counts the host as not-yet-adopted (fail-closed).
+	TrustedConfigKeyFingerprints []string `json:"trusted_config_key_fingerprints,omitempty"`
 }
 
 // Command types — a CLOSED set (spec §8.2). Pilot executes only these and

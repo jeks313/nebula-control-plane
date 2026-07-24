@@ -2,6 +2,7 @@ package drift
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"os"
 	"testing"
 
@@ -38,11 +39,11 @@ func setup(t *testing.T) (paths.Layout, []byte /*bundle JWS*/, []byte /*canonica
 	if err := os.WriteFile(layout.Bundle(), raw, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	vb, _ := bundle.Verify(raw, pinned)
+	vb, _ := bundle.Verify(raw, []*ecdsa.PublicKey{pinned})
 	want, _ := bundle.RenderNebulaConfig(vb, layout.CABundle(), layout.HostCert(), layout.HostKey())
 
 	reloads := 0
-	m := New(Config{Layout: layout, PinnedConfigPub: pinned, Reload: func() error { reloads++; return nil }})
+	m := New(Config{Layout: layout, PinnedConfigPub: []*ecdsa.PublicKey{pinned}, Reload: func() error { reloads++; return nil }})
 	return layout, raw, want, m, &reloads
 }
 

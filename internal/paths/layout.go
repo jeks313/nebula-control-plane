@@ -51,6 +51,13 @@ func (l Layout) EnrollTicket() string { return filepath.Join(l.Base, "enroll-tic
 // config drift and re-assert the signed version (M6.7).
 func (l Layout) Bundle() string { return filepath.Join(l.Base, "bundle.json") }
 
+// ConfigSigningTrust holds the config-signing keys Pilot has LEARNED from a verified bundle during a
+// config-key rotation (M8.5): {config_key_version, keys:[PEM...]}. The permanent pin
+// (config-signing.pub) is always trusted in addition to these, so a rotation adds a second trusted
+// key without ever un-pinning the root. Re-read at every bundle verify so a running pilot accepts the
+// post-cut-over key mid-run; monotonic by version so a replayed old bundle can't regress the set.
+func (l Layout) ConfigSigningTrust() string { return filepath.Join(l.Base, "config-signing-trust.json") }
+
 // NebulaPid holds the running nebula PID across a pilot re-exec self-update, so the
 // re-exec'd pilot can re-adopt the data plane the previous pilot left running (ADR
 // 0003 Phase 3) instead of forking a new one.

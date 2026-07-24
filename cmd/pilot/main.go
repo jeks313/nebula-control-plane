@@ -135,7 +135,7 @@ func cmdRenew(args []string) {
 	if err != nil {
 		fatalf("renew: read -config-pub: %v", err)
 	}
-	pinned, err := enrollclient.ParsePinnedConfigPub(pubPEM)
+	pinned, err := enrollclient.ParsePinnedConfigPubs(pubPEM)
 	if err != nil {
 		fatalf("renew: %v", err)
 	}
@@ -186,7 +186,7 @@ func cmdEnroll(args []string) {
 	if err != nil {
 		fatalf("enroll: read -config-pub: %v", err)
 	}
-	pinned, err := enrollclient.ParsePinnedConfigPub(pubPEM)
+	pinned, err := enrollclient.ParsePinnedConfigPubs(pubPEM)
 	if err != nil {
 		fatalf("enroll: %v", err)
 	}
@@ -406,7 +406,7 @@ func nebulaHealthFn(health func() supervisor.Health, now func() time.Time) func(
 // config-signing key. Empty strings mean no target (Sync no-ops). A missing bundle
 // (normal before first enrollment) returns nil; a bundle that can't be read or verified
 // returns a warn error for the caller to log (don't act on an unverified tuple).
-func desiredPilot(bundlePath string, pinned *ecdsa.PublicKey, ovVer, ovSHA, ovURL string) (ver, sha, url string, warn error) {
+func desiredPilot(bundlePath string, pinned []*ecdsa.PublicKey, ovVer, ovSHA, ovURL string) (ver, sha, url string, warn error) {
 	if ovVer != "" && ovSHA != "" && ovURL != "" {
 		return ovVer, ovSHA, ovURL, nil
 	}
@@ -417,7 +417,7 @@ func desiredPilot(bundlePath string, pinned *ecdsa.PublicKey, ovVer, ovSHA, ovUR
 		}
 		return "", "", "", fmt.Errorf("read bundle: %w", err)
 	}
-	b, err := bundle.Verify(raw, pinned)
+	b, err := bundle.Verify(raw, bundle.TrustedSet(pinned, paths.New(filepath.Dir(bundlePath)).ConfigSigningTrust()))
 	if err != nil {
 		return "", "", "", fmt.Errorf("verify bundle: %w", err)
 	}
@@ -527,7 +527,7 @@ func cmdSupervise(args []string) {
 			if err != nil {
 				return fmt.Errorf("supervise: read -config-pub: %w", err)
 			}
-			pinned, err := enrollclient.ParsePinnedConfigPub(pubPEM)
+			pinned, err := enrollclient.ParsePinnedConfigPubs(pubPEM)
 			if err != nil {
 				return fmt.Errorf("supervise: %w", err)
 			}
@@ -757,7 +757,7 @@ func cmdInstall(args []string) {
 	if err != nil {
 		fatalf("install: read -config-pub: %v", err)
 	}
-	pinned, err := enrollclient.ParsePinnedConfigPub(pubPEM)
+	pinned, err := enrollclient.ParsePinnedConfigPubs(pubPEM)
 	if err != nil {
 		fatalf("install: %v", err)
 	}

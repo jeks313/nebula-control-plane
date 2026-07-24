@@ -2,6 +2,7 @@ package heartbeat
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -162,7 +163,7 @@ func TestReporterReportsTrustedCAFingerprints(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	New(Config{CoreURL: srv.URL, Layout: layout, PinnedConfigPub: pinned}).beat(context.Background())
+	New(Config{CoreURL: srv.URL, Layout: layout, PinnedConfigPub: []*ecdsa.PublicKey{pinned}}).beat(context.Background())
 
 	want := []string{fp1, fp2}
 	sort.Strings(want)

@@ -44,7 +44,7 @@ type SSOParams struct {
 	Layout          paths.Layout
 	RequestedName   string
 	RequestedGroups []string
-	PinnedConfigPub *ecdsa.PublicKey // the genesis config-signing key Pilot pins
+	PinnedConfigPub []*ecdsa.PublicKey // the config-signing key set Pilot trusts (pin UNION learned, M8.5)
 	HTTPClient      *http.Client
 	PollTimeout     time.Duration // bounds the poll-for-bundle wait (after submit)
 	SSOWait         time.Duration // bounds the browser/IdP round-trip wait (<=0 -> default)

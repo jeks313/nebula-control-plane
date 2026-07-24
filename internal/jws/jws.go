@@ -103,6 +103,17 @@ func SignBackendES256(s DigestSigner, h Header, payload []byte) (Flattened, erro
 // enforces alg == ES256; callers MUST additionally check typ/kid as the spec
 // requires for their context.
 func Verify(env Flattened, pub *ecdsa.PublicKey) (Header, []byte, error) {
+	return VerifyAny(env, []*ecdsa.PublicKey{pub})
+}
+
+// VerifyAny verifies env against ANY key in pubs and returns the header + payload on the FIRST
+// valid signature (M8.5 config-key overlap: Pilot trusts a SET of config-signing keys — its pin
+// UNION the keys carried in its last verified bundle — so a bundle signed by the OLD or the NEW key
+// verifies across a cut-over). It decodes + enforces the ES256 header ONCE, then tries each key. The
+// Kid header only hints which key signed; a signature is NEVER accepted on Kid alone — every
+// candidate is checked with a real ecdsa.Verify. An empty/nil key set, or no matching key, returns
+// ErrSignature (fail-closed).
+func VerifyAny(env Flattened, pubs []*ecdsa.PublicKey) (Header, []byte, error) {
 	hb, err := b64.DecodeString(env.Protected)
 	if err != nil {
 		return Header{}, nil, ErrMalformed
@@ -126,10 +137,12 @@ func Verify(env Flattened, pub *ecdsa.PublicKey) (Header, []byte, error) {
 	digest := sha256.Sum256([]byte(env.Protected + "." + env.Payload))
 	r := new(big.Int).SetBytes(sig[:32])
 	s := new(big.Int).SetBytes(sig[32:])
-	if !ecdsa.Verify(pub, digest[:], r, s) {
-		return Header{}, nil, ErrSignature
+	for _, pub := range pubs {
+		if pub != nil && ecdsa.Verify(pub, digest[:], r, s) {
+			return h, payload, nil
+		}
 	}
-	return h, payload, nil
+	return Header{}, nil, ErrSignature
 }
 
 // ParseP256PublicPoint turns a 65-byte uncompressed P256 point (Nebula's host

@@ -10,6 +10,7 @@ import { UserTrust } from './pages/UserTrust'
 import { IPAM } from './pages/IPAM'
 import { Policy } from './pages/Policy'
 import { CARotation } from './pages/CARotation'
+import { ConfigKeyRotation } from './pages/ConfigKeyRotation'
 import { Releases } from './pages/Releases'
 import { Approvals } from './pages/Approvals'
 import { Audit } from './pages/Audit'
@@ -31,6 +32,7 @@ export function App() {
           <Route path="/ipam" element={<IPAM />} />
           <Route path="/policy" element={<Policy />} />
           <Route path="/ca" element={<CARotation />} />
+          <Route path="/config-key" element={<ConfigKeyRotation />} />
           <Route path="/releases" element={<Releases />} />
           <Route path="/approvals" element={<Approvals />} />
           <Route path="/audit" element={<Audit />} />

@@ -39,7 +39,7 @@ type Params struct {
 	Layout          paths.Layout
 	RequestedName   string
 	RequestedGroups []string
-	PinnedConfigPub *ecdsa.PublicKey // the genesis config-signing key Pilot pins
+	PinnedConfigPub []*ecdsa.PublicKey // the genesis config-signing key Pilot pins
 	HTTPClient      *http.Client
 	PollTimeout     time.Duration
 	Now             func() time.Time
@@ -177,7 +177,7 @@ func (p Params) finishEnroll(ctx context.Context, pubBytes []byte, acc wire.Enro
 	}
 
 	// 6. Verify bundle against the pinned config-signing key, then the cert.
-	b, err := bundle.Verify(bundleJWS, p.PinnedConfigPub)
+	b, err := bundle.Verify(bundleJWS, bundle.TrustedSet(p.PinnedConfigPub, p.Layout.ConfigSigningTrust()))
 	if err != nil {
 		return Result{}, fmt.Errorf("enrollclient: %w", err)
 	}
@@ -197,7 +197,7 @@ func (p Params) finishEnroll(ctx context.Context, pubBytes []byte, acc wire.Enro
 type RenewParams struct {
 	CoreURL         string // Core API base URL (reached over the mesh)
 	Layout          paths.Layout
-	PinnedConfigPub *ecdsa.PublicKey
+	PinnedConfigPub []*ecdsa.PublicKey
 	HTTPClient      *http.Client
 	Now             func() time.Time
 }
@@ -250,7 +250,7 @@ func Renew(ctx context.Context, p RenewParams) (Result, error) {
 		return Result{}, err
 	}
 
-	b, err := bundle.Verify(rr.Bundle, p.PinnedConfigPub)
+	b, err := bundle.Verify(rr.Bundle, bundle.TrustedSet(p.PinnedConfigPub, p.Layout.ConfigSigningTrust()))
 	if err != nil {
 		return Result{}, fmt.Errorf("enrollclient: %w", err)
 	}
@@ -299,7 +299,7 @@ func FetchConfig(ctx context.Context, p RenewParams) (Result, error) {
 	if err := json.Unmarshal(respBody, &cr); err != nil {
 		return Result{}, err
 	}
-	b, err := bundle.Verify(cr.Bundle, p.PinnedConfigPub)
+	b, err := bundle.Verify(cr.Bundle, bundle.TrustedSet(p.PinnedConfigPub, p.Layout.ConfigSigningTrust()))
 	if err != nil {
 		return Result{}, fmt.Errorf("enrollclient: %w", err)
 	}
@@ -478,12 +478,12 @@ func (p Params) overlayIPFromCert() (string, error) {
 // bundle (the on-disk, pinned-key-verified bundle.json). ok=false when there is no prior
 // bundle or it can't be verified (a fresh host / first apply) — the anti-rollback guard
 // then fails OPEN (there is nothing to compare against).
-func (p Params) appliedBlocklistVersion(pinned *ecdsa.PublicKey) (int, bool) {
+func (p Params) appliedBlocklistVersion(pinned []*ecdsa.PublicKey) (int, bool) {
 	raw, err := os.ReadFile(p.Layout.Bundle())
 	if err != nil {
 		return 0, false
 	}
-	b, err := bundle.Verify(raw, pinned)
+	b, err := bundle.Verify(raw, bundle.TrustedSet(pinned, p.Layout.ConfigSigningTrust()))
 	if err != nil {
 		return 0, false
 	}
@@ -499,6 +499,11 @@ func (p Params) writeArtifacts(b bundle.Bundle, rawBundleJWS []byte) error {
 	}
 	// Retain the signed bundle so drift detection (M6.7) can re-assert it.
 	if err := os.WriteFile(p.Layout.Bundle(), rawBundleJWS, 0o644); err != nil {
+		return err
+	}
+	// Learn the config-signing trust set advertised in this VERIFIED bundle (M8.5) so a running
+	// pilot trusts a newly-staged key mid-run and across reboots; anti-rollback keeps it monotonic.
+	if err := bundle.PersistTrustFile(p.Layout.ConfigSigningTrust(), b.ConfigKeyVersion, b.ConfigSigningKeys); err != nil {
 		return err
 	}
 	cfg, err := bundle.RenderNebulaConfig(b, p.Layout.CABundle(), p.Layout.HostCert(), p.Layout.HostKey())
@@ -517,6 +522,11 @@ func (p Params) writeConfigArtifacts(b bundle.Bundle, rawBundleJWS []byte) error
 		return err
 	}
 	if err := os.WriteFile(p.Layout.Bundle(), rawBundleJWS, 0o644); err != nil {
+		return err
+	}
+	// Learn the config-signing trust set advertised in this VERIFIED bundle (M8.5), same as the
+	// enroll/renew apply path — a fast config refresh also carries a newly-staged key to the host.
+	if err := bundle.PersistTrustFile(p.Layout.ConfigSigningTrust(), b.ConfigKeyVersion, b.ConfigSigningKeys); err != nil {
 		return err
 	}
 	cfg, err := bundle.RenderNebulaConfig(b, p.Layout.CABundle(), p.Layout.HostCert(), p.Layout.HostKey())
@@ -590,4 +600,32 @@ func ParsePinnedConfigPub(pemBytes []byte) (*ecdsa.PublicKey, error) {
 		return nil, errors.New("enrollclient: config-signing key is not P256")
 	}
 	return jws.ParseP256PublicPoint(pub)
+}
+
+// ParsePinnedConfigPubs parses one or more concatenated config-signing public-key PEM blocks into the
+// trusted SET Pilot verifies bundles against (M8.5). The pilot's PIN file (config-signing.pub) is one
+// block; the learned keys from a rotation are unioned in by LoadTrustedConfigPubs at load time. At
+// least one valid P256 key is required (fail-closed: an empty set can verify nothing).
+func ParsePinnedConfigPubs(pemBytes []byte) ([]*ecdsa.PublicKey, error) {
+	var out []*ecdsa.PublicKey
+	rest := pemBytes
+	for len(rest) > 0 {
+		pub, r, curve, err := cert.UnmarshalPublicKeyFromPEM(rest)
+		if err != nil {
+			break // no more PEM blocks
+		}
+		if curve != cert.Curve_P256 {
+			return nil, errors.New("enrollclient: config-signing key is not P256")
+		}
+		k, err := jws.ParseP256PublicPoint(pub)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, k)
+		rest = r
+	}
+	if len(out) == 0 {
+		return nil, errors.New("enrollclient: no config-signing public key in PEM")
+	}
+	return out, nil
 }

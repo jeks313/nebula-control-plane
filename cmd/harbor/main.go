@@ -74,6 +74,8 @@ func main() {
 		cmdCAInit(os.Args[2:])
 	case "ca":
 		cmdCA(os.Args[2:])
+	case "config-key":
+		cmdConfigKey(os.Args[2:])
 	case "issue-cert":
 		cmdIssueCert(os.Args[2:])
 	case "backfill-cp-enrollment":

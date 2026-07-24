@@ -21,6 +21,7 @@ import (
 
 	"github.com/jeks313/nebula-control-plane/internal/awsattest"
 	"github.com/jeks313/nebula-control-plane/internal/bundle"
+	"github.com/jeks313/nebula-control-plane/internal/configsign"
 	"github.com/jeks313/nebula-control-plane/internal/cloudtrust"
 	"github.com/jeks313/nebula-control-plane/internal/ipam"
 	"github.com/jeks313/nebula-control-plane/internal/joinkey"
@@ -187,6 +188,9 @@ type Config struct {
 	// produced (used by lower-level tests).
 	ConfigBackend signer.Backend // config-signing key (signs bundles)
 	ConfigKeyID   string         // its kid (pinned by Pilot)
+	// ConfigSigner, if set, is the HOT-SWAPPABLE config-signing key (M8.5): a config-key cut-over
+	// re-points it with no restart. When set it supersedes ConfigBackend/ConfigKeyID (static fallback).
+	ConfigSigner *configsign.ConfigSigner
 	CABundlePEM   []byte         // CA cert PEM for the bundle's ca_bundle (static fallback)
 	// CABundleSource, if set, is consulted at bundle-build time so the CA rotation
 	// registry (M8) drives the bundle's ca_bundle live: it returns every NON-RETIRED CA
@@ -195,7 +199,17 @@ type Config struct {
 	// static CABundlePEM rather than severing trust (fail-open on availability, like
 	// BlocklistSource/LighthouseSource).
 	CABundleSource func(context.Context) ([]string, error)
-	Lighthouses   []bundle.Lighthouse
+	// ConfigKeyPEM is the current config-signing PUBLIC-key PEM: the static fallback for the bundle's
+	// config_signing_keys trust set (M8.5), used when ConfigKeySource is unset or fails.
+	ConfigKeyPEM []byte
+	// ConfigKeySource, if set, drives the bundle's config_signing_keys live from the config-key
+	// rotation registry (M8.5): every NON-RETIRED config-signing key, so a staged key is trusted
+	// fleet-wide before it ever signs. A failed/empty read falls back to ConfigKeyPEM (fail-open).
+	ConfigKeySource func(context.Context) ([]string, error)
+	// ConfigKeyVersionSource, if set, returns the config-key registry generation stamped into the
+	// bundle as ConfigKeyVersion (M8.5 anti-rollback). 0 / unset -> no version pressure.
+	ConfigKeyVersionSource func(context.Context) (int64, error)
+	Lighthouses            []bundle.Lighthouse
 	// TunDev + ListenPort are this mesh's nebula TUN device name + UDP listen port,
 	// stamped into every issued bundle so a multi-mesh host gets distinct values per
 	// mesh. Empty/zero -> the renderer's nebula1/4242 defaults (single-mesh hosts and
@@ -284,6 +298,11 @@ func New(cfg Config) *Consumer {
 // Signer exposes the enrollment signer so the process running this consumer can drive the M8.3b
 // online CA-rotation cut-over reconciler against it (the same *signer.Signer that issues certs).
 func (c *Consumer) Signer() *signer.Signer { return c.cfg.Signer }
+
+// ConfigSigner returns this consumer's hot-swappable config-signing key (M8.5), so cmd/harbor can
+// start the config-key cut-over reconciler on the SAME signer this process signs bundles with. Nil
+// when a static ConfigBackend/ConfigKeyID is used (tests / pre-M8.5 wiring).
+func (c *Consumer) ConfigSigner() *configsign.ConfigSigner { return c.cfg.ConfigSigner }
 
 // Drain claims a batch from the durable queue, processes each, and acks
 // terminal outcomes (success or a recorded business decision) while nacking
@@ -1071,9 +1090,11 @@ func (c *Consumer) buildBundle(ctx context.Context, deviceName, ip string, group
 		BundleVersion: 1,
 		IssuedAt:      c.now().UTC().Format(time.RFC3339),
 		Device:        bundle.Device{Name: deviceName, OverlayIP: ip, Groups: groups},
-		Certificate:   string(certPEM),
-		CABundle:      c.caBundle(ctx),
-		Firewall:      bundle.CompileFirewall(c.cfg.Policy, groups),
+		Certificate:       string(certPEM),
+		CABundle:          c.caBundle(ctx),
+		ConfigSigningKeys: c.configKeys(ctx),
+		ConfigKeyVersion:  c.configKeyVersion(ctx),
+		Firewall:          bundle.CompileFirewall(c.cfg.Policy, groups),
 		Lighthouses:   c.lighthouses(ctx),
 		Blocklist:     c.blocklist(ctx),
 		TunDev:        c.cfg.TunDev,
@@ -1085,6 +1106,16 @@ func (c *Consumer) buildBundle(ctx context.Context, deviceName, ip string, group
 		PilotSHA256:   pilotSHA,
 		PilotURL:      pilotURL,
 		NotAfter:      notAfter.UTC().Format(time.RFC3339),
+	}
+	return c.signBundle(b)
+}
+
+// signBundle signs b with the hot-swappable ConfigSigner (M8.5) when wired, else the static
+// ConfigBackend/ConfigKeyID (tests / pre-M8.5) — routing all signing through here lets a config-key
+// cut-over hot-swap the signing key with no restart.
+func (c *Consumer) signBundle(b bundle.Bundle) ([]byte, error) {
+	if c.cfg.ConfigSigner != nil {
+		return c.cfg.ConfigSigner.Sign(b)
 	}
 	return bundle.Sign(c.cfg.ConfigBackend, c.cfg.ConfigKeyID, b)
 }
@@ -1100,6 +1131,32 @@ func (c *Consumer) caBundle(ctx context.Context) []string {
 		}
 	}
 	return []string{string(c.cfg.CABundlePEM)}
+}
+
+// configKeys returns the fleet's trusted config-signing PUBLIC-key PEMs for a bundle (M8.5): the
+// live config-key rotation registry when a source is set (every non-retired key), else the static
+// single key. A failed/empty read falls back to ConfigKeyPEM so an enrollment never ships a bundle
+// with an empty config-key trust set (fail-open on availability, like caBundle).
+func (c *Consumer) configKeys(ctx context.Context) []string {
+	if c.cfg.ConfigKeySource != nil {
+		if ks, err := c.cfg.ConfigKeySource(ctx); err == nil && len(ks) > 0 {
+			return ks
+		}
+	}
+	if len(c.cfg.ConfigKeyPEM) > 0 {
+		return []string{string(c.cfg.ConfigKeyPEM)}
+	}
+	return nil
+}
+
+// configKeyVersion returns the config-key registry generation for a bundle (M8.5 anti-rollback), or 0.
+func (c *Consumer) configKeyVersion(ctx context.Context) int64 {
+	if c.cfg.ConfigKeyVersionSource != nil {
+		if v, err := c.cfg.ConfigKeyVersionSource(ctx); err == nil {
+			return v
+		}
+	}
+	return 0
 }
 
 // blocklist returns the fleet's active revoked-cert fingerprints for a bundle

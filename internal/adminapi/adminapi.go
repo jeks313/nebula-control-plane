@@ -293,6 +293,10 @@ func (s *Server) routeTable() []route {
 		// and per-CA trust-adoption progress (the activate gate). Actions stay break-glass CLI.
 		{"GET", "/admin/v1/ca", s.handleCAs},
 		{"GET", "/admin/v1/ca/{id}/adoption", s.handleCAAdoption},
+		// M8.5 config-signing-key rotation dashboard (read-only): the key lifecycle + key-deletion
+		// state, and per-key trust-adoption progress (the activate/drain gate). Same posture as /ca.
+		{"GET", "/admin/v1/config-key", s.handleConfigKeys},
+		{"GET", "/admin/v1/config-key/{id}/adoption", s.handleConfigKeyAdoption},
 		// Dual-control approvals (generic) + policy publish (the showcase).
 		{"GET", "/admin/v1/approvals", s.handleApprovals},
 		{"GET", "/admin/v1/approvals/{id}", s.handleApproval},

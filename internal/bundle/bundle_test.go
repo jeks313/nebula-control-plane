@@ -1,6 +1,7 @@
 package bundle
 
 import (
+	"crypto/ecdsa"
 	"strings"
 	"testing"
 
@@ -62,7 +63,7 @@ func TestSignVerifyRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sign: %v", err)
 	}
-	out, err := Verify(jwsBytes, pinned)
+	out, err := Verify(jwsBytes, []*ecdsa.PublicKey{pinned})
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
@@ -93,7 +94,7 @@ func TestSignVerifyNebulaVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sign: %v", err)
 	}
-	out, err := Verify(jwsBytes, pinned)
+	out, err := Verify(jwsBytes, []*ecdsa.PublicKey{pinned})
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
@@ -123,7 +124,7 @@ func TestSignedFirewallTamperRefused(t *testing.T) {
 	}
 
 	// Verifies intact, firewall present.
-	out, err := Verify(jwsBytes, pinned)
+	out, err := Verify(jwsBytes, []*ecdsa.PublicKey{pinned})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +136,7 @@ func TestSignedFirewallTamperRefused(t *testing.T) {
 	tampered := make([]byte, len(jwsBytes))
 	copy(tampered, jwsBytes)
 	tampered[len(tampered)/2] ^= 0x01
-	if _, err := Verify(tampered, pinned); err == nil {
+	if _, err := Verify(tampered, []*ecdsa.PublicKey{pinned}); err == nil {
 		t.Fatal("tampered bundle (incl. firewall) must be refused")
 	}
 }
@@ -157,7 +158,7 @@ func TestSignedBlocklistTamperRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := Verify(jwsBytes, pinned)
+	out, err := Verify(jwsBytes, []*ecdsa.PublicKey{pinned})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +169,7 @@ func TestSignedBlocklistTamperRefused(t *testing.T) {
 	tampered := make([]byte, len(jwsBytes))
 	copy(tampered, jwsBytes)
 	tampered[len(tampered)/2] ^= 0x01
-	if _, err := Verify(tampered, pinned); err == nil {
+	if _, err := Verify(tampered, []*ecdsa.PublicKey{pinned}); err == nil {
 		t.Fatal("tampered bundle (incl. blocklist) must be refused")
 	}
 }
@@ -237,7 +238,7 @@ func TestVerifyWrongKeyFails(t *testing.T) {
 
 	otherPub, _ := other.PublicKey()
 	pinned, _ := jws.ParseP256PublicPoint(otherPub)
-	if _, err := Verify(jwsBytes, pinned); err == nil {
+	if _, err := Verify(jwsBytes, []*ecdsa.PublicKey{pinned}); err == nil {
 		t.Fatal("verify against the wrong pinned key must fail")
 	}
 }
@@ -252,7 +253,7 @@ func TestVerifyTamperedFails(t *testing.T) {
 	tampered := make([]byte, len(jwsBytes))
 	copy(tampered, jwsBytes)
 	tampered[len(tampered)/2] ^= 0x01
-	if _, err := Verify(tampered, pinned); err == nil {
+	if _, err := Verify(tampered, []*ecdsa.PublicKey{pinned}); err == nil {
 		t.Fatal("tampered bundle must fail verification")
 	}
 }

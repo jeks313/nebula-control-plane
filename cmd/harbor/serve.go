@@ -22,6 +22,8 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/autotls"
 	"github.com/jeks313/nebula-control-plane/internal/bundle"
 	"github.com/jeks313/nebula-control-plane/internal/ca"
+	"github.com/jeks313/nebula-control-plane/internal/configkey"
+	nebulacert "github.com/slackhq/nebula/cert"
 	"github.com/jeks313/nebula-control-plane/internal/coreapi"
 	"github.com/jeks313/nebula-control-plane/internal/enrollment"
 	"github.com/jeks313/nebula-control-plane/internal/fleet"
@@ -188,6 +190,9 @@ func cmdCoreAPI(args []string) {
 		if rerr := ca.RegisterCollector(ca.NewCollector(s.DB)); rerr != nil {
 			log.Warn("core-api: registering the CA collector failed; ncp_ca_key_deletion_* metrics will be absent", "err", rerr)
 		}
+		if rerr := configkey.RegisterCollector(configkey.NewCollector(s.DB)); rerr != nil {
+			log.Warn("core-api: registering the config-key collector failed; ncp_configkey_key_deletion_* metrics will be absent", "err", rerr)
+		}
 	}
 	sg, err := signer.New(signer.Config{
 		CACertPEM: caPEM, Backend: caB,
@@ -200,6 +205,11 @@ func cmdCoreAPI(args []string) {
 		fatalf("core-api: signer: %v", err)
 	}
 	cfgPub, _ := cfgB.PublicKey()
+	// M8.5 config-key rotation: the hot-swappable config signer + the live trust source that boot-seeds
+	// the current config key and drives every bundle's config_signing_keys (+ its version for anti-rollback).
+	cfgPubPEM := nebulacert.MarshalSigningPublicKeyToPEM(nebulacert.Curve_P256, cfgPub)
+	configSigner := cf.newConfigSigner(cfgB, audit)
+	configKeysSource, configKeyVersionSource := cf.configKeyTrustSource(s, cfgPubPEM, audit)
 	// Allocator + revocation registry + central-block guard, shared by the heartbeat SELF-HEAL
 	// (repair a reaped-but-valid host) and the device reaper below — built once. The resolver-backed
 	// allocator re-claims an exact overlay IP cleanly; the registry is the live blocklist self-heal
@@ -213,6 +223,8 @@ func cmdCoreAPI(args []string) {
 	central := genesis.CentralBlock(pool)
 	api := coreapi.New(coreapi.Config{
 		Store: s, Signer: sg, ConfigBackend: cfgB, ConfigKeyID: wire.PubkeyHash(cfgPub),
+		ConfigSigner: configSigner,                                                        // M8.5: hot-swappable config-signing key
+		ConfigKeyPEM: cfgPubPEM, ConfigKeySource: configKeysSource, ConfigKeyVersionSource: configKeyVersionSource, // M8.5 trust distribution
 		CABundlePEM: caPEM, Lighthouses: parseLighthouses(*cf.lighthouse), LighthouseSource: cf.lighthouseSource(s), Policy: cf.policy(s),
 		CABundleSource:  cf.caTrustSource(s, caPEM, audit), // M8: live CA-rotation trust bundle (seeds the current CA)
 		CADrain:         cf.caDrainSource(s, audit),        // M8.3c: force-renew stragglers off a draining CA
@@ -260,6 +272,9 @@ func cmdCoreAPI(args []string) {
 	// M8.3b online CA rotation: poll for a newly-activated CA and hot-swap this Core's signer to
 	// it (fail-safe; the prior CA keeps signing on any error). Joined on shutdown via wg.
 	cf.startCACutoverReconciler(ctx, &wg, sg, s, audit, log)
+	// M8.5 online config-key rotation: poll for a newly-activated config key and hot-swap this Core's
+	// bundle signer to it (fail-safe; the prior key keeps signing on any error). Joined on wg.
+	cf.startConfigKeyCutoverReconciler(ctx, &wg, configSigner, s, audit, log)
 	// Device reaper (impl 2.12): reclaim leaked overlay IPs and prune stale heartbeats for hosts whose
 	// cert has lapsed beyond grace (it NEVER reaps a valid cert and NEVER blocklists — off-boarding is
 	// an explicit revoke). core-api holds the allocator + audit, so it owns the reaper (admin-api/
@@ -405,6 +420,9 @@ func cmdAdminAPI(args []string) {
 	var caReconcileWG sync.WaitGroup
 	if canIssue && consumer != nil {
 		cf.startCACutoverReconciler(ctx, &caReconcileWG, consumer.Signer(), s, audit, log)
+		// M8.5: same for the config-signing key — a console-approved enrollment must sign under the
+		// active config key after a cut-over, or a config-key rotation could never drain.
+		cf.startConfigKeyCutoverReconciler(ctx, &caReconcileWG, consumer.ConfigSigner(), s, audit, log)
 	}
 
 	// Bearer-token auth (A0.8) is always available for non-interactive callers

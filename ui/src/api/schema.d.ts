@@ -118,6 +118,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/admin/v1/config-key": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Config-signing-key rotation lifecycle (M8.5) for the console dashboard.
+         * @description Every config-signing key with its lifecycle state (staged/active/draining/retired) and the derived rotation signals: which one is the active signing key, which are trusted (in every signed bundle's config_signing_keys), whether it has a real signing backend (vs a trust-only import), and any pending key deletion (M8.5). Unlike a CA a config-signing key has no expiry and no per-key drain count — drain is fleet-wide (see the /adoption endpoint). Drives the console's Config-Key Rotation pane. Read-only; authenticated, no special permission. Actions stay on the break-glass CLI.
+         */
+        get: operations["listConfigKeys"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/admin/v1/config-key/{id}/adoption": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Trust-adoption progress for one config-signing key (M8.5) — the activate/drain gate.
+         * @description How many LIVE hosts have confirmed via heartbeat that they trust this config-signing key, the "trust before you sign" gate the CLI enforces before `config-key activate` cuts signing over (and, for the active key, the inverse of the drain that gates retire). Read-only.
+         */
+        get: operations["getConfigKeyAdoption"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/admin/v1/devices": {
         parameters: {
             query?: never;
@@ -894,6 +934,55 @@ export interface components {
             /** @description hosts beyond the freshness window (excluded from the gate) */
             stale: string[];
         };
+        ConfigKey: {
+            id: number;
+            name: string;
+            /** @enum {string} */
+            state: "staged" | "active" | "draining" | "retired";
+            /** @description base64url wire.PubkeyHash — also the JWS Kid (case-sensitive) */
+            fingerprint: string;
+            /** @description the current signing key */
+            is_active: boolean;
+            /** @description in the distributed trust bundle (non-retired) */
+            trusted: boolean;
+            /** @description has a real signing backend (kms_key_id set), not a trust-only import */
+            has_backend: boolean;
+            /** Format: date-time */
+            created_at?: string;
+            /** @description M8.5 pending signing-key deletion, present only when scheduled. */
+            key_deletion?: {
+                /** Format: date-time */
+                date: string;
+                /** @description negative once the deletion date has passed */
+                seconds_remaining: number;
+            };
+        };
+        ConfigKeyListResponse: {
+            config_keys: components["schemas"]["ConfigKey"][];
+            summary: {
+                total: number;
+                staged: number;
+                active: number;
+                draining: number;
+                retired: number;
+            };
+        };
+        ConfigKeyAdoption: {
+            id: number;
+            name: string;
+            fingerprint: string;
+            state: string;
+            /** @description live hosts confirming trust of this config-signing key */
+            adopted: number;
+            /** @description hosts heartbeated within the freshness window (the gate population) */
+            live: number;
+            fully_adopted: boolean;
+            percent: number;
+            /** @description live overlay IPs not yet confirming (block the gate) */
+            laggards: string[];
+            /** @description hosts beyond the freshness window (excluded from the gate) */
+            stale: string[];
+        };
         /** @enum {string} */
         Severity: "info" | "degraded" | "critical";
         Reason: {
@@ -1613,6 +1702,52 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CAAdoption"];
+                };
+            };
+            400: components["responses"]["Problem"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["Problem"];
+        };
+    };
+    listConfigKeys: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The config-signing keys + a state rollup. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConfigKeyListResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    getConfigKeyAdoption: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Adoption counts + laggards/stale hosts. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConfigKeyAdoption"];
                 };
             };
             400: components["responses"]["Problem"];

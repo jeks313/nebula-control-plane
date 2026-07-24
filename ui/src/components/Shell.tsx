@@ -15,6 +15,7 @@ const NAV = [
   { to: '/ipam', label: 'IPAM', end: false },
   { to: '/policy', label: 'Policy', end: false },
   { to: '/ca', label: 'CA Rotation', end: false },
+  { to: '/config-key', label: 'Config-Key Rotation', end: false },
   { to: '/releases', label: 'Releases', end: false },
   { to: '/approvals', label: 'Approvals', end: false },
   { to: '/audit', label: 'Audit', end: false },

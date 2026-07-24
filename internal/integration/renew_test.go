@@ -26,6 +26,8 @@ import (
 func (e enrollEnv) coreAPI() http.Handler {
 	return coreapi.New(coreapi.Config{
 		Store: e.store, Signer: e.sg, ConfigBackend: e.cfgB, ConfigKeyID: e.configKeyID,
+		ConfigSigner: e.configSigner, ConfigKeyPEM: e.cfgPubPEM, // M8.5: hot-swappable config signer, shared with enroll
+		ConfigKeySource: e.ckReg.TrustedKeys, ConfigKeyVersionSource: e.ckReg.Generation,
 		CABundlePEM: e.caPEM, Pool: e.pool, CertLifetime: 24 * time.Hour,
 		Lighthouses:     []bundle.Lighthouse{{OverlayIP: "100.64.0.1", PublicAddrs: []string{"1.2.3.4:4242"}}},
 		BlocklistSource: e.rev.ActiveFingerprints,

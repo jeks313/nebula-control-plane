@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/jeks313/nebula-control-plane/internal/bundle"
+	"github.com/jeks313/nebula-control-plane/internal/configsign"
 	"github.com/jeks313/nebula-control-plane/internal/enrollment"
 	"github.com/jeks313/nebula-control-plane/internal/ipam"
 	"github.com/jeks313/nebula-control-plane/internal/jws"
@@ -53,6 +54,7 @@ type Heartbeat struct {
 	Health                  string `gorm:"column:health"`
 	LastSeen                int64  `gorm:"column:last_seen"`
 	TrustedCAs              string `gorm:"column:trusted_cas"` // JSON array of CA fingerprints this host reported trusting (from its applied ca_bundle, M8.1)
+	TrustedConfigKeys       string `gorm:"column:trusted_config_keys"` // JSON array of config-signing key fingerprints this host trusts (applied config_signing_keys UNION pin, M8.5); CASE-SENSITIVE base64url
 }
 
 // ReleaseSource is a binary-release registry Core consults to stamp a host's per-host
@@ -83,14 +85,29 @@ type Config struct {
 	Signer        *signer.Signer
 	ConfigBackend signer.Backend
 	ConfigKeyID   string
-	CABundlePEM   []byte // static fallback for the bundle's ca_bundle
+	// ConfigSigner, if set, is the HOT-SWAPPABLE config-signing key (M8.5): a config-key cut-over
+	// re-points it with no restart, so every renew / GET /v1/config bundle is signed under the active
+	// key. When set it supersedes ConfigBackend/ConfigKeyID (which stay the static fallback for tests).
+	ConfigSigner *configsign.ConfigSigner
+	CABundlePEM  []byte // static fallback for the bundle's ca_bundle
 	// CABundleSource, if set, is consulted at bundle-build time so the CA rotation
 	// registry (M8) drives every renew / GET /v1/config bundle's ca_bundle live: it returns
 	// every NON-RETIRED CA (staged+active+draining), so a newly staged CA is trusted
 	// fleet-wide before it ever signs ("trust before you sign", design §4.6). A failed or
 	// empty read falls back to CABundlePEM (fail-open, like BlocklistSource/LighthouseSource).
 	CABundleSource func(context.Context) ([]string, error)
-	Lighthouses   []bundle.Lighthouse
+	// ConfigKeyPEM is the current config-signing PUBLIC-key PEM: the static fallback for the
+	// bundle's config_signing_keys trust set (M8.5), used when ConfigKeySource is unset or fails.
+	ConfigKeyPEM []byte
+	// ConfigKeySource, if set, is consulted at bundle-build time so the config-key rotation registry
+	// (M8.5) drives every renew / GET /v1/config bundle's config_signing_keys live: it returns every
+	// NON-RETIRED config-signing key (staged+active+draining), so a staged key is trusted fleet-wide
+	// before it ever signs. A failed/empty read falls back to ConfigKeyPEM (fail-open on availability).
+	ConfigKeySource func(context.Context) ([]string, error)
+	// ConfigKeyVersionSource, if set, returns the config-key registry generation stamped into the
+	// bundle as ConfigKeyVersion (M8.5 anti-rollback). 0 / unset -> no version pressure.
+	ConfigKeyVersionSource func(context.Context) (int64, error)
+	Lighthouses            []bundle.Lighthouse
 	// LighthouseSource, if set, is consulted at bundle-build time so registry
 	// changes (6.8) propagate live; it overrides the static Lighthouses. On error
 	// Core falls back to Lighthouses (a transient registry read must never sever
@@ -241,6 +258,43 @@ func (s *Server) caBundle(ctx context.Context) []string {
 		}
 	}
 	return []string{string(s.cfg.CABundlePEM)}
+}
+
+// configKeys returns the fleet's trusted config-signing PUBLIC-key PEMs for a bundle (M8.5): the
+// live config-key rotation registry when a source is set (every non-retired key), else the static
+// single key. A failed or empty read falls back to ConfigKeyPEM so a bundle never advertises an
+// empty config-key trust set (fail-open on availability, like caBundle).
+func (s *Server) configKeys(ctx context.Context) []string {
+	if s.cfg.ConfigKeySource != nil {
+		if ks, err := s.cfg.ConfigKeySource(ctx); err == nil && len(ks) > 0 {
+			return ks
+		}
+	}
+	if len(s.cfg.ConfigKeyPEM) > 0 {
+		return []string{string(s.cfg.ConfigKeyPEM)}
+	}
+	return nil
+}
+
+// configKeyVersion returns the config-key registry generation for a bundle (M8.5 anti-rollback), or
+// 0 when no source is wired (legacy bundles carry no version pressure).
+func (s *Server) configKeyVersion(ctx context.Context) int64 {
+	if s.cfg.ConfigKeyVersionSource != nil {
+		if v, err := s.cfg.ConfigKeyVersionSource(ctx); err == nil {
+			return v
+		}
+	}
+	return 0
+}
+
+// signBundle signs b with the hot-swappable ConfigSigner (M8.5) when wired, else the static
+// ConfigBackend/ConfigKeyID (tests / pre-M8.5). Routing all bundle signing through here is what lets
+// a config-key cut-over hot-swap the signing key with no restart.
+func (s *Server) signBundle(b bundle.Bundle) ([]byte, error) {
+	if s.cfg.ConfigSigner != nil {
+		return s.cfg.ConfigSigner.Sign(b)
+	}
+	return bundle.Sign(s.cfg.ConfigBackend, s.cfg.ConfigKeyID, b)
 }
 
 // blocklist returns the fleet's active revoked-cert fingerprints for a bundle
@@ -506,6 +560,20 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 			trustedCAs = string(b)
 		}
 	}
+	// M8.5 config-key adoption: same shape as trusted_cas, but base64url wire.PubkeyHash fingerprints
+	// are CASE-SENSITIVE, so trim+sort only (NEVER lowercase) — configkey.AdoptionStatus matches them
+	// EXACTLY. Default "[]" so a pre-M8.5 pilot omitting the field reads as not-yet-adopted (fail-closed).
+	trustedConfigKeys := "[]"
+	if len(req.TrustedConfigKeyFingerprints) > 0 {
+		fps := append([]string(nil), req.TrustedConfigKeyFingerprints...)
+		for i := range fps {
+			fps[i] = strings.TrimSpace(fps[i])
+		}
+		sort.Strings(fps)
+		if b, err := json.Marshal(fps); err == nil {
+			trustedConfigKeys = string(b)
+		}
+	}
 	hb := Heartbeat{
 		OverlayIP: dev.OverlayIP, DeviceName: dev.DeviceName,
 		PilotVersion: req.PilotVersion, NebulaVersion: req.NebulaVersion,
@@ -514,6 +582,7 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		AppliedPilotVersion: appliedPilot,
 		ClockOffsetMs:       req.ClockOffsetMs, Health: req.Health, LastSeen: s.now().UnixNano(),
 		TrustedCAs:          trustedCAs,
+		TrustedConfigKeys:   trustedConfigKeys,
 	}
 	if err := s.cfg.Store.DB.WithContext(ctx).Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "overlay_ip"}},
@@ -525,6 +594,9 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 			// only at INSERT and never updates it, so adoption freezes at each host's first
 			// beat and never converges after a CA is staged — the gate would block forever.
 			"trusted_cas",
+			// CRITICAL (M8.5): same for trusted_config_keys — a config-key cut-over/drain gate
+			// would freeze at each host's first beat without this.
+			"trusted_config_keys",
 		}),
 	}).Create(&hb).Error; err != nil {
 		wire.WriteError(w, wire.CodeInternal, "persist heartbeat failed")
@@ -792,7 +864,7 @@ func (s *Server) handleRenew(w http.ResponseWriter, r *http.Request) {
 	}
 
 	b := s.assembleBundle(ctx, dev, groups, string(certPEM), notAfter)
-	bundleJWS, err := bundle.Sign(s.cfg.ConfigBackend, s.cfg.ConfigKeyID, b)
+	bundleJWS, err := s.signBundle(b)
 	if err != nil {
 		wire.WriteError(w, wire.CodeInternal, "bundle sign failed")
 		return
@@ -901,9 +973,11 @@ func (s *Server) assembleBundle(ctx context.Context, dev enrollment.Enrollment, 
 		BlocklistVersion: s.blocklistVersion(ctx),
 		IssuedAt:         s.now().UTC().Format(time.RFC3339),
 		Device:           bundle.Device{Name: dev.DeviceName, OverlayIP: dev.OverlayIP, Groups: groups},
-		Certificate:      certPEM,
-		CABundle:         s.caBundle(ctx),
-		Firewall:         bundle.CompileFirewall(s.cfg.Policy, groups),
+		Certificate:       certPEM,
+		CABundle:          s.caBundle(ctx),
+		ConfigSigningKeys: s.configKeys(ctx),
+		ConfigKeyVersion:  s.configKeyVersion(ctx),
+		Firewall:          bundle.CompileFirewall(s.cfg.Policy, groups),
 		Lighthouses:      s.lighthouses(ctx),
 		Blocklist:        s.blocklist(ctx),
 		TunDev:           s.cfg.TunDev,
@@ -998,7 +1072,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	b := s.assembleBundle(ctx, dev, groups, string(dev.CertPEM), notAfter)
-	bundleJWS, err := bundle.Sign(s.cfg.ConfigBackend, s.cfg.ConfigKeyID, b)
+	bundleJWS, err := s.signBundle(b)
 	if err != nil {
 		wire.WriteError(w, wire.CodeInternal, "bundle sign failed")
 		return

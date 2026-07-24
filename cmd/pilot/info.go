@@ -336,11 +336,11 @@ func readBundleVersion(base, bundlePath string) int {
 	if err != nil {
 		return 0
 	}
-	pinned, err := enrollclient.ParsePinnedConfigPub(pubPEM)
+	pinned, err := enrollclient.ParsePinnedConfigPubs(pubPEM)
 	if err != nil {
 		return 0
 	}
-	b, err := bundle.Verify(raw, pinned)
+	b, err := bundle.Verify(raw, bundle.TrustedSet(pinned, paths.New(base).ConfigSigningTrust()))
 	if err != nil {
 		return 0
 	}

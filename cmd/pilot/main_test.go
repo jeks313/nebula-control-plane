@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdh"
+	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -92,15 +93,15 @@ func TestDesiredPilotResolution(t *testing.T) {
 	layout := paths.New(t.TempDir())
 
 	// Full override wins (bundle not consulted).
-	if v, s, u, warn := desiredPilot(layout.Bundle(), pinned, "9.9.9", "deadbeef", "http://x/p"); warn != nil || v != "9.9.9" || s != "deadbeef" || u != "http://x/p" {
+	if v, s, u, warn := desiredPilot(layout.Bundle(), []*ecdsa.PublicKey{pinned}, "9.9.9", "deadbeef", "http://x/p"); warn != nil || v != "9.9.9" || s != "deadbeef" || u != "http://x/p" {
 		t.Fatalf("override: %q/%q/%q warn=%v", v, s, u, warn)
 	}
 	// Partial override is ignored -> falls through to the (absent) bundle -> empty, no warn.
-	if v, s, u, warn := desiredPilot(layout.Bundle(), pinned, "9.9.9", "", ""); warn != nil || v != "" || s != "" || u != "" {
+	if v, s, u, warn := desiredPilot(layout.Bundle(), []*ecdsa.PublicKey{pinned}, "9.9.9", "", ""); warn != nil || v != "" || s != "" || u != "" {
 		t.Fatalf("partial override should be ignored: %q/%q/%q warn=%v", v, s, u, warn)
 	}
 	// Missing bundle (pre-enrollment) is normal: empty, no warn.
-	if v, s, u, warn := desiredPilot(layout.Bundle(), pinned, "", "", ""); warn != nil || v != "" || s != "" || u != "" {
+	if v, s, u, warn := desiredPilot(layout.Bundle(), []*ecdsa.PublicKey{pinned}, "", "", ""); warn != nil || v != "" || s != "" || u != "" {
 		t.Fatalf("missing bundle: %q/%q/%q warn=%v", v, s, u, warn)
 	}
 	// A bundle signed by a DIFFERENT key fails verification -> no tuple + a warn (never act
@@ -113,7 +114,7 @@ func TestDesiredPilotResolution(t *testing.T) {
 	if err := os.WriteFile(layout.Bundle(), signedOther, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if v, _, _, warn := desiredPilot(layout.Bundle(), pinned, "", "", ""); warn == nil || v != "" {
+	if v, _, _, warn := desiredPilot(layout.Bundle(), []*ecdsa.PublicKey{pinned}, "", "", ""); warn == nil || v != "" {
 		t.Fatalf("bundle signed by another key must warn + yield no tuple: warn=%v v=%q", warn, v)
 	}
 }
@@ -158,7 +159,7 @@ func TestBundleDrivenPilotSelfUpdate(t *testing.T) {
 	}
 
 	// Resolve the tuple from the verified bundle (no override).
-	ver, sha, url, warn := desiredPilot(layout.Bundle(), pinned, "", "", "")
+	ver, sha, url, warn := desiredPilot(layout.Bundle(), []*ecdsa.PublicKey{pinned}, "", "", "")
 	if warn != nil {
 		t.Fatalf("desiredPilot warn: %v", warn)
 	}

@@ -48,7 +48,7 @@ func Schedule(notBefore, notAfter time.Time, frac, jitterFrac float64, rnd *rand
 type Config struct {
 	Layout          paths.Layout
 	CoreURL         string
-	PinnedConfigPub *ecdsa.PublicKey
+	PinnedConfigPub []*ecdsa.PublicKey
 
 	// Reload triggers a hot-reload of nebula after a renewal (e.g. the
 	// supervisor's Reload). Optional.

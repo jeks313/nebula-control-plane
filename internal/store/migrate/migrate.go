@@ -62,6 +62,8 @@ var migrations = []*gormigrate.Migration{
 	sqlMigration("000034_enrollment_ca_fingerprint"),
 	sqlMigration("000035_ca_force_renew"),
 	sqlMigration("000036_ca_key_deletion"),
+	sqlMigration("000037_config_signing_keys"),
+	sqlMigration("000038_heartbeat_trusted_config_keys"),
 }
 
 // Up applies all pending migrations.

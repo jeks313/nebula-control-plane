@@ -22,7 +22,7 @@ import (
 // Config builds a Monitor.
 type Config struct {
 	Layout          paths.Layout
-	PinnedConfigPub *ecdsa.PublicKey
+	PinnedConfigPub []*ecdsa.PublicKey
 	Interval        time.Duration // sync cadence (0 -> 1m)
 	Reload          func() error  // hot-reload nebula after a revert (optional)
 	// Locker, if set, serializes the revert with the other host-state writers
@@ -81,7 +81,7 @@ func (m *Monitor) Sync(ctx context.Context) (reverted bool, err error) {
 	// The authoritative config comes only from a bundle that verifies against the
 	// pinned key — a tampered bundle file is itself ignored (and re-fetched on
 	// the next renewal).
-	b, err := bundle.Verify(raw, m.cfg.PinnedConfigPub)
+	b, err := bundle.Verify(raw, bundle.TrustedSet(m.cfg.PinnedConfigPub, m.cfg.Layout.ConfigSigningTrust()))
 	if err != nil {
 		return false, fmt.Errorf("drift: stored bundle does not verify: %w", err)
 	}

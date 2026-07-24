@@ -90,7 +90,7 @@ type Config struct {
 	// blocklist versions from the stored signed bundle (7.1b) so Core can track
 	// rollout convergence. Reporting only — the bundle is verified against the
 	// pinned key before its versions are trusted.
-	PinnedConfigPub *ecdsa.PublicKey
+	PinnedConfigPub []*ecdsa.PublicKey
 	HTTPClient      *http.Client
 	Now             func() time.Time
 	Logger          *slog.Logger
@@ -157,8 +157,19 @@ func (r *Reporter) beat(ctx context.Context) {
 	// Report which bundle/blocklist generation we're on (7.1b) so Core can drive
 	// and observe rollout convergence — read from the verified stored bundle.
 	if r.cfg.PinnedConfigPub != nil {
+		// M8.5: report the config-signing keys we ACTUALLY trust for our NEXT bundle verify = the
+		// EXACT set bundle.TrustedSet consults (permanent pin UNION the keys persisted in our trust
+		// file) — NOT the keys advertised in the last applied bundle.json. Those two can transiently
+		// diverge: writeArtifacts writes bundle.json BEFORE PersistTrustFile, so a crash / failed
+		// trust-file write between them would leave bundle.json advertising a key the trust file (and
+		// thus our verifier) does not yet trust. Reporting bundle.json's set would OVER-report adoption
+		// and let a cut-over gate pass while this host can't actually verify the new key -> stranded.
+		// Reporting the real verify set makes any trust-file lag UNDER-report (look like a laggard),
+		// which correctly blocks the cut-over until the host genuinely trusts the new key. Independent
+		// of the applied-bundle read below so it is reported even if bundle.json is missing/stale.
+		req.TrustedConfigKeyFingerprints = trustedConfigKeyFingerprints(r.cfg.PinnedConfigPub, r.cfg.Layout.ConfigSigningTrust())
 		if raw, err := os.ReadFile(r.cfg.Layout.Bundle()); err == nil {
-			if b, err := bundle.Verify(raw, r.cfg.PinnedConfigPub); err == nil {
+			if b, err := bundle.Verify(raw, bundle.TrustedSet(r.cfg.PinnedConfigPub, r.cfg.Layout.ConfigSigningTrust())); err == nil {
 				req.AppliedBundleVersion = b.BundleVersion
 				req.AppliedBlocklistVersion = b.BlocklistVersion
 				// M8.1: report which CAs we trust (from the VERIFIED applied ca_bundle) so
@@ -196,6 +207,37 @@ func trustedCAFingerprints(caPEMs []string) []string {
 			if fp, err := c.Fingerprint(); err == nil {
 				seen[fp] = struct{}{}
 			}
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(seen))
+	for fp := range seen {
+		out = append(out, fp)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// trustedConfigKeyFingerprints returns the sorted, deduped base64url wire.PubkeyHash fingerprints of
+// every config-signing key this host will actually VERIFY the next bundle against (M8.5) — i.e. the
+// exact set bundle.TrustedSet(pins, trustFilePath) yields = the permanent pin(s) UNION the keys
+// persisted in the trust file. Sourcing the report from the same place the verifier reads guarantees
+// the adoption gate can never over-count this host (a lagging trust file makes it report FEWER keys,
+// safely blocking a cut-over). The fingerprint is wire.PubkeyHash of the uncompressed P256 point (via
+// crypto/ecdh) — byte-identical to the registry fingerprint + the JWS Kid, matched CASE-SENSITIVELY by
+// Core's AdoptionStatus. Empty -> nil so the wire field omits (a pre-M8.5-shaped report).
+func trustedConfigKeyFingerprints(pins []*ecdsa.PublicKey, trustFilePath string) []string {
+	seen := map[string]struct{}{}
+	for _, k := range bundle.TrustedSet(pins, trustFilePath) {
+		if k == nil {
+			continue
+		}
+		// Re-encode to the 65-byte uncompressed point wire.PubkeyHash expects (the same encoding the
+		// config-signing key is stored + Kid'd under), via crypto/ecdh.
+		if ek, err := k.ECDH(); err == nil {
+			seen[wire.PubkeyHash(ek.Bytes())] = struct{}{}
 		}
 	}
 	if len(seen) == 0 {

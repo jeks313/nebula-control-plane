@@ -3,6 +3,7 @@ package nebulaupdate_test
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
@@ -65,7 +66,7 @@ func TestSyncInstallsAndIsIdempotent(t *testing.T) {
 
 	restarts := 0
 	m := nebulaupdate.New(nebulaupdate.Config{
-		Layout: layout, PinnedConfigPub: pinned, NebulaPath: nebPath,
+		Layout: layout, PinnedConfigPub: []*ecdsa.PublicKey{pinned}, NebulaPath: nebPath,
 		Restart: func() error { restarts++; return nil }, HTTPClient: srv.Client(),
 	})
 
@@ -108,14 +109,14 @@ func TestSyncKeepsLastGood(t *testing.T) {
 	pinned, _ := jws.ParseP256PublicPoint(pub)
 
 	writeBundle(t, be, layout, "1.0.0", sha256hex(v1), srv1.URL+"/n")
-	m := nebulaupdate.New(nebulaupdate.Config{Layout: layout, PinnedConfigPub: pinned, NebulaPath: nebPath, HTTPClient: srv1.Client()})
+	m := nebulaupdate.New(nebulaupdate.Config{Layout: layout, PinnedConfigPub: []*ecdsa.PublicKey{pinned}, NebulaPath: nebPath, HTTPClient: srv1.Client()})
 	if _, err := m.Sync(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 
 	// Roll to v2; the previous binary must be kept as <path>.last-good.
 	writeBundle(t, be, layout, "2.0.0", sha256hex(v2), srv2.URL+"/n")
-	m2 := nebulaupdate.New(nebulaupdate.Config{Layout: layout, PinnedConfigPub: pinned, NebulaPath: nebPath, HTTPClient: srv2.Client()})
+	m2 := nebulaupdate.New(nebulaupdate.Config{Layout: layout, PinnedConfigPub: []*ecdsa.PublicKey{pinned}, NebulaPath: nebPath, HTTPClient: srv2.Client()})
 	if updated, err := m2.Sync(context.Background()); err != nil || !updated {
 		t.Fatalf("v2 sync: updated=%v err=%v", updated, err)
 	}
@@ -149,7 +150,7 @@ func TestSyncRevertsWhenNewBinaryFailsToComeUp(t *testing.T) {
 	restarts := 0
 	healthy := true // v1 comes up fine; v2 will be made to fail
 	m := nebulaupdate.New(nebulaupdate.Config{
-		Layout: layout, PinnedConfigPub: pinned, NebulaPath: nebPath,
+		Layout: layout, PinnedConfigPub: []*ecdsa.PublicKey{pinned}, NebulaPath: nebPath,
 		Restart:    func() error { restarts++; return nil },
 		Healthy:    func(context.Context, time.Time) bool { return healthy },
 		HTTPClient: srv1.Client(),
@@ -213,7 +214,7 @@ func TestSyncFirstInstallFailureDoesNotBrickOrLoop(t *testing.T) {
 
 	restarts := 0
 	m := nebulaupdate.New(nebulaupdate.Config{
-		Layout: layout, PinnedConfigPub: pinned, NebulaPath: nebPath,
+		Layout: layout, PinnedConfigPub: []*ecdsa.PublicKey{pinned}, NebulaPath: nebPath,
 		Restart:    func() error { restarts++; return nil },
 		Healthy:    func(context.Context, time.Time) bool { return false }, // first binary never comes up
 		HTTPClient: srv.Client(),
@@ -266,7 +267,7 @@ func TestSyncCtxCancelDuringGateSkipsRevert(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	gateHealthy := true
 	m := nebulaupdate.New(nebulaupdate.Config{
-		Layout: layout, PinnedConfigPub: pinned, NebulaPath: nebPath,
+		Layout: layout, PinnedConfigPub: []*ecdsa.PublicKey{pinned}, NebulaPath: nebPath,
 		Restart: func() error { restarts++; return nil },
 		Healthy: func(c context.Context, _ time.Time) bool {
 			if gateHealthy {
@@ -312,7 +313,7 @@ func TestSyncShaMismatchRefused(t *testing.T) {
 	// Pin a sha the served bytes won't match.
 	writeBundle(t, be, layout, "9.9.9", hex.EncodeToString(make([]byte, 32)), srv.URL+"/n")
 
-	m := nebulaupdate.New(nebulaupdate.Config{Layout: layout, PinnedConfigPub: pinned, NebulaPath: nebPath, HTTPClient: srv.Client()})
+	m := nebulaupdate.New(nebulaupdate.Config{Layout: layout, PinnedConfigPub: []*ecdsa.PublicKey{pinned}, NebulaPath: nebPath, HTTPClient: srv.Client()})
 	updated, err := m.Sync(context.Background())
 	if err == nil {
 		t.Fatal("want a sha-mismatch error")
@@ -333,7 +334,7 @@ func TestSyncNoPinnedVersionNoop(t *testing.T) {
 	pinned, _ := jws.ParseP256PublicPoint(pub)
 	writeBundle(t, be, layout, "", "", "") // no nebula fields
 
-	m := nebulaupdate.New(nebulaupdate.Config{Layout: layout, PinnedConfigPub: pinned, NebulaPath: filepath.Join(dir, "nebula")})
+	m := nebulaupdate.New(nebulaupdate.Config{Layout: layout, PinnedConfigPub: []*ecdsa.PublicKey{pinned}, NebulaPath: filepath.Join(dir, "nebula")})
 	if updated, err := m.Sync(context.Background()); err != nil || updated {
 		t.Fatalf("no pinned version must be a no-op: updated=%v err=%v", updated, err)
 	}

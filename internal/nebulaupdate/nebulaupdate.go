@@ -38,7 +38,7 @@ const defaultMaxBytes = 128 << 20
 // Config builds a Manager.
 type Config struct {
 	Layout          paths.Layout
-	PinnedConfigPub *ecdsa.PublicKey // verifies the bundle the desired version comes from
+	PinnedConfigPub []*ecdsa.PublicKey // verifies the bundle the desired version comes from (trusted set, M8.5)
 	NebulaPath      string           // the binary the supervisor execs
 	Restart         func() error     // supervised stop+start after a swap (optional)
 	// Healthy, if set, is the pilot-local rollback gate (ADR 0003 Phase 1c): after a
@@ -204,7 +204,7 @@ func (m *Manager) desired() (desiredVer, bool) {
 	if err != nil {
 		return desiredVer{}, false
 	}
-	b, err := bundle.Verify(raw, m.cfg.PinnedConfigPub)
+	b, err := bundle.Verify(raw, bundle.TrustedSet(m.cfg.PinnedConfigPub, m.cfg.Layout.ConfigSigningTrust()))
 	if err != nil {
 		return desiredVer{}, false
 	}

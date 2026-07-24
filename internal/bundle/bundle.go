@@ -55,7 +55,21 @@ type Bundle struct {
 	Device           Device          `json:"device"`
 	Certificate      string          `json:"certificate"` // leaf cert PEM
 	CABundle         []string        `json:"ca_bundle"`   // CA cert PEM(s)
-	Firewall         *Firewall       `json:"firewall,omitempty"`
+	// ConfigSigningKeys is the fleet's TRUSTED set of config-signing PUBLIC-key PEMs (M8.5,
+	// design §4.6/§4.8). Pilot verifies this bundle against ANY key in its trusted set = its
+	// permanent pin UNION these; sourced live from the config-key rotation registry (every
+	// NON-RETIRED key) so a STAGED key is trusted fleet-wide before it ever signs ("trust before
+	// you sign"). Sorted for byte-stable output; omitempty keeps legacy bundles unaffected (a pilot
+	// that sees none falls back to its single pinned key). The config-signing key is the ROOT that
+	// verifies this bundle (unlike ca_bundle, a MEMBER), so a premature cut-over fails CLOSED —
+	// which is why a cut-over is gated on 100% fleet adoption of the staged key.
+	ConfigSigningKeys []string `json:"config_signing_keys,omitempty"`
+	// ConfigKeyVersion is the config-key registry generation this bundle reflects (M8.5), its own
+	// axis (like BlocklistVersion). Pilot uses it to fail-SAFE against a replayed OLD bundle
+	// regressing its learned trusted set: it adopts the set only from a bundle at least as new as
+	// the last it applied (the permanent pin is always present + exempt from the guard).
+	ConfigKeyVersion int64     `json:"config_key_version,omitempty"`
+	Firewall         *Firewall `json:"firewall,omitempty"`
 	Config           json.RawMessage `json:"config,omitempty"`
 	Lighthouses      []Lighthouse    `json:"lighthouses"`
 	// Blocklist is the fleet's revoked cert fingerprints (hex sha256), rendered
@@ -155,15 +169,19 @@ func Sign(signer jws.DigestSigner, keyID string, b Bundle) ([]byte, error) {
 	return json.Marshal(env)
 }
 
-// Verify checks a bundle JWS against the pinned config-signing public key and
-// returns the payload. This is Pilot's gate (spec §6, step 1): nothing inside is
-// trusted until the bundle signature verifies against a pinned key.
-func Verify(jwsBytes []byte, pinned *ecdsa.PublicKey) (Bundle, error) {
+// Verify checks a bundle JWS against the pilot's TRUSTED SET of config-signing public keys and
+// returns the payload. This is Pilot's gate (spec §6, step 1): nothing inside is trusted until the
+// bundle signature verifies against a trusted key. The set is Pilot's permanent pin UNION the keys
+// carried in its last verified bundle's config_signing_keys (M8.5), so a bundle signed by the old OR
+// the new config-signing key verifies across a K1->K2 rotation with no rejection. Fail-closed: an
+// empty set, or a signature by a non-trusted key, is rejected — as is a tampered payload, since the
+// signature covers config_signing_keys itself (no bootstrap-trust from the payload).
+func Verify(jwsBytes []byte, trusted []*ecdsa.PublicKey) (Bundle, error) {
 	var env jws.Flattened
 	if err := json.Unmarshal(jwsBytes, &env); err != nil {
 		return Bundle{}, fmt.Errorf("bundle: not a JWS: %w", err)
 	}
-	hdr, payload, err := jws.Verify(env, pinned)
+	hdr, payload, err := jws.VerifyAny(env, trusted)
 	if err != nil {
 		return Bundle{}, fmt.Errorf("bundle: signature: %w", err)
 	}

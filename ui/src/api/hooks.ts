@@ -30,6 +30,10 @@ export type CA = components['schemas']['CA']
 export type CAListResponse = components['schemas']['CAListResponse']
 export type CAAdoption = components['schemas']['CAAdoption']
 
+export type ConfigKey = components['schemas']['ConfigKey']
+export type ConfigKeyListResponse = components['schemas']['ConfigKeyListResponse']
+export type ConfigKeyAdoption = components['schemas']['ConfigKeyAdoption']
+
 export type EnrollmentStatus = 'pending' | 'issued' | 'denied'
 
 // unwrap (client.ts) parses problem+json into a typed ApiError; a 401 is left to the
@@ -97,6 +101,29 @@ export function useCAAdoption(id: number | null) {
   return useQuery({
     queryKey: ['ca-adoption', id],
     queryFn: () => unwrap(api.GET('/admin/v1/ca/{id}/adoption', { params: { path: { id: id as number } } })),
+    enabled: id != null,
+    refetchInterval: 15_000,
+  })
+}
+
+// useConfigKeys — the M8.5 config-signing-key rotation lifecycle (states, active/trusted, backend,
+// key-deletion) for the Config-Key Rotation dashboard. Polled so a live rotation (adoption /
+// key-deletion countdown) stays fresh without a manual refresh.
+export function useConfigKeys() {
+  return useQuery({
+    queryKey: ['config-key'],
+    queryFn: () => unwrap(api.GET('/admin/v1/config-key')),
+    refetchInterval: 15_000,
+  })
+}
+
+// useConfigKeyAdoption — per-key trust-adoption progress (the "trust before you sign" gate the CLI
+// enforces before `config-key activate`). Enabled only when an id is given, so the page fetches it
+// just for the staged key an operator is watching toward 100%.
+export function useConfigKeyAdoption(id: number | null) {
+  return useQuery({
+    queryKey: ['config-key-adoption', id],
+    queryFn: () => unwrap(api.GET('/admin/v1/config-key/{id}/adoption', { params: { path: { id: id as number } } })),
     enabled: id != null,
     refetchInterval: 15_000,
   })

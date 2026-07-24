@@ -108,6 +108,44 @@ paths:
         "400": { $ref: "#/components/responses/Problem" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404": { $ref: "#/components/responses/Problem" }
+  /admin/v1/config-key:
+    get:
+      summary: Config-signing-key rotation lifecycle (M8.5) for the console dashboard.
+      description: >-
+        Every config-signing key with its lifecycle state (staged/active/draining/retired) and the
+        derived rotation signals: which one is the active signing key, which are trusted (in every
+        signed bundle's config_signing_keys), whether it has a real signing backend (vs a trust-only
+        import), and any pending key deletion (M8.5). Unlike a CA a config-signing key has no expiry
+        and no per-key drain count — drain is fleet-wide (see the /adoption endpoint). Drives the
+        console's Config-Key Rotation pane. Read-only; authenticated, no special permission. Actions
+        stay on the break-glass CLI.
+      operationId: listConfigKeys
+      responses:
+        "200":
+          description: The config-signing keys + a state rollup.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConfigKeyListResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /admin/v1/config-key/{id}/adoption:
+    get:
+      summary: Trust-adoption progress for one config-signing key (M8.5) — the activate/drain gate.
+      description: >-
+        How many LIVE hosts have confirmed via heartbeat that they trust this config-signing key, the
+        "trust before you sign" gate the CLI enforces before `config-key activate` cuts signing over
+        (and, for the active key, the inverse of the drain that gates retire). Read-only.
+      operationId: getConfigKeyAdoption
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200":
+          description: Adoption counts + laggards/stale hosts.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConfigKeyAdoption" }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/Problem" }
   /admin/v1/devices:
     get:
       summary: Device inventory (from heartbeats), keyset-paginated on overlay_ip.
@@ -1032,6 +1070,53 @@ components:
         fingerprint: { type: string }
         state: { type: string }
         adopted: { type: integer, description: "live hosts confirming trust of this CA" }
+        live: { type: integer, description: "hosts heartbeated within the freshness window (the gate population)" }
+        fully_adopted: { type: boolean }
+        percent: { type: number }
+        laggards: { type: array, items: { type: string }, description: "live overlay IPs not yet confirming (block the gate)" }
+        stale: { type: array, items: { type: string }, description: "hosts beyond the freshness window (excluded from the gate)" }
+    ConfigKey:
+      type: object
+      required: [id, name, state, fingerprint, is_active, trusted, has_backend]
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        state: { type: string, enum: [staged, active, draining, retired] }
+        fingerprint: { type: string, description: "base64url wire.PubkeyHash — also the JWS Kid (case-sensitive)" }
+        is_active: { type: boolean, description: "the current signing key" }
+        trusted: { type: boolean, description: "in the distributed trust bundle (non-retired)" }
+        has_backend: { type: boolean, description: "has a real signing backend (kms_key_id set), not a trust-only import" }
+        created_at: { type: string, format: date-time }
+        key_deletion:
+          type: object
+          description: "M8.5 pending signing-key deletion, present only when scheduled."
+          required: [date, seconds_remaining]
+          properties:
+            date: { type: string, format: date-time }
+            seconds_remaining: { type: integer, description: "negative once the deletion date has passed" }
+    ConfigKeyListResponse:
+      type: object
+      required: [config_keys, summary]
+      properties:
+        config_keys: { type: array, items: { $ref: "#/components/schemas/ConfigKey" } }
+        summary:
+          type: object
+          required: [total, staged, active, draining, retired]
+          properties:
+            total: { type: integer }
+            staged: { type: integer }
+            active: { type: integer }
+            draining: { type: integer }
+            retired: { type: integer }
+    ConfigKeyAdoption:
+      type: object
+      required: [id, name, fingerprint, state, adopted, live, fully_adopted, percent, laggards, stale]
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        fingerprint: { type: string }
+        state: { type: string }
+        adopted: { type: integer, description: "live hosts confirming trust of this config-signing key" }
         live: { type: integer, description: "hosts heartbeated within the freshness window (the gate population)" }
         fully_adopted: { type: boolean }
         percent: { type: number }
