@@ -148,7 +148,8 @@ NOT handled by the script — do these manually when the change needs them:
 
 **Milestone track: M0–M4 + M6 complete; M5 PARTIAL; M7 is the frontier (7.1 done · 7.2 engine+CLI
 built, no console · 7.3 partial · 7.4 blocked on M9 OIDC); M8 (CA rotation) is the ACTIVE milestone
-(slice 1 + 8.1 + 8.3a-c + 8.4 retirement-local built; 8.4 KMS drill + 8.5 config-key rotation next); M9/M10
+(slice 1 + 8.1 + 8.3a-c + 8.4 retirement-local built and **DEPLOYED to the POC 2026-07-23 @
+`v0.1.3-62-g08ee74a`**; 8.4 KMS drill + 8.5 config-key rotation next); M9/M10
 PARTIAL. Development forked off the linear track into ADR-driven parallel streams — ADRs 0003–0011
 have all shipped or are code-complete (per-ADR built-state below).** A live demo (terraform apply + bootstrap-genesis.sh) can
 run now on the real off-mesh topology. Schema ceiling on disk is **000036** (next free: **000037**;
@@ -376,6 +377,18 @@ The linear track forked into ADR streams. Net state (✅ built · ◐ code-compl
   late; `startCACutoverReconciler` now does one **eager synchronous reconcile before serving** so a restart with a
   stale `-ca-cert` argv doesn't sign under a since-retired CA for ~30s. Regression tests added
   (`TestLiveDependentsUsesHeartbeatExpiry` + updated `TestForceRenewStragglerGating`).
+  ✅ **DEPLOYED to the live POC — 2026-07-23, `v0.1.3-62-g08ee74a`.** All of M8 (slice 1 → 8.4 local
+  slice + dashboard + the remediation above) went live on `ncp-harbor`. The 2026-07-22 deploy was
+  interrupted by a power loss before it reached the box; recovered next session. The box had been on
+  `v0.1.3-37-ge95f963` (2026-07-09) — ~25 commits back, missing ALL of M8 — so this was a **5-migration
+  jump (`000032`→`000036`)**, applied in the correct order: `migrate up` with the new binary FIRST (old
+  units still serving), THEN `deploy-harbor.sh --skip-build` (swap + unit recreate). A straight
+  `--skip-build` alone would have booted the new binary against a schema with no `ca_certs` table →
+  outage; the migrate-before-swap rule matters most on a multi-migration jump. Verified live: `harbor ca
+  list` shows the genesis CA `harbor-ca` `active` with `LIVE-DEPS=9`, the M8.3b cut-over reconciler
+  logs "started", all three units active `NRestarts=0`. (Recovery also surfaced + fixed a
+  `deploy-harbor.sh` bug where a trailing `rm -f` masked the remote exit code → false "deploy OK",
+  now fixed to propagate the inner exit code.)
   **Still open:** 8.5 config-signing-key rotation (same overlap mechanism), 8.6 emergency path, 8.7 staging drill.
   *(The scheduled lighthouse-cert rotation above is 6.8-adjacent, NOT M8 CA rotation.)*
 - **M9 — hardening & operations: PARTIAL (delivered via ADR 0007, not per-step ticks).** The poc IS the
