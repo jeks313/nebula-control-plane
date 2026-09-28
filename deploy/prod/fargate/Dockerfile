@@ -7,7 +7,7 @@
 #
 # Build via deploy/prod/fargate/build-push.sh (it stages the static `gateway` binary here).
 # TODO (ADR 0006 Phase 3): pin this base by @sha256 digest for reproducible builds.
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 COPY gateway /gateway
 EXPOSE 8443 9443
 ENTRYPOINT ["/gateway"]
