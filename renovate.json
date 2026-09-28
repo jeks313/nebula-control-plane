@@ -24,6 +24,13 @@
         "typescript"
       ],
       "allowedVersions": "<6"
+    },
+    {
+      "description": "slackhq/nebula 1.11 changed its public-key PEM banners: with it, internal/configkey rejects config-signing keys and TestFullRotationDrillBothRoots fails (found 2026-09-28 on PR #20). Trust-critical parsing, so the move to 1.11 is a deliberate migration, not a bump. Hold <1.11 until then.",
+      "matchPackageNames": [
+        "github.com/slackhq/nebula"
+      ],
+      "allowedVersions": "<1.11"
     }
   ],
   "npmrc": "allow-remote=all"
