@@ -1,0 +1,11 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["local>jeks313/system-config//renovate/default"],
+  "packageRules": [
+    {
+      "description": "Security-critical (SAML, crypto, CA, enrollment) and deployed to AWS by a manual procedure: Renovate proposes, a person merges. Nothing automerges here.",
+      "matchPackageNames": ["*"],
+      "automerge": false
+    }
+  ]
+}
