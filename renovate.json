@@ -1,11 +1,30 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["local>jeks313/system-config//renovate/default"],
+  "extends": [
+    "local>jeks313/system-config//renovate/default"
+  ],
   "packageRules": [
     {
       "description": "Security-critical (SAML, crypto, CA, enrollment) and deployed to AWS by a manual procedure: Renovate proposes, a person merges. Nothing automerges here.",
-      "matchPackageNames": ["*"],
+      "matchPackageNames": [
+        "*"
+      ],
       "automerge": false
+    },
+    {
+      "description": "crypto11 v1.6.8 renamed its module to github.com/eclipse-keypont/crypto11, so it is not a version bump: moving means changing the import path, deliberately. Hold the old path until then.",
+      "matchPackageNames": [
+        "github.com/ThalesGroup/crypto11"
+      ],
+      "allowedVersions": "<1.6.8"
+    },
+    {
+      "description": "openapi-typescript 7.x peers typescript ^5; TypeScript 7 cannot resolve until it supports it.",
+      "matchPackageNames": [
+        "typescript"
+      ],
+      "allowedVersions": "<6"
     }
-  ]
+  ],
+  "npmrc": "allow-remote=all"
 }
