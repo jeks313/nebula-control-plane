@@ -31,6 +31,14 @@
         "github.com/slackhq/nebula"
       ],
       "allowedVersions": "<1.11"
+    },
+    {
+      "description": "The pure-Go SQLite stack under gorm (glebarez/go-sqlite 1.21.2 -> 1.23.0, modernc.org/sqlite 1.52 -> 1.59) changes insert NULL handling: TestPolicyDiffBlastTruncation fails with NOT NULL constraint failed: enrollments.pubkey (found 2026-09-28 on PR #20). Held until it is looked at together with the glebarez/sqlite driver.",
+      "matchPackageNames": [
+        "github.com/glebarez/go-sqlite",
+        "modernc.org/**"
+      ],
+      "enabled": false
     }
   ],
   "npmrc": "allow-remote=all"
