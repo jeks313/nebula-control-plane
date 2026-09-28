@@ -9,7 +9,7 @@
 # are the floor.
 services:
   prometheus:
-    image: docker.io/prom/prometheus:v3.1.0
+    image: docker.io/prom/prometheus:v3.14.0@sha256:5ce7540c3c00ef4ab0c9d2c995c6a5b9c421f44b4a115d97a2c7af3b1c21cbb0
     restart: unless-stopped
     command:
       - --config.file=/etc/prometheus/prometheus.yml
@@ -24,7 +24,7 @@ services:
       - "9090:9090"
 
   alertmanager:
-    image: docker.io/prom/alertmanager:v0.28.0
+    image: docker.io/prom/alertmanager:v0.34.1@sha256:e9733bafb1bdef9b00e25a21f8f99dc26a22224bf16641ad754d1649f4c3357a
     restart: unless-stopped
     command:
       - --config.file=/etc/alertmanager/alertmanager.yml
@@ -65,7 +65,7 @@ services:
   # the node's :9100 (Prometheus scrapes it at the node's private IP). Closes the "monitoring
   # node is self-blind" gap from the coverage audit.
   node-exporter:
-    image: docker.io/prom/node-exporter:v1.8.2
+    image: docker.io/prom/node-exporter:v1.12.1@sha256:1b4e4438faca4dd7e001dd445d161a4a2091b0fededa84093b3a8dfeae1f1be0
     restart: unless-stopped
     network_mode: host
     pid: host
