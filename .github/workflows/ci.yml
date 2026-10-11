@@ -1,0 +1,50 @@
+name: ci
+
+# Renovate merges its own non-major PRs only when this is green, so it has to
+# cover what ships: the Go binaries and the console SPA embedded in harbor.
+# Merging is not deploying: harbor and the gateway still go out by hand.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          # Explicit, not go-version-file: Renovate never bumps go.mod's go
+          # directive, and govulncheck flags an old stdlib.
+          go-version: '1.27.2'
+      - run: go vet ./...
+      - run: go test ./...
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: '1.27.2'
+      - run: npm ci
+        working-directory: ui
+      - run: npm run typecheck
+        working-directory: ui
+      - run: npm test
+        working-directory: ui
+      - run: npm run build
+        working-directory: ui
+      - name: harbor with the console embedded
+        run: go build -tags ui -o /dev/null ./cmd/harbor

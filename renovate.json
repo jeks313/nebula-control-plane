@@ -5,9 +5,9 @@
   ],
   "packageRules": [
     {
-      "description": "Security-critical (SAML, crypto, CA, enrollment) and deployed to AWS by a manual procedure: Renovate proposes, a person merges. Nothing automerges here.",
-      "matchPackageNames": [
-        "*"
+      "description": "Non-major updates automerge once CI (.github/workflows/ci.yml: go vet/test/govulncheck, UI typecheck/test/build, harbor -tags ui) is green, as in every other repo. Merging is not deploying: harbor and the gateway still reach AWS only through the manual deploy procedure. Majors stay for a person (shared preset).",
+      "matchUpdateTypes": [
+        "major"
       ],
       "automerge": false
     },
