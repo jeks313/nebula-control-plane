@@ -257,12 +257,13 @@ func (s *Supervisor) setAdopted(pid int) {
 // after GracePeriod, and waits for it to be reaped.
 func (s *Supervisor) stop(cmd *exec.Cmd, done <-chan error) {
 	_ = terminate(cmd)
+	// The exit status is ours (we sent the signal); only the reaping matters.
 	select {
-	case <-done:
+	case <-done: //nolint:errcheck // exit status of a process we are stopping
 	case <-time.After(s.GracePeriod):
 		s.Logger.Warn("grace period elapsed; killing nebula")
 		_ = forceKill(cmd)
-		<-done
+		<-done //nolint:errcheck // exit status of a process we killed
 	}
 }
 
