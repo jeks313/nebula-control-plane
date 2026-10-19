@@ -103,15 +103,26 @@ func OpenDurable(cfg DurableConfig) (*Durable, error) {
 		return nil, err
 	}
 	sqlDB.SetMaxOpenConns(1)
-	if err := db.AutoMigrate(&item{}, &result{}); err != nil {
-		// Several processes share one local queue file (gateway + worker + admin in
-		// the co-located deploy), and GORM's AutoMigrate isn't cross-process atomic:
-		// two openers can both pass the HasTable check and race the CREATE, so the
-		// loser sees "table already exists". That race is benign — tolerate it once
-		// the tables are actually present; only fail if they're genuinely missing.
-		if !db.Migrator().HasTable(&item{}) || !db.Migrator().HasTable(&result{}) {
-			return nil, fmt.Errorf("queue: migrate: %w", err)
+	// Several processes share one local queue file (gateway + worker + admin in
+	// the co-located deploy), and GORM's AutoMigrate isn't cross-process atomic:
+	// two openers can both pass the HasTable check and race the CREATE, so the
+	// loser sees "table already exists". That race is benign, but the loser's
+	// AutoMigrate stops at the first table, possibly before the winner has
+	// created the second. So retry: each pass finds more already in place, and
+	// only fail if the tables are still missing after that.
+	var merr error
+	for attempt := 0; attempt < 5; attempt++ {
+		if merr = db.AutoMigrate(&item{}, &result{}); merr == nil {
+			break
 		}
+		if db.Migrator().HasTable(&item{}) && db.Migrator().HasTable(&result{}) {
+			merr = nil
+			break
+		}
+		time.Sleep(time.Duration(attempt+1) * 20 * time.Millisecond)
+	}
+	if merr != nil {
+		return nil, fmt.Errorf("queue: migrate: %w", merr)
 	}
 	d := &Durable{db: db, key: cfg.Key, maxDepth: cfg.MaxDepth, maxAttempts: cfg.MaxAttempts, now: time.Now}
 	if d.maxDepth <= 0 {
