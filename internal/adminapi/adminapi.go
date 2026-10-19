@@ -498,7 +498,7 @@ type Device struct {
 	// same definition the fleet dashboard and the `condition=stale` filter use. Health is
 	// the host's LAST self-report, so a long-silent host would otherwise still read "ok";
 	// Stale tells the UI that its reported health is no longer current.
-	Stale                bool   `json:"stale,omitempty"`
+	Stale bool `json:"stale,omitempty"`
 	// Provenance — how the host joined, from its authoritative (latest issued)
 	// enrollment. Cloud-attested hosts carry the attestation evidence; token-enrolled
 	// hosts carry the join-key name. Groups are the groups the host was issued.

@@ -531,11 +531,11 @@ func RecordControlPlaneEnrollment(ctx context.Context, db *gorm.DB, fingerprint 
 		// default to 0 == 0 (not pending). (ADR 0013 / group-reassignment plan P1.2.)
 		"desired_groups": string(groupsJSON),
 		"status":         "issued",
-		"cert_pem":      certPEM,
-		"overlay_ip":    overlayIP,
-		"fingerprint":   fp,
-		"created_at":    ts,
-		"decided_at":    ts,
+		"cert_pem":       certPEM,
+		"overlay_ip":     overlayIP,
+		"fingerprint":    fp,
+		"created_at":     ts,
+		"decided_at":     ts,
 	}).Error
 }
 

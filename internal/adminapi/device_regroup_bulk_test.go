@@ -54,10 +54,10 @@ func staleDevice(t *testing.T, db *gorm.DB, ip, name, groups string) {
 // no-op hosts, and flags dual-control when the change elevates.
 func TestRegroupDryRun(t *testing.T) {
 	s, h := newServer(t)
-	liveDevice(t, s.DB, "10.44.0.10", "db-1", `["laptops"]`)             // add prod -> elevation entry
-	liveDevice(t, s.DB, "10.44.0.11", "db-2", `["laptops","prod"]`)      // already has prod -> no_op
-	liveDevice(t, s.DB, "10.44.0.12", "db-cp", `["control-plane"]`)      // reserved -> skip
-	staleDevice(t, s.DB, "10.44.0.13", "db-stale", `["laptops"]`)        // old heartbeat -> stale
+	liveDevice(t, s.DB, "10.44.0.10", "db-1", `["laptops"]`)        // add prod -> elevation entry
+	liveDevice(t, s.DB, "10.44.0.11", "db-2", `["laptops","prod"]`) // already has prod -> no_op
+	liveDevice(t, s.DB, "10.44.0.12", "db-cp", `["control-plane"]`) // reserved -> skip
+	staleDevice(t, s.DB, "10.44.0.13", "db-stale", `["laptops"]`)   // old heartbeat -> stale
 
 	rr := postJSON(t, h, "/admin/v1/devices/regroup?dry_run=true", "alice", `{"name_pattern":"db-*","add":["prod"]}`)
 	if rr.Code != http.StatusOK {
@@ -152,8 +152,8 @@ func TestRegroupMatch(t *testing.T) {
 	s, h := newServer(t)
 	liveDevice(t, s.DB, "10.44.0.40", "node-1", `["laptops"]`)
 	liveDevice(t, s.DB, "10.44.0.41", "node-2", `["laptops"]`)
-	liveDevice(t, s.DB, "10.44.0.42", "node-cp", `["control-plane"]`)  // reserved -> ineligible
-	staleDevice(t, s.DB, "10.44.0.43", "node-stale", `["laptops"]`)    // old heartbeat -> stale
+	liveDevice(t, s.DB, "10.44.0.42", "node-cp", `["control-plane"]`) // reserved -> ineligible
+	staleDevice(t, s.DB, "10.44.0.43", "node-stale", `["laptops"]`)   // old heartbeat -> stale
 
 	get := func(t *testing.T, url string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest("GET", url, nil)

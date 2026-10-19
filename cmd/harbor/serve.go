@@ -23,7 +23,6 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/bundle"
 	"github.com/jeks313/nebula-control-plane/internal/ca"
 	"github.com/jeks313/nebula-control-plane/internal/configkey"
-	nebulacert "github.com/slackhq/nebula/cert"
 	"github.com/jeks313/nebula-control-plane/internal/coreapi"
 	"github.com/jeks313/nebula-control-plane/internal/enrollment"
 	"github.com/jeks313/nebula-control-plane/internal/fleet"
@@ -41,6 +40,7 @@ import (
 	"github.com/jeks313/nebula-control-plane/internal/rollout"
 	"github.com/jeks313/nebula-control-plane/internal/signer"
 	"github.com/jeks313/nebula-control-plane/internal/wire"
+	nebulacert "github.com/slackhq/nebula/cert"
 )
 
 // Harbor long-running services: the mesh-only core-api + admin console commands (split from main.go).
@@ -223,7 +223,7 @@ func cmdCoreAPI(args []string) {
 	central := genesis.CentralBlock(pool)
 	api := coreapi.New(coreapi.Config{
 		Store: s, Signer: sg, ConfigBackend: cfgB, ConfigKeyID: wire.PubkeyHash(cfgPub),
-		ConfigSigner: configSigner,                                                        // M8.5: hot-swappable config-signing key
+		ConfigSigner: configSigner,                                                                                 // M8.5: hot-swappable config-signing key
 		ConfigKeyPEM: cfgPubPEM, ConfigKeySource: configKeysSource, ConfigKeyVersionSource: configKeyVersionSource, // M8.5 trust distribution
 		CABundlePEM: caPEM, Lighthouses: parseLighthouses(*cf.lighthouse), LighthouseSource: cf.lighthouseSource(s), Policy: cf.policy(s),
 		CABundleSource:  cf.caTrustSource(s, caPEM, audit), // M8: live CA-rotation trust bundle (seeds the current CA)
@@ -508,8 +508,8 @@ func cmdAdminAPI(args []string) {
 	if authHandler != nil {
 		top.Handle("/admin/v1/auth/", authHandler) // unauthenticated login/callback/logout
 	}
-	obs.Mount(top, obs.Cache(time.Second, obs.Check{Name: "database", Probe: s.Ping})) // /metrics + /healthz + /readyz (unauthenticated)
-	top.Handle("/admin/v1/", apiHandler)                                               // the JSON API
+	obs.Mount(top, obs.Cache(time.Second, obs.Check{Name: "database", Probe: s.Ping}))                            // /metrics + /healthz + /readyz (unauthenticated)
+	top.Handle("/admin/v1/", apiHandler)                                                                          // the JSON API
 	top.Handle("/", adminui.Handler(adminui.Config{Environment: *environment, InstallerBaseURL: *installerBase})) // the React console (or a "not built" stub)
 	handler := http.Handler(top)
 	if adminui.Embedded() {

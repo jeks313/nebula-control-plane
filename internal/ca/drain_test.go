@@ -100,7 +100,7 @@ func TestLiveDependentsUsesHeartbeatExpiry(t *testing.T) {
 	s, r := setup(t)
 	ctx := context.Background()
 	_, fp1, ca1, bk1 := mkCAWithBackend(t, "ca-1")
-	past := time.Now().Add(-48 * time.Hour)   // the frozen enroll cert lapsed 2 days ago
+	past := time.Now().Add(-48 * time.Hour)       // the frozen enroll cert lapsed 2 days ago
 	future := time.Now().Add(20 * 24 * time.Hour) // but the live (renewed) cert is valid 20 days out
 
 	// A renewed host: expired enroll cert_pem, ca_fingerprint = CA1, and a heartbeat proving its
@@ -191,10 +191,10 @@ func TestLiveDependents(t *testing.T) {
 	seedEnroll(t, s.DB, "e-explicit", "issued", mkLeafPEM(t, ca1, bk1, "host-a", future), fp1) // explicit fp
 	seedEnroll(t, s.DB, "e-fallback", "issued", mkLeafPEM(t, ca1, bk1, "host-b", future), "")  // Issuer() fallback
 	// NOT counted toward ca-1:
-	seedEnroll(t, s.DB, "e-expired", "issued", mkLeafPEM(t, ca1, bk1, "host-c", past), fp1) // expired
-	seedEnroll(t, s.DB, "e-pending", "pending", mkLeafPEM(t, ca1, bk1, "host-e", future), fp1) // not issued
+	seedEnroll(t, s.DB, "e-expired", "issued", mkLeafPEM(t, ca1, bk1, "host-c", past), fp1)        // expired
+	seedEnroll(t, s.DB, "e-pending", "pending", mkLeafPEM(t, ca1, bk1, "host-e", future), fp1)     // not issued
 	seedEnroll(t, s.DB, "e-garbage", "issued", "-----BEGIN X-----\nnot pem\n-----END X-----", fp1) // unparseable
-	seedEnroll(t, s.DB, "e-ca2", "issued", mkLeafPEM(t, ca2, bk2, "host-d", future), fp2) // a different CA
+	seedEnroll(t, s.DB, "e-ca2", "issued", mkLeafPEM(t, ca2, bk2, "host-d", future), fp2)          // a different CA
 
 	n1, err := r.LiveDependents(ctx, fp1)
 	if err != nil {

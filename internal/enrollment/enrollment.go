@@ -21,8 +21,8 @@ import (
 
 	"github.com/jeks313/nebula-control-plane/internal/awsattest"
 	"github.com/jeks313/nebula-control-plane/internal/bundle"
-	"github.com/jeks313/nebula-control-plane/internal/configsign"
 	"github.com/jeks313/nebula-control-plane/internal/cloudtrust"
+	"github.com/jeks313/nebula-control-plane/internal/configsign"
 	"github.com/jeks313/nebula-control-plane/internal/ipam"
 	"github.com/jeks313/nebula-control-plane/internal/joinkey"
 	"github.com/jeks313/nebula-control-plane/internal/jws"
@@ -120,8 +120,8 @@ type Enrollment struct {
 	// signing cut-over), so Harbor can count live leaves per CA for drain tracking. Empty until issued.
 	CAFingerprint string `gorm:"column:ca_fingerprint"`
 	CreatedAt     int64  `gorm:"column:created_at"`
-	DecidedAt   int64  `gorm:"column:decided_at"`
-	Approver    string `gorm:"column:approver"`
+	DecidedAt     int64  `gorm:"column:decided_at"`
+	Approver      string `gorm:"column:approver"`
 	// Ephemeral records whether this host joined via an ephemeral join key
 	// (joinkey.Ephemeral), captured at issue time. It is the foundation for the
 	// auto-reaping device lifecycle (impl 2.12, still future): for now it shortens the
@@ -191,7 +191,7 @@ type Config struct {
 	// ConfigSigner, if set, is the HOT-SWAPPABLE config-signing key (M8.5): a config-key cut-over
 	// re-points it with no restart. When set it supersedes ConfigBackend/ConfigKeyID (static fallback).
 	ConfigSigner *configsign.ConfigSigner
-	CABundlePEM   []byte         // CA cert PEM for the bundle's ca_bundle (static fallback)
+	CABundlePEM  []byte // CA cert PEM for the bundle's ca_bundle (static fallback)
 	// CABundleSource, if set, is consulted at bundle-build time so the CA rotation
 	// registry (M8) drives the bundle's ca_bundle live: it returns every NON-RETIRED CA
 	// (staged+active+draining), so a newly staged CA is trusted fleet-wide before it ever
@@ -1087,25 +1087,25 @@ func (c *Consumer) buildBundle(ctx context.Context, deviceName, ip string, group
 		pilotVer, pilotSHA, pilotURL = c.cfg.PilotReleaseFor(ctx, goos, goarch)
 	}
 	b := bundle.Bundle{
-		BundleVersion: 1,
-		IssuedAt:      c.now().UTC().Format(time.RFC3339),
-		Device:        bundle.Device{Name: deviceName, OverlayIP: ip, Groups: groups},
+		BundleVersion:     1,
+		IssuedAt:          c.now().UTC().Format(time.RFC3339),
+		Device:            bundle.Device{Name: deviceName, OverlayIP: ip, Groups: groups},
 		Certificate:       string(certPEM),
 		CABundle:          c.caBundle(ctx),
 		ConfigSigningKeys: c.configKeys(ctx),
 		ConfigKeyVersion:  c.configKeyVersion(ctx),
 		Firewall:          bundle.CompileFirewall(c.cfg.Policy, groups),
-		Lighthouses:   c.lighthouses(ctx),
-		Blocklist:     c.blocklist(ctx),
-		TunDev:        c.cfg.TunDev,
-		ListenPort:    c.cfg.ListenPort,
-		NebulaVersion: nebVer,
-		NebulaSHA256:  nebSHA,
-		NebulaURL:     nebURL,
-		PilotVersion:  pilotVer,
-		PilotSHA256:   pilotSHA,
-		PilotURL:      pilotURL,
-		NotAfter:      notAfter.UTC().Format(time.RFC3339),
+		Lighthouses:       c.lighthouses(ctx),
+		Blocklist:         c.blocklist(ctx),
+		TunDev:            c.cfg.TunDev,
+		ListenPort:        c.cfg.ListenPort,
+		NebulaVersion:     nebVer,
+		NebulaSHA256:      nebSHA,
+		NebulaURL:         nebURL,
+		PilotVersion:      pilotVer,
+		PilotSHA256:       pilotSHA,
+		PilotURL:          pilotURL,
+		NotAfter:          notAfter.UTC().Format(time.RFC3339),
 	}
 	return c.signBundle(b)
 }

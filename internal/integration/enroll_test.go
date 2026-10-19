@@ -35,20 +35,20 @@ import (
 )
 
 type enrollEnv struct {
-	cons        *enrollment.Consumer
-	store       *store.Store
-	ring        *nonce.Keyring
-	caPEM       []byte
-	pool        netip.Prefix
-	d           *queue.Durable   // shared gateway↔Core store (queue + results)
-	pinned      []*ecdsa.PublicKey // config-signing pubkey trusted set (Pilot pins this)
-	configKeyID string
-	sg          *signer.Signer
-	cfgB        signer.Backend
-	policy      *policy.Policy
-	rev         *revocation.Registry // cert blocklist (7.1); wired as BlocklistSource
-	caReg       *ca.Registry         // CA rotation registry (M8); wired as CABundleSource, seeded with the current CA
-	ckReg        *configkey.Registry     // config-key rotation registry (M8.5); wired as ConfigKeySource, seeded with the genesis config key
+	cons         *enrollment.Consumer
+	store        *store.Store
+	ring         *nonce.Keyring
+	caPEM        []byte
+	pool         netip.Prefix
+	d            *queue.Durable     // shared gateway↔Core store (queue + results)
+	pinned       []*ecdsa.PublicKey // config-signing pubkey trusted set (Pilot pins this)
+	configKeyID  string
+	sg           *signer.Signer
+	cfgB         signer.Backend
+	policy       *policy.Policy
+	rev          *revocation.Registry     // cert blocklist (7.1); wired as BlocklistSource
+	caReg        *ca.Registry             // CA rotation registry (M8); wired as CABundleSource, seeded with the current CA
+	ckReg        *configkey.Registry      // config-key rotation registry (M8.5); wired as ConfigKeySource, seeded with the genesis config key
 	configSigner *configsign.ConfigSigner // hot-swappable config-signing key (M8.5); shared by enroll + coreAPI
 	cfgPubPEM    []byte                   // the genesis config-signing PUBLIC key PEM (the pilot pin)
 }

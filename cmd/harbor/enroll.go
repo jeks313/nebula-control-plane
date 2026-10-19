@@ -302,7 +302,7 @@ func (cf *coreFlags) buildConsumer(s *store.Store, results enrollment.ResultSink
 		PilotVersion:     *cf.pilotVersion, PilotSHA256: *cf.pilotSHA256, PilotURL: *cf.pilotURL,
 		PilotReleaseFor: pilotReleaseFor,
 		ConfigBackend:   cfgB, ConfigKeyID: wire.PubkeyHash(cfgPub),
-		ConfigSigner: configSigner,                                                        // M8.5: hot-swappable config-signing key
+		ConfigSigner: configSigner,                                                                                 // M8.5: hot-swappable config-signing key
 		ConfigKeyPEM: cfgPubPEM, ConfigKeySource: configKeysSource, ConfigKeyVersionSource: configKeyVersionSource, // M8.5 trust distribution
 		CABundlePEM: caPEM, Lighthouses: parseLighthouses(*cf.lighthouse), LighthouseSource: cf.lighthouseSource(s), Policy: cf.policy(s),
 		CABundleSource:  cf.caTrustSource(s, caPEM, audit), // M8: live CA-rotation trust bundle (seeds the current CA)

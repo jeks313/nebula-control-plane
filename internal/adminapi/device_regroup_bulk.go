@@ -29,12 +29,12 @@ const (
 )
 
 type regroupReq struct {
-	NamePattern  string   `json:"name_pattern,omitempty"`
-	OverlayIPs   []string `json:"overlay_ips,omitempty"`
-	Add          []string `json:"add,omitempty"`
-	Remove       []string `json:"remove,omitempty"`
-	Replace      []string `json:"replace,omitempty"` // absolute set; ignores add/remove when present
-	IncludeStale bool     `json:"include_stale,omitempty"`
+	NamePattern  string       `json:"name_pattern,omitempty"`
+	OverlayIPs   []string     `json:"overlay_ips,omitempty"`
+	Add          []string     `json:"add,omitempty"`
+	Remove       []string     `json:"remove,omitempty"`
+	Replace      []string     `json:"replace,omitempty"` // absolute set; ignores add/remove when present
+	IncludeStale bool         `json:"include_stale,omitempty"`
 	Entries      []applyEntry `json:"entries,omitempty"` // apply path: the dry-run's confirmed entries
 }
 

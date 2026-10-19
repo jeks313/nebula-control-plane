@@ -39,8 +39,8 @@ const defaultMaxBytes = 128 << 20
 type Config struct {
 	Layout          paths.Layout
 	PinnedConfigPub []*ecdsa.PublicKey // verifies the bundle the desired version comes from (trusted set, M8.5)
-	NebulaPath      string           // the binary the supervisor execs
-	Restart         func() error     // supervised stop+start after a swap (optional)
+	NebulaPath      string             // the binary the supervisor execs
+	Restart         func() error       // supervised stop+start after a swap (optional)
 	// Healthy, if set, is the pilot-local rollback gate (ADR 0003 Phase 1c): after a
 	// swap + Restart it must report whether the NEW nebula actually came up and held.
 	// restartedAt is the instant just before Restart was requested, so the gate can
