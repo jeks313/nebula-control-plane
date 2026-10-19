@@ -223,7 +223,7 @@ func TestRenewRefusedForRevokedHost(t *testing.T) {
 		t.Fatalf("enroll: %v %s", err, res.Status)
 	}
 	ip := res.OverlayIP
-	fp := issuedRow(t, e, ip).Fingerprint
+	issuedRow(t, e, ip) // the issued row exists before any renew
 
 	// A renew BEFORE revocation succeeds (baseline).
 	body, _ := signRenew(t)
@@ -231,7 +231,7 @@ func TestRenewRefusedForRevokedHost(t *testing.T) {
 		t.Fatalf("pre-revocation renew status = %d; %s", rec.Code, rec.Body)
 	}
 	// The renew rotated the fingerprint; blocklist the NEW current one.
-	fp = issuedRow(t, e, ip).Fingerprint
+	fp := issuedRow(t, e, ip).Fingerprint
 	if _, err := e.rev.Add(ctx, fp, "compromised — REVOKE", "operator"); err != nil {
 		t.Fatalf("blocklist add: %v", err)
 	}

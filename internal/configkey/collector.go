@@ -2,6 +2,7 @@ package configkey
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"sync"
 	"time"
@@ -78,7 +79,7 @@ func registerOn(reg prometheus.Registerer, c *Collector) error {
 		return nil
 	}
 	if err := reg.Register(c); err != nil {
-		if _, ok := err.(prometheus.AlreadyRegisteredError); ok {
+		if are := (prometheus.AlreadyRegisteredError{}); errors.As(err, &are) {
 			regDone = true
 			return nil
 		}

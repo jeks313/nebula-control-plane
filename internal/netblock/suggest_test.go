@@ -1,6 +1,7 @@
 package netblock
 
 import (
+	"errors"
 	"net/netip"
 	"testing"
 )
@@ -108,13 +109,13 @@ func TestSuggestWorstFitUnderPressure(t *testing.T) {
 // TestSuggestPoolFull: no aligned /P slot anywhere -> ErrPoolFull.
 func TestSuggestPoolFull(t *testing.T) {
 	pool := "10.44.0.0/30" // a /30 cannot contain any /27 -> bad prefix len, not pool-full
-	if _, err := Suggest(27, mustP(pool), nil, nil); err != ErrBadPrefixLen {
+	if _, err := Suggest(27, mustP(pool), nil, nil); !errors.Is(err, ErrBadPrefixLen) {
 		t.Fatalf("err = %v, want ErrBadPrefixLen", err)
 	}
 	// A /26 pool holds exactly two /27 slots; carve both, then a third request is full.
 	pool = "10.44.0.0/26"
 	carves := []netip.Prefix{mustP("10.44.0.0/27"), mustP("10.44.0.32/27")}
-	if _, err := Suggest(27, mustP(pool), nil, carves); err != ErrPoolFull {
+	if _, err := Suggest(27, mustP(pool), nil, carves); !errors.Is(err, ErrPoolFull) {
 		t.Fatalf("err = %v, want ErrPoolFull", err)
 	}
 }

@@ -40,6 +40,14 @@ linters:
         # False-positives on reassigning a NAMED return (err = ...); the suggested
         # err := would shadow the named return. This codebase uses named returns.
         - sloppyReassign
+        # Same calls as the shared baseline (jeks313/fleet .golangci.yml):
+        # filepath.Join("/proc", x) is the readable form, types sit by their
+        # use, and (a, b T) vs (a T, b T) is taste.
+        - filepathJoin
+        - typeDefFirst
+        - paramTypeCombine
+        # `P` mirrors the /P prefix-length notation in netblock.
+        - captLocal
     revive:
       rules:
         - name: exported            # exported identifiers want doc comments
@@ -55,6 +63,9 @@ linters:
     paths:
       - spike
     rules:
+      # !(a || b) reads better than De Morgan for range checks.
+      - linters: [staticcheck]
+        text: "QF1001:"
       # Tests may ignore errors, leak response bodies, and skip doc comments.
       - path: _test\.go
         linters:

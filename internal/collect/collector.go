@@ -324,7 +324,7 @@ func (c *Collector) post(ctx context.Context, client *http.Client, gw Gateway, p
 }
 
 func (c *Collector) get(ctx context.Context, client *http.Client, gw Gateway, path string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, gw.URL+path, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, gw.URL+path, http.NoBody)
 	if err != nil {
 		return err
 	}

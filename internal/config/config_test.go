@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -145,13 +146,13 @@ func TestErrNoKind(t *testing.T) {
 	s, actions := setup(t)
 	cs := newStore(s, actions)
 	ctx := context.Background()
-	if _, err := cs.Get(ctx, ""); err != ErrNoKind {
+	if _, err := cs.Get(ctx, ""); !errors.Is(err, ErrNoKind) {
 		t.Fatalf("Get empty kind = %v, want ErrNoKind", err)
 	}
-	if _, err := cs.Set(ctx, "", []byte("x"), "a"); err != ErrNoKind {
+	if _, err := cs.Set(ctx, "", []byte("x"), "a"); !errors.Is(err, ErrNoKind) {
 		t.Fatalf("Set empty kind = %v, want ErrNoKind", err)
 	}
-	if _, err := cs.SeedIfEmpty(ctx, "", []byte("x"), "a"); err != ErrNoKind {
+	if _, err := cs.SeedIfEmpty(ctx, "", []byte("x"), "a"); !errors.Is(err, ErrNoKind) {
 		t.Fatalf("SeedIfEmpty empty kind = %v, want ErrNoKind", err)
 	}
 }

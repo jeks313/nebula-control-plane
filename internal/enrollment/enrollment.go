@@ -1024,6 +1024,8 @@ func (c *Consumer) certTTL(ephemeral bool) time.Duration {
 // scope, or — later — an SSO entry); method is token | aws-sigv4 | sso (ADR 0010).
 // ephemeral shortens the cert validity (certTTL) for an ephemeral-join-key host; it is
 // the join-key Ephemeral flag threaded through from processToken / re-derived on Approve.
+//
+//nolint:gocritic // tooManyResultsChecker: one chokepoint returns everything an issuance records
 func (c *Consumer) issue(ctx context.Context, actor, deviceName string, pubBytes []byte, groups []string, netblockName, method string, ephemeral bool) (ip netip.Addr, certPEM []byte, fingerprint string, caFingerprint string, notAfter time.Time, err error) {
 	// CHOKEPOINT (P10): ordinary enrollment must NEVER mint a reserved group
 	// (control-plane/lighthouse). All auto-issue methods (token/aws-sigv4/sso) AND admin

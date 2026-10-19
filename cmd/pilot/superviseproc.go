@@ -29,9 +29,7 @@ type superviseProc struct {
 // process walk (findSuperviseProcOS); tests override it to inject a result without a real
 // /proc. It returns a zero superviseProc (Running:false) when no match is found or the
 // platform has no implementation.
-var findSuperviseProc = func(base string) superviseProc {
-	return findSuperviseProcOS(base)
-}
+var findSuperviseProc = findSuperviseProcOS
 
 // parseSuperviseArgs decides whether a process's argv is a `pilot supervise` invocation
 // targeting the mesh state dir base, and if so extracts its `-core <url>` value. It is the

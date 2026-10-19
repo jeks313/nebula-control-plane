@@ -120,8 +120,8 @@ type Resolved struct {
 	Reserved bool // true for kind=reserved (control-plane, e.g. central) — never fillable by a join source
 }
 
-// IDResolver, when implemented by the resolver, lets the allocator record the
-// netblock_id provenance and decide auto-grow eligibility. *netblock.Registry
+// IDResolver is optional: when the resolver implements it, the allocator records the
+// netblock_id provenance and decides auto-grow eligibility. *netblock.Registry
 // implements it; the static map does not (provenance stays 0).
 type IDResolver interface {
 	ResolveFull(ctx context.Context, name string) (Resolved, error)

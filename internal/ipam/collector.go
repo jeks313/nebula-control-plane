@@ -2,6 +2,7 @@ package ipam
 
 import (
 	"context"
+	"errors"
 	"net/netip"
 	"sync"
 	"time"
@@ -204,7 +205,7 @@ func registerNetblockCollectorOn(reg prometheus.Registerer, c *NetblockCollector
 		return nil // already registered in this process — no-op (no double-register panic)
 	}
 	if err := reg.Register(c); err != nil {
-		if _, ok := err.(prometheus.AlreadyRegisteredError); ok {
+		if are := (prometheus.AlreadyRegisteredError{}); errors.As(err, &are) {
 			collectorRegDone = true
 			return nil // a collector with this name is already present — treat as success
 		}
