@@ -157,7 +157,7 @@ func (s *Server) handleSSOStart(w http.ResponseWriter, r *http.Request) {
 		wire.WriteError(w, wire.CodeInvalidRequest, "missing 'nonce'")
 		return
 	}
-	if len(redirect) == 0 || len(redirect) > maxLoopbackRedirect {
+	if redirect == "" || len(redirect) > maxLoopbackRedirect {
 		wire.WriteError(w, wire.CodeInvalidRequest, "missing or oversized 'redirect'")
 		return
 	}

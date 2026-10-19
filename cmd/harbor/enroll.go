@@ -302,7 +302,7 @@ func (cf *coreFlags) buildConsumer(s *store.Store, results enrollment.ResultSink
 		PilotVersion:     *cf.pilotVersion, PilotSHA256: *cf.pilotSHA256, PilotURL: *cf.pilotURL,
 		PilotReleaseFor: pilotReleaseFor,
 		ConfigBackend:   cfgB, ConfigKeyID: wire.PubkeyHash(cfgPub),
-		ConfigSigner: configSigner,                                                        // M8.5: hot-swappable config-signing key
+		ConfigSigner: configSigner,                                                                                 // M8.5: hot-swappable config-signing key
 		ConfigKeyPEM: cfgPubPEM, ConfigKeySource: configKeysSource, ConfigKeyVersionSource: configKeyVersionSource, // M8.5 trust distribution
 		CABundlePEM: caPEM, Lighthouses: parseLighthouses(*cf.lighthouse), LighthouseSource: cf.lighthouseSource(s), Policy: cf.policy(s),
 		CABundleSource:  cf.caTrustSource(s, caPEM, audit), // M8: live CA-rotation trust bundle (seeds the current CA)
@@ -354,8 +354,8 @@ func (cf *coreFlags) loadBackend(softKey, label, kmsKeyID, what string) signer.B
 		}
 		return b
 	case "pkcs11":
-		b, err := signer.NewPKCS11Backend(signer.PKCS11Config{ModulePath: *cf.module, TokenLabel: *cf.token, Pin: *cf.pin, KeyLabel: label})
-		if err != nil {
+		b, err := signer.NewPKCS11Backend(signer.PKCS11Config{ModulePath: *cf.module, TokenLabel: *cf.token, Pin: *cf.pin, KeyLabel: label}) //nolint:staticcheck // SA4023: no pkcs11 build tag
+		if err != nil {                                                                                                                      //nolint:staticcheck // SA4023: always true without the pkcs11 build tag
 			fatalf("enroll: %s pkcs11: %v", what, err)
 		}
 		return b

@@ -46,7 +46,7 @@ func statsListenAddr(cfg []byte) string {
 	inStats := false
 	for sc.Scan() {
 		line := sc.Text()
-		if len(line) > 0 && line[0] != ' ' && line[0] != '\t' { // a top-level key resets the section
+		if line != "" && line[0] != ' ' && line[0] != '\t' { // a top-level key resets the section
 			inStats = strings.HasPrefix(line, "stats:")
 			continue
 		}
@@ -67,7 +67,7 @@ func stripStatsBlock(cfg []byte) []byte {
 	skipping := false
 	for sc.Scan() {
 		line := sc.Text()
-		if len(line) > 0 && line[0] != ' ' && line[0] != '\t' { // a top-level key
+		if line != "" && line[0] != ' ' && line[0] != '\t' { // a top-level key
 			skipping = strings.HasPrefix(line, "stats:")
 			if skipping {
 				continue // drop the `stats:` line itself

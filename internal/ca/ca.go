@@ -108,7 +108,7 @@ func New(db *gorm.DB, audit AuditFunc) *Registry {
 func parseCA(pem string) (fingerprint string, notAfter time.Time, err error) {
 	c, _, perr := cert.UnmarshalCertificateFromPEM([]byte(pem))
 	if perr != nil {
-		return "", time.Time{}, fmt.Errorf("%w: %v", ErrInvalidCert, perr)
+		return "", time.Time{}, fmt.Errorf("%w: %w", ErrInvalidCert, perr)
 	}
 	if !c.IsCA() {
 		return "", time.Time{}, fmt.Errorf("%w: not a CA certificate", ErrInvalidCert)

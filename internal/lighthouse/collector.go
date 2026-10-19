@@ -2,6 +2,7 @@ package lighthouse
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -59,6 +60,7 @@ type Collector struct {
 // NewCollector builds the collector over a store DB.
 func NewCollector(db *gorm.DB) *Collector { return &Collector{db: db, now: time.Now} }
 
+// Describe implements prometheus.Collector.
 func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- descCertExpiry
 	ch <- descRotationLastRun
@@ -73,6 +75,7 @@ type lhEnroll struct {
 	CertPEM    []byte `gorm:"column:cert_pem"`
 }
 
+// Collect implements prometheus.Collector.
 func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	if c == nil || c.db == nil {
 		return
@@ -137,7 +140,7 @@ func registerOn(reg prometheus.Registerer, c *Collector) error {
 		return nil
 	}
 	if err := reg.Register(c); err != nil {
-		if _, ok := err.(prometheus.AlreadyRegisteredError); ok {
+		if are := (prometheus.AlreadyRegisteredError{}); errors.As(err, &are) {
 			regDone = true
 			return nil
 		}

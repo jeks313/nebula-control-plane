@@ -22,8 +22,8 @@ func TestWithSNIFallback(t *testing.T) {
 
 	cases := map[string]string{
 		"known SNI":   "gw.example.com",
-		"empty SNI":   "",            // an NLB HTTPS health check sends none
-		"unknown SNI": "10.99.2.30",  // or it connects by IP
+		"empty SNI":   "",           // an NLB HTTPS health check sends none
+		"unknown SNI": "10.99.2.30", // or it connects by IP
 		"other host":  "evil.example",
 	}
 	for name, sni := range cases {

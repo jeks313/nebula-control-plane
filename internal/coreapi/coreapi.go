@@ -53,7 +53,7 @@ type Heartbeat struct {
 	ClockOffsetMs           int    `gorm:"column:clock_offset_ms"`
 	Health                  string `gorm:"column:health"`
 	LastSeen                int64  `gorm:"column:last_seen"`
-	TrustedCAs              string `gorm:"column:trusted_cas"` // JSON array of CA fingerprints this host reported trusting (from its applied ca_bundle, M8.1)
+	TrustedCAs              string `gorm:"column:trusted_cas"`         // JSON array of CA fingerprints this host reported trusting (from its applied ca_bundle, M8.1)
 	TrustedConfigKeys       string `gorm:"column:trusted_config_keys"` // JSON array of config-signing key fingerprints this host trusts (applied config_signing_keys UNION pin, M8.5); CASE-SENSITIVE base64url
 }
 
@@ -581,8 +581,8 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		AppliedBlocklistVersion: req.AppliedBlocklistVersion, AppliedNebulaVersion: appliedNebula,
 		AppliedPilotVersion: appliedPilot,
 		ClockOffsetMs:       req.ClockOffsetMs, Health: req.Health, LastSeen: s.now().UnixNano(),
-		TrustedCAs:          trustedCAs,
-		TrustedConfigKeys:   trustedConfigKeys,
+		TrustedCAs:        trustedCAs,
+		TrustedConfigKeys: trustedConfigKeys,
 	}
 	if err := s.cfg.Store.DB.WithContext(ctx).Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "overlay_ip"}},
@@ -725,7 +725,7 @@ func inDrainWave(overlayIP string, startedNS, windowNS, nowNS int64) bool {
 	}
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(overlayIP))
-	bucket := int64(h.Sum32() % 100)   // stable per-host in [0,99]
+	bucket := int64(h.Sum32() % 100)     // stable per-host in [0,99]
 	admitted := elapsed * 100 / windowNS // grows 0..99 as the window elapses
 	return bucket <= admitted
 }
@@ -969,26 +969,26 @@ func (s *Server) assembleBundle(ctx context.Context, dev enrollment.Enrollment, 
 	nebVer, nebSHA, nebURL := s.nebulaRelease(ctx, dev.OverlayIP, dev.GOOS, dev.GOARCH)
 	pilotVer, pilotSHA, pilotURL := s.pilotRelease(ctx, dev.OverlayIP, dev.GOOS, dev.GOARCH)
 	return bundle.Bundle{
-		BundleVersion:    s.bundleVersion(ctx, dev.OverlayIP),
-		BlocklistVersion: s.blocklistVersion(ctx),
-		IssuedAt:         s.now().UTC().Format(time.RFC3339),
-		Device:           bundle.Device{Name: dev.DeviceName, OverlayIP: dev.OverlayIP, Groups: groups},
+		BundleVersion:     s.bundleVersion(ctx, dev.OverlayIP),
+		BlocklistVersion:  s.blocklistVersion(ctx),
+		IssuedAt:          s.now().UTC().Format(time.RFC3339),
+		Device:            bundle.Device{Name: dev.DeviceName, OverlayIP: dev.OverlayIP, Groups: groups},
 		Certificate:       certPEM,
 		CABundle:          s.caBundle(ctx),
 		ConfigSigningKeys: s.configKeys(ctx),
 		ConfigKeyVersion:  s.configKeyVersion(ctx),
 		Firewall:          bundle.CompileFirewall(s.cfg.Policy, groups),
-		Lighthouses:      s.lighthouses(ctx),
-		Blocklist:        s.blocklist(ctx),
-		TunDev:           s.cfg.TunDev,
-		ListenPort:       s.cfg.ListenPort,
-		NebulaVersion:    nebVer,
-		NebulaSHA256:     nebSHA,
-		NebulaURL:        nebURL,
-		PilotVersion:     pilotVer,
-		PilotSHA256:      pilotSHA,
-		PilotURL:         pilotURL,
-		NotAfter:         notAfter.UTC().Format(time.RFC3339),
+		Lighthouses:       s.lighthouses(ctx),
+		Blocklist:         s.blocklist(ctx),
+		TunDev:            s.cfg.TunDev,
+		ListenPort:        s.cfg.ListenPort,
+		NebulaVersion:     nebVer,
+		NebulaSHA256:      nebSHA,
+		NebulaURL:         nebURL,
+		PilotVersion:      pilotVer,
+		PilotSHA256:       pilotSHA,
+		PilotURL:          pilotURL,
+		NotAfter:          notAfter.UTC().Format(time.RFC3339),
 	}
 }
 

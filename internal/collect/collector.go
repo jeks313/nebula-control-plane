@@ -115,7 +115,7 @@ type Config struct {
 	Resolver    Resolver        // delivery-reconcile: re-derive results for decided enrollments (nil disables the lane)
 	DeliveryTTL time.Duration   // how long a delivered issued/denied result stays fetchable (0 -> 24h)
 	Logger      *slog.Logger
-	Health      HealthSink      // optional: persist per-gateway cycle health for the console
+	Health      HealthSink // optional: persist per-gateway cycle health for the console
 }
 
 // New builds a Collector.
@@ -324,7 +324,7 @@ func (c *Collector) post(ctx context.Context, client *http.Client, gw Gateway, p
 }
 
 func (c *Collector) get(ctx context.Context, client *http.Client, gw Gateway, path string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, gw.URL+path, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, gw.URL+path, http.NoBody)
 	if err != nil {
 		return err
 	}

@@ -152,7 +152,7 @@ func (s *ConfigSigner) ReconcileActiveConfigKey(ctx context.Context, active func
 	}
 	pub, _, curve, perr := cert.UnmarshalPublicKeyFromPEM([]byte(ref.PubPEM))
 	if perr != nil || curve != cert.Curve_P256 {
-		return false, fmt.Errorf("configsign: parse active config key %s: %v", ref.Fingerprint, perr)
+		return false, fmt.Errorf("configsign: parse active config key %s: %v", ref.Fingerprint, perr) //nolint:errorlint // perr is nil on a wrong curve
 	}
 	backend, ferr := factory(ctx, ref.KMSKeyID, pub)
 	if ferr != nil {

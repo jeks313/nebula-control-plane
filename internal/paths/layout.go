@@ -56,7 +56,9 @@ func (l Layout) Bundle() string { return filepath.Join(l.Base, "bundle.json") }
 // (config-signing.pub) is always trusted in addition to these, so a rotation adds a second trusted
 // key without ever un-pinning the root. Re-read at every bundle verify so a running pilot accepts the
 // post-cut-over key mid-run; monotonic by version so a replayed old bundle can't regress the set.
-func (l Layout) ConfigSigningTrust() string { return filepath.Join(l.Base, "config-signing-trust.json") }
+func (l Layout) ConfigSigningTrust() string {
+	return filepath.Join(l.Base, "config-signing-trust.json")
+}
 
 // NebulaPid holds the running nebula PID across a pilot re-exec self-update, so the
 // re-exec'd pilot can re-adopt the data plane the previous pilot left running (ADR

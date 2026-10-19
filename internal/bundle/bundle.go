@@ -50,11 +50,11 @@ type Bundle struct {
 	// tracked separately from BundleVersion (the policy-lane version) so a blocklist
 	// rollout converges independently of a policy rollout. The host reports it back
 	// as applied_blocklist_version.
-	BlocklistVersion int             `json:"blocklist_version,omitempty"`
-	IssuedAt         string          `json:"issued_at"`
-	Device           Device          `json:"device"`
-	Certificate      string          `json:"certificate"` // leaf cert PEM
-	CABundle         []string        `json:"ca_bundle"`   // CA cert PEM(s)
+	BlocklistVersion int      `json:"blocklist_version,omitempty"`
+	IssuedAt         string   `json:"issued_at"`
+	Device           Device   `json:"device"`
+	Certificate      string   `json:"certificate"` // leaf cert PEM
+	CABundle         []string `json:"ca_bundle"`   // CA cert PEM(s)
 	// ConfigSigningKeys is the fleet's TRUSTED set of config-signing PUBLIC-key PEMs (M8.5,
 	// design §4.6/§4.8). Pilot verifies this bundle against ANY key in its trusted set = its
 	// permanent pin UNION these; sourced live from the config-key rotation registry (every
@@ -68,8 +68,8 @@ type Bundle struct {
 	// axis (like BlocklistVersion). Pilot uses it to fail-SAFE against a replayed OLD bundle
 	// regressing its learned trusted set: it adopts the set only from a bundle at least as new as
 	// the last it applied (the permanent pin is always present + exempt from the guard).
-	ConfigKeyVersion int64     `json:"config_key_version,omitempty"`
-	Firewall         *Firewall `json:"firewall,omitempty"`
+	ConfigKeyVersion int64           `json:"config_key_version,omitempty"`
+	Firewall         *Firewall       `json:"firewall,omitempty"`
 	Config           json.RawMessage `json:"config,omitempty"`
 	Lighthouses      []Lighthouse    `json:"lighthouses"`
 	// Blocklist is the fleet's revoked cert fingerprints (hex sha256), rendered

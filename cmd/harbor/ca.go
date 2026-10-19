@@ -117,10 +117,10 @@ func cmdGenesis(args []string) {
 		}
 		caB, cfgB = caSoft, cfgSoft
 	case "pkcs11":
-		if caB, err = signer.NewPKCS11Backend(signer.PKCS11Config{ModulePath: *module, TokenLabel: *token, Pin: *pin, KeyLabel: *caLabel}); err != nil {
+		if caB, err = signer.NewPKCS11Backend(signer.PKCS11Config{ModulePath: *module, TokenLabel: *token, Pin: *pin, KeyLabel: *caLabel}); err != nil { //nolint:staticcheck // SA4023: always true without the pkcs11 build tag
 			fatalf("genesis: CA backend: %v", err)
 		}
-		if cfgB, err = signer.NewPKCS11Backend(signer.PKCS11Config{ModulePath: *module, TokenLabel: *token, Pin: *pin, KeyLabel: *cfgLabel}); err != nil {
+		if cfgB, err = signer.NewPKCS11Backend(signer.PKCS11Config{ModulePath: *module, TokenLabel: *token, Pin: *pin, KeyLabel: *cfgLabel}); err != nil { //nolint:staticcheck // SA4023: always true without the pkcs11 build tag
 			fatalf("genesis: config-signing backend: %v", err)
 		}
 	case "kms":

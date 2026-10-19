@@ -56,10 +56,12 @@ const (
 	StateRetired  State = "retired"  // distrusted; out of the trust set; eligible for key deletion
 )
 
-// KeyDeleter and NoopKeyDeleter are reused verbatim from the CA package (the KMS
+// The key deleters are reused verbatim from the CA package (the KMS
 // schedule/cancel-deletion contract is identical for a config-signing key).
 type (
-	KeyDeleter     = ca.KeyDeleter
+	// KeyDeleter is ca.KeyDeleter.
+	KeyDeleter = ca.KeyDeleter
+	// NoopKeyDeleter is ca.NoopKeyDeleter.
 	NoopKeyDeleter = ca.NoopKeyDeleter
 )
 
@@ -117,13 +119,13 @@ func New(db *gorm.DB, audit AuditFunc) *Registry {
 func parseConfigPub(pem string) (fingerprint string, err error) {
 	pub, _, curve, perr := cert.UnmarshalPublicKeyFromPEM([]byte(pem))
 	if perr != nil {
-		return "", fmt.Errorf("%w: %v", ErrInvalidPub, perr)
+		return "", fmt.Errorf("%w: %w", ErrInvalidPub, perr)
 	}
 	if curve != cert.Curve_P256 {
 		return "", fmt.Errorf("%w: curve is %s, only P256 is supported", ErrInvalidPub, curve)
 	}
 	if _, perr := jws.ParseP256PublicPoint(pub); perr != nil { // ensure it is a real curve point, not garbage
-		return "", fmt.Errorf("%w: %v", ErrInvalidPub, perr)
+		return "", fmt.Errorf("%w: %w", ErrInvalidPub, perr)
 	}
 	return wire.PubkeyHash(pub), nil
 }

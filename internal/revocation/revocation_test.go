@@ -169,9 +169,9 @@ func TestAddRejectsMalformedFingerprint(t *testing.T) {
 		colon.WriteString(up[i : i+2])
 	}
 	for _, bad := range []string{
-		colon.String(),            // AA:AA:... (colons are not hex)
-		real[:63],                 // too short
-		real + "a",                // too long
+		colon.String(), // AA:AA:... (colons are not hex)
+		real[:63],      // too short
+		real + "a",     // too long
 		"totally-not-a-fingerprint",
 		strings.Repeat("g", 64), // right length, non-hex
 	} {

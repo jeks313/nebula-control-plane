@@ -146,11 +146,12 @@ func splitCompact(s string) (string, compactTail, bool) {
 		if s[i] != '.' {
 			continue
 		}
-		if first < 0 {
+		switch {
+		case first < 0:
 			first = i
-		} else if second < 0 {
+		case second < 0:
 			second = i
-		} else {
+		default:
 			return "", compactTail{}, false // more than two dots
 		}
 	}
