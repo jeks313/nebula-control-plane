@@ -21,7 +21,7 @@ jobs:
         with:
           # Explicit, not go-version-file: Renovate never bumps go.mod's go
           # directive, and govulncheck flags an old stdlib.
-          go-version: '1.27.2'
+          go-version: '1.27.3'
       - run: go vet ./...
       - run: go test ./...
       - name: golangci-lint
@@ -47,7 +47,7 @@ jobs:
           cache-dependency-path: ui/package-lock.json
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: '1.27.2'
+          go-version: '1.27.3'
       - run: npm ci
         working-directory: ui
       - run: npm run typecheck
@@ -67,7 +67,7 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: '1.27.2'
+          go-version: '1.27.3'
       # The CLI, not gitleaks-action: the action left MIT at v2.
       - name: gitleaks
         env:
