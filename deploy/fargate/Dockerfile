@@ -2,7 +2,7 @@
 # The gateway is a static, cgo-free Go binary; alpine gives a tiny image with a shell
 # for the entrypoint that materializes Secrets-Manager-injected config to files.
 # Build via deploy/fargate/build-push.sh (it stages the `gateway` binary alongside).
-FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+FROM alpine:3.24@sha256:71e9b7bae160ba167fa17414401b94cbcdaf3c32feeab9298bd794a2a0614c35
 RUN apk add --no-cache ca-certificates
 COPY gateway /usr/local/bin/gateway
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
