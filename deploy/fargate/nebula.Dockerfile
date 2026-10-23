@@ -4,7 +4,7 @@
 # (pin matches the terraform nebula_version / nebula_sha256 defaults). The entrypoint
 # materializes the Secrets-Manager-injected identity + renders the lighthouse config.
 # Build via deploy/fargate/build-push.sh lighthouse.
-FROM alpine:3.24@sha256:71e9b7bae160ba167fa17414401b94cbcdaf3c32feeab9298bd794a2a0614c35 AS fetch
+FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a AS fetch
 ARG NEBULA_VERSION=1.10.3
 ARG NEBULA_SHA256=""
 RUN apk add --no-cache curl tar
@@ -14,7 +14,7 @@ RUN set -eu; \
     if [ -n "$NEBULA_SHA256" ]; then echo "${NEBULA_SHA256}  /tmp/nebula.tgz" | sha256sum -c -; fi; \
     tar -xzf /tmp/nebula.tgz -C /usr/local/bin nebula
 
-FROM alpine:3.24@sha256:71e9b7bae160ba167fa17414401b94cbcdaf3c32feeab9298bd794a2a0614c35
+FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
 RUN apk add --no-cache ca-certificates
 COPY --from=fetch /usr/local/bin/nebula /usr/local/bin/nebula
 COPY nebula-entrypoint.sh /usr/local/bin/nebula-entrypoint.sh
