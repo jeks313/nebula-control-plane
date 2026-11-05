@@ -14,7 +14,7 @@ require (
 	github.com/getkin/kin-openapi v0.152.0
 	github.com/glebarez/sqlite v1.11.0
 	github.com/go-gormigrate/gormigrate/v2 v2.1.7
-	github.com/go-jose/go-jose/v4 v4.1.7
+	github.com/go-jose/go-jose/v4 v4.1.8
 	github.com/jackc/pgx/v5 v5.12.0
 	github.com/libdns/cloudflare v0.2.2
 	github.com/mattermost/xml-roundtrip-validator v0.1.0
