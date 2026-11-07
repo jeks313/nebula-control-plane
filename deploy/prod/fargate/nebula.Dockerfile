@@ -8,7 +8,7 @@
 # release; the final distroless image carries only nebula + the shim.
 # Build via deploy/prod/fargate/build-push.sh lighthouse (it stages the static `nebula-boot`).
 # TODO (ADR 0006 Phase 3): pin the distroless base by @sha256 digest for reproducible builds.
-FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a AS fetch
+FROM alpine:3.24@sha256:3f4d6b32e26703c6082839234f43769d5046b3ac7c910033911d1e71d8cd630a AS fetch
 ARG NEBULA_VERSION=1.10.3
 ARG NEBULA_SHA256=""
 RUN apk add --no-cache curl tar
